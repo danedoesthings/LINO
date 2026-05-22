@@ -1,154 +1,21 @@
-import re, base64, struct, hashlib, itertools, string
-from collections import Counter, defaultdict
+import re, base64, struct, string, itertools
+from collections import Counter
 
-class WeAreDevsLifter:
-    def __init__(self):
-        self.detected_cmap = None
-        self.detected_shuffle = None
-
-    def lift(self, source):
-        results = []
-        cmaps = self._detect_all_base64_maps(source)
-        if not cmaps:
-            return results
-        n_tables = self._extract_all_n_tables(source)
-        if not n_tables:
-            return results
-        shuffle_sets = self._extract_all_shuffle_sets(source)
-        for cmap in cmaps:
-            for n_table in n_tables:
-                working = list(n_table)
-                for shuffle_pair in shuffle_sets:
-                    working = self._apply_shuffle(working, shuffle_pair)
-                for s in working:
-                    decoded = self._decode_custom_b64(s, cmap)
-                    if decoded and len(decoded) > 4:
-                        results.append(decoded)
-        return results
-
-    def _detect_all_base64_maps(self, source):
-        maps = []
-        patterns = [
-            r'local\s+(\w+)\s*=\s*\{([^}]{60,})\}',
-            r'(\w+)\s*=\s*\{([^}]{60,})\}',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, source):
-                var_name = m.group(1)
-                table_body = m.group(2)
-                entries = re.findall(r'\[(\d+)\]\s*=\s*"(.+?)"', table_body)
-                if not entries:
-                    entries = re.findall(r'"(.+?)"', table_body)
-                    if entries:
-                        entries = [(str(i), entries[i]) for i in range(len(entries))]
-                if len(entries) >= 62:
-                    cmap = {}
-                    for idx_str, val in entries:
-                        try:
-                            cmap[int(idx_str)] = val
-                        except ValueError:
-                            continue
-                    if len(cmap) >= 62:
-                        maps.append(cmap)
-        return maps
-
-    def _extract_all_n_tables(self, source):
-        tables = []
-        patterns = [
-            r'local\s+(\w+)\s*=\s*\{([^}]+)\}',
-            r'(\w+)\s*=\s*\{([^}]+)\}',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, source):
-                body = m.group(2)
-                strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
-                if len(strings) >= 10:
-                    processed = []
-                    for s in strings:
-                        try:
-                            processed.append(self._unescape_lua_string(s))
-                        except Exception:
-                            processed.append(s)
-                    if any(len(s) > 20 for s in processed):
-                        tables.append(processed)
-        return tables
-
-    def _extract_all_shuffle_sets(self, source):
-        sets = []
-        patterns = [
-            r'for\s+\w+\s*=\s*(\d+)\s*,\s*(\d+)\s*do\s+(\w+)\[(\w+)\]\s*=\s*(\w+)\[(\w+)\]',
-            r'(\w+)\[(\w+)\],\s*(\w+)\[(\w+)\]\s*=\s*(\w+)\[(\w+)\],\s*(\w+)\[(\w+)\]',
-            r'local\s+\w+\s*=\s*\{([^}]+)\}',
-        ]
-        shuffle_arrays = []
-        for pat in [r'local\s+(\w+)\s*=\s*\{([\d,\s]+)\}']:
-            for m in re.finditer(pat, source):
-                nums = re.findall(r'\d+', m.group(2))
-                if len(nums) >= 4 and len(nums) % 2 == 0:
-                    pairs = []
-                    for i in range(0, len(nums), 2):
-                        pairs.append((int(nums[i]), int(nums[i+1])))
-                    shuffle_arrays.append(pairs)
-        return shuffle_arrays
-
-    def _apply_shuffle(self, working, shuffle_pairs):
-        result = list(working)
-        for a, b in shuffle_pairs:
-            lo, hi = a - 1, b - 1
-            if 0 <= lo < len(result) and 0 <= hi < len(result) and lo < hi:
-                result[lo:hi+1] = result[lo:hi+1][::-1]
-        return result
-
-    def _decode_custom_b64(self, encoded_str, cmap):
-        try:
-            if len(cmap) < 64:
-                return None
-            reverse_map = {}
-            for k, v in cmap.items():
-                if isinstance(v, str) and len(v) >= 1:
-                    reverse_map[v] = k
-            if not reverse_map:
-                return None
-            bit_buffer = 0
-            bits_collected = 0
-            result = bytearray()
-            for char in encoded_str:
-                if char == '=':
-                    break
-                if char not in reverse_map:
-                    continue
-                val = reverse_map[char]
-                bit_buffer = (bit_buffer << 6) | val
-                bits_collected += 6
-                while bits_collected >= 8:
-                    bits_collected -= 8
-                    result.append((bit_buffer >> bits_collected) & 0xFF)
-            return bytes(result)
-        except Exception:
-            return None
-
-    @staticmethod
-    def _unescape_lua_string(s):
+class BaseLifter:
+    def _unescape_lua_string(self, s):
         result = []
         i = 0
         while i < len(s):
             if s[i] == '\\' and i + 1 < len(s):
-                next_char = s[i+1]
-                if next_char == 'n':
-                    result.append('\n')
-                elif next_char == 'r':
-                    result.append('\r')
-                elif next_char == 't':
-                    result.append('\t')
-                elif next_char == '\\':
-                    result.append('\\')
-                elif next_char == '"':
-                    result.append('"')
-                elif next_char == "'":
-                    result.append("'")
-                elif next_char == '0':
-                    result.append('\0')
-                elif next_char.isdigit():
+                nc = s[i+1]
+                if nc == 'n': result.append('\n')
+                elif nc == 'r': result.append('\r')
+                elif nc == 't': result.append('\t')
+                elif nc == '\\': result.append('\\')
+                elif nc == '"': result.append('"')
+                elif nc == "'": result.append("'")
+                elif nc == '0': result.append('\0')
+                elif nc.isdigit():
                     j = i + 1
                     while j < len(s) and s[j].isdigit() and j - i <= 4:
                         j += 1
@@ -166,8 +33,142 @@ class WeAreDevsLifter:
                 i += 1
         return ''.join(result)
 
+class AdvancedWeAreDevsLifter(BaseLifter):
+    def lift(self, source):
+        results = []
+        string_tables = self._find_all_string_tables(source)
+        b64_maps = self._find_all_b64_maps(source)
+        shuffle_sets = self._find_all_shuffle_sets(source)
+        for str_table in string_tables:
+            working = list(str_table)
+            for shuf in shuffle_sets:
+                working = self._apply_shuffle(working, shuf)
+            for b64_map in b64_maps:
+                for s in working:
+                    decoded = self._decode_custom_b64(s, b64_map)
+                    if decoded and len(decoded) > 4:
+                        results.append(decoded)
+        iife_tables = self._find_iife_inline_tables(source)
+        for tbl in iife_tables:
+            working = list(tbl)
+            for shuf in shuffle_sets:
+                working = self._apply_shuffle(working, shuf)
+            for b64_map in b64_maps:
+                for s in working:
+                    decoded = self._decode_custom_b64(s, b64_map)
+                    if decoded and len(decoded) > 4:
+                        results.append(decoded)
+        return results
 
-class MoonSecLifter:
+    def _find_all_string_tables(self, source):
+        tables = []
+        for m in re.finditer(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', source):
+            body = m.group(2)
+            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+            if len(strings) >= 4:
+                decoded = [self._unescape_lua_string(s) for s in strings]
+                if any(len(s) > 20 for s in decoded):
+                    tables.append(decoded)
+        for m in re.finditer(r'(\w+)\s*=\s*\{([^}]+)\}', source):
+            body = m.group(2)
+            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+            if len(strings) >= 4:
+                decoded = [self._unescape_lua_string(s) for s in strings]
+                if any(len(s) > 20 for s in decoded):
+                    tables.append(decoded)
+        return tables
+
+    def _find_iife_inline_tables(self, source):
+        tables = []
+        for m in re.finditer(r'\(\s*function\s*\([^)]*\)\s*.*?end\s*\)\s*\(\s*(\{[^}]*\})\s*\)', source, re.DOTALL):
+            table_body = m.group(1)
+            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+            if len(strings) >= 4:
+                decoded = [self._unescape_lua_string(s) for s in strings]
+                if any(len(s) > 20 for s in decoded):
+                    tables.append(decoded)
+        return tables
+
+    def _find_all_b64_maps(self, source):
+        maps = []
+        for m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{60,})\}', source):
+            body = m.group(1)
+            entries = re.findall(r'\[(\d+)\]\s*=\s*"(.+?)"', body)
+            if not entries:
+                entries = re.findall(r'"(.+?)"', body)
+                if entries:
+                    entries = [(str(i), entries[i]) for i in range(len(entries))]
+            if len(entries) >= 62:
+                cmap = {}
+                for idx_str, val in entries:
+                    try:
+                        cmap[int(idx_str)] = val
+                    except ValueError:
+                        continue
+                if len(cmap) >= 62:
+                    maps.append(cmap)
+        return maps
+
+    def _find_all_shuffle_sets(self, source):
+        sets = []
+        for m in re.finditer(r'for\s+\w+\s*=\s*(\d+)\s*,\s*(\d+)\s*do\s+(\w+)\[(\w+)\]\s*=\s*(\w+)\[(\w+)\]', source):
+            try:
+                start = int(m.group(1))
+                end = int(m.group(2))
+                src_var = m.group(5)
+                dst_var = m.group(3)
+                pairs = []
+                for assign in re.finditer(rf'{re.escape(src_var)}\[(\d+)\]\s*=\s*{re.escape(dst_var)}\[(\d+)\]', source):
+                    a = int(assign.group(2))
+                    b = int(assign.group(1))
+                    pairs.append((a, b))
+                if len(pairs) >= 2:
+                    sets.append(pairs)
+            except:
+                pass
+        for m in re.finditer(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', source):
+            nums = re.findall(r'\d+', m.group(1))
+            if len(nums) >= 4 and len(nums) % 2 == 0:
+                pairs = []
+                for i in range(0, len(nums), 2):
+                    pairs.append((int(nums[i]), int(nums[i+1])))
+                sets.append(pairs)
+        return sets
+
+    def _apply_shuffle(self, arr, pairs):
+        result = list(arr)
+        for a, b in pairs:
+            lo, hi = a-1, b-1
+            if 0 <= lo < len(result) and 0 <= hi < len(result) and lo < hi:
+                result[lo:hi+1] = result[lo:hi+1][::-1]
+        return result
+
+    def _decode_custom_b64(self, encoded, cmap):
+        if len(cmap) < 64:
+            return None
+        reverse_map = {}
+        for k, v in cmap.items():
+            if isinstance(v, str) and len(v) >= 1:
+                reverse_map[v] = k
+        if not reverse_map:
+            return None
+        bit_buf = 0
+        bits = 0
+        out = bytearray()
+        for c in encoded:
+            if c == '=':
+                break
+            if c not in reverse_map:
+                continue
+            val = reverse_map[c]
+            bit_buf = (bit_buf << 6) | val
+            bits += 6
+            while bits >= 8:
+                bits -= 8
+                out.append((bit_buf >> bits) & 0xFF)
+        return bytes(out)
+
+class MoonSecLifter(BaseLifter):
     def lift(self, source):
         results = []
         b64_tables = self._find_moonsec_tables(source)
@@ -220,8 +221,7 @@ class MoonSecLifter:
         except Exception:
             return None
 
-
-class IronBrewLifter:
+class IronBrewLifter(BaseLifter):
     def lift(self, source):
         results = []
         xor_keys = self._find_xor_keys(source)
@@ -298,8 +298,7 @@ class IronBrewLifter:
                 i += 1
         return bytes(result)
 
-
-class PSULifter:
+class PSULifter(BaseLifter):
     def lift(self, source):
         results = []
         loadstring_calls = re.findall(r'loadstring\s*\(\s*([^)]+)\s*\)', source)
@@ -327,8 +326,7 @@ class PSULifter:
                 return f'[{func_name} function body]'
         return None
 
-
-class XORStringDecoder:
+class XORStringDecoder(BaseLifter):
     def lift(self, source):
         results = []
         encoded_arrays = re.findall(r'\{\s*([\d,\s]{30,})\s*\}', source)
@@ -348,8 +346,7 @@ class XORStringDecoder:
                     pass
         return results
 
-
-class NumberArrayDecoder:
+class NumberArrayDecoder(BaseLifter):
     def lift(self, source):
         results = []
         patterns = [
@@ -369,8 +366,7 @@ class NumberArrayDecoder:
                         results.append(decoded)
         return results
 
-
-class StandardBase64Decoder:
+class StandardBase64Decoder(BaseLifter):
     def lift(self, source):
         results = []
         b64_pattern = r'"([A-Za-z0-9+/=]{40,})"'
@@ -390,7 +386,6 @@ class StandardBase64Decoder:
                 pass
         return results
 
-
 class StringPatternExtractor:
     @staticmethod
     def extract_all(source):
@@ -405,7 +400,6 @@ class StringPatternExtractor:
             for m in re.finditer(pat, source, re.DOTALL):
                 results.append(m.group(0))
         return results
-
 
 class BytecodeHarvester:
     LUA_SIGNATURE = b'\x1bLua'
@@ -450,12 +444,11 @@ class BytecodeHarvester:
             ptr = start + header_size + 1
             if ptr >= len(data):
                 return None
-            size_code = self._read_int(data, ptr)
-            ptr += 4
-            ptr += size_code * 4
+            size_code = struct.unpack('<I', data[ptr:ptr+4])[0]
+            ptr += 4 + size_code * 4
             if ptr + 4 > len(data):
                 return None
-            size_constants = self._read_int(data, ptr)
+            size_constants = struct.unpack('<I', data[ptr:ptr+4])[0]
             ptr += 4
             for _ in range(size_constants):
                 if ptr >= len(data):
@@ -465,7 +458,7 @@ class BytecodeHarvester:
                 if const_type == 4:
                     if ptr + 4 > len(data):
                         return None
-                    str_len = self._read_int(data, ptr)
+                    str_len = struct.unpack('<I', data[ptr:ptr+4])[0]
                     ptr += 4 + str_len
                 elif const_type == 3:
                     ptr += 8
@@ -473,7 +466,7 @@ class BytecodeHarvester:
                     ptr += 1
             if ptr + 4 > len(data):
                 return None
-            size_protos = self._read_int(data, ptr)
+            size_protos = struct.unpack('<I', data[ptr:ptr+4])[0]
             ptr += 4
             for _ in range(size_protos):
                 sub_end = self._find_bytecode_end(data, ptr)
@@ -482,12 +475,6 @@ class BytecodeHarvester:
             return ptr
         except Exception:
             return len(data)
-
-    @staticmethod
-    def _read_int(data, offset):
-        if offset + 4 > len(data):
-            return 0
-        return struct.unpack('<I', data[offset:offset+4])[0]
 
     @staticmethod
     def _try_all_base64(data):
