@@ -253,7 +253,6 @@ end
 
 load = loadstring
 
--- Hook string.dump to capture bytecode produced by the script
 local _orig_string_dump = string.dump
 string.dump = function(func, strip)
     local bc = _orig_string_dump(func, strip)
