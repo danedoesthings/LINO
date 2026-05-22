@@ -253,6 +253,19 @@ end
 
 load = loadstring
 
+-- Hook string.dump to capture bytecode produced by the script
+local _orig_string_dump = string.dump
+string.dump = function(func, strip)
+    local bc = _orig_string_dump(func, strip)
+    local dump_path = outdir .. "/dump.bin"
+    local f = io.open(dump_path, "wb")
+    if f then
+        f:write(bc)
+        f:close()
+    end
+    return bc
+end
+
 local function _scan_table(t, name, depth, visited)
     if depth > 10 then return end
     if visited[t] then return end
