@@ -12,8 +12,6 @@ from pattern_matcher import ObfuscationFingerprinter
 
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
-JAVA_DECOMPILER_URL = "https://github.com/vineflower/vineflower/releases/download/1.10.1/vineflower-1.10.1.jar"
-JAVA_DECOMPILER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vineflower.jar')
 
 LUA_KEYWORDS = {
     'function', 'local', 'end', 'return', 'if', 'then', 'else', 'elseif',
@@ -301,23 +299,24 @@ class DeobfEngine:
 
     @staticmethod
     def _is_valid_lua(code):
-        if not code or len(code) < 20:
+        if not code or len(code) < 50:
             return False
-        try:
-            from luaparser import ast as lua_ast
-            lua_ast.parse(code)
-            return True
-        except Exception:
-            pass
+        lines = code.split('\n')
+        if len(lines) > 5:
+            proxy_pattern = re.compile(r'^\s*[\w.]+ = [A-Z]\w+$')
+            proxy_lines = sum(1 for line in lines if proxy_pattern.match(line.strip()))
+            if proxy_lines > len(lines) * 0.4:
+                return False
         words = set(re.findall(r'\b\w+\b', code[:10000]))
         keyword_count = len(words & LUA_KEYWORDS)
-        if keyword_count < 3:
+        if keyword_count < 5:
             return False
-        if keyword_count >= 5:
-            return True
+        has_function = 'function' in words and 'end' in words
+        has_local = 'local' in words
+        if not (has_function or has_local):
+            return False
         printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
-        ratio = printable / max(len(code), 1)
-        return ratio >= 0.65
+        return (printable / max(len(code), 1)) >= 0.70
 
     def _beautify(self, code):
         try:
