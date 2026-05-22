@@ -1,6 +1,6 @@
 import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time
 from transformers import (
-    WeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
+    AdvancedWeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
     XORStringDecoder, NumberArrayDecoder, StandardBase64Decoder,
     StringPatternExtractor, BytecodeHarvester
 )
@@ -26,7 +26,7 @@ LUA_KEYWORDS = {
 class DeobfEngine:
     def __init__(self):
         self.lifters = [
-            WeAreDevsLifter(),
+            AdvancedWeAreDevsLifter(),
             MoonSecLifter(),
             IronBrewLifter(),
             PSULifter(),
@@ -106,6 +106,15 @@ class DeobfEngine:
 
         layers, caps, diag = execute_sandbox(source, timeout=120)
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps), 'diag': diag[:200] if diag else ''})
+        if not layers and not caps and diag and 'attempt to index local' in diag:
+            wrapped_source = self._wrap_varargs_source(source, diag)
+            if wrapped_source:
+                layers2, caps2, diag2 = execute_sandbox(wrapped_source, timeout=120)
+                if layers2 or caps2:
+                    layers.extend(layers2)
+                    caps.extend(caps2)
+                    diag = diag2 if diag2 else diag
+                    trace.append({'stage': 'sandbox_retry_varargs', 'success': True})
 
         for i, item in enumerate(layers):
             if isinstance(item, bytes) and len(item) >= 12:
@@ -337,3 +346,24 @@ class DeobfEngine:
                 if any(line.startswith(w) for w in openers) and not line.rstrip().endswith('end'):
                     ind += 1
             return '\n'.join(out)
+
+    def _wrap_varargs_source(self, source, error_msg):
+        match = re.search(r"local '(\w+)'", error_msg)
+        if not match:
+            match = re.search(r"local (\w+) ", error_msg)
+        if not match:
+            return None
+        varname = match.group(1)
+        wrapper = f"""
+local {varname} = setmetatable({{}}, {{
+    __index = function(t, k)
+        if type(k) == 'number' then return ''
+        else return rawget(t, k) or ''
+        end,
+    __newindex = function() end,
+    __call = function() return '' end,
+    __tostring = function() return '' end,
+}})
+{source}
+"""
+        return wrapper
