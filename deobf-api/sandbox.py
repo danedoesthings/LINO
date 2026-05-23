@@ -8,7 +8,6 @@ def _lua_str(path):
     return '"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 def _lua_table_literal(strings):
-    """Build a Lua table literal from a list of already‑escaped Lua strings."""
     parts = []
     for s in strings:
         parts.append('"' + s + '"')
@@ -40,7 +39,6 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         inp_path = inp.replace('\\', '/')
         driver = runtime.replace('"OUTDIR_PLACEHOLDER"', _lua_str(out_dir)).replace('"INPATH_PLACEHOLDER"', _lua_str(inp_path))
 
-        # Embed varargs directly by replacing the bare placeholder with a Lua table literal
         if varargs and isinstance(varargs, list):
             table_literal = _lua_table_literal(varargs)
             driver = driver.replace('VARARGS_PLACEHOLDER', table_literal)
@@ -97,6 +95,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
             except Exception as e:
                 error_log.append(f'READ_LAYER_{i}_ERROR: {e}')
             i += 1
+
         dump = os.path.join(temp_dir, 'dump.bin')
         if os.path.exists(dump):
             try:
@@ -106,6 +105,18 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
                     layers.append(bc)
             except Exception as e:
                 error_log.append(f'READ_DUMP_ERROR: {e}')
+
+        rv_path = os.path.join(temp_dir, 'return_value.lua')
+        if os.path.exists(rv_path):
+            try:
+                with open(rv_path, 'rb') as f:
+                    rv_data = f.read()
+                if rv_data:
+                    layers.append(rv_data)
+                    error_log.append(f'return_value.lua: {len(rv_data)} bytes')
+            except Exception as e:
+                error_log.append(f'READ_RETURN_VALUE_ERROR: {e}')
+
         capf = os.path.join(temp_dir, 'cap.txt')
         if os.path.exists(capf):
             try:
@@ -118,6 +129,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
                             caps.append(s)
             except Exception as e:
                 error_log.append(f'READ_CAP_ERROR: {e}')
+
         memf = os.path.join(temp_dir, 'memory.txt')
         if os.path.exists(memf):
             try:
@@ -130,6 +142,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
                             caps.append(s)
             except Exception as e:
                 error_log.append(f'READ_MEM_ERROR: {e}')
+
         diag_parts = []
         for fname in ('diag.txt', 'error.txt'):
             fp = os.path.join(temp_dir, fname)
