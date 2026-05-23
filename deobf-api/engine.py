@@ -94,11 +94,8 @@ class DeobfEngine:
                 decoded_chunks = lifter.lift(source)
                 if decoded_chunks:
                     chunk_no_bc = 0
-                    chunk_bytes = 0
-                    chunk_strs = 0
                     for chunk in decoded_chunks:
                         if isinstance(chunk, bytes):
-                            chunk_bytes += 1
                             bc = self.bytecode_harvester.extract(chunk)
                             if bc:
                                 dc, err = self._run_unluac(bc)
@@ -108,7 +105,6 @@ class DeobfEngine:
                             else:
                                 chunk_no_bc += 1
                         elif isinstance(chunk, str):
-                            chunk_strs += 1
                             nested_bc = self._extract_bytecode(chunk)
                             if nested_bc:
                                 dc, err = self._run_unluac(nested_bc)
@@ -122,10 +118,8 @@ class DeobfEngine:
                             else:
                                 chunk_no_bc += 1
                     diags.append(f"{lifter_name}: {len(decoded_chunks)} chunks, {chunk_no_bc} no bc")
-                    trace.append({'stage': f'lifter_{lifter_name}', 'chunks': len(decoded_chunks)})
             except Exception as e:
                 diags.append(f"{lifter_name} crashed: {str(e)}")
-                trace.append({'stage': f'lifter_{lifter_name}_error', 'error': str(e)})
 
         try:
             all_strings = self.string_decoder.decode_all(source)
@@ -133,13 +127,6 @@ class DeobfEngine:
                 combined = '\n'.join(all_strings)
                 if len(combined) > 200 and self._is_valid_lua(combined):
                     return self._beautify(combined), 'string_decode', f'String decode ({len(combined)} chars)', trace
-                for i, s in enumerate(all_strings):
-                    bc = self._extract_bytecode(s)
-                    if bc:
-                        dc, err = self._run_unluac(bc)
-                        if dc and self._is_valid_lua(dc):
-                            return self._beautify(dc), 'string_decode_unluac', f'String {i}+unluac ({len(dc)} chars)', trace
-                        if err: reasons[f'string_decode_unluac_{i}'] = err
         except Exception as e:
             diags.append(f"String decoder crashed: {str(e)}")
 
@@ -156,23 +143,14 @@ class DeobfEngine:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
                             return self._beautify(dc), 'sandbox_unluac', f'Sandbox layer {i} ({len(dc)} chars)', trace
-                if isinstance(item, str):
-                    if 'SANDBOX_OUTPUT_START' in item:
-                        bc2 = self._extract_bytecode_from_sandbox_output(item)
-                        if bc2:
-                            dc, err = self._run_unluac(bc2)
-                            if dc and self._is_valid_lua(dc):
-                                return self._beautify(dc), 'sandbox_scan', f'State scan ({len(dc)} chars)', trace
-                    if len(item) > 100 and self._is_valid_lua(item):
-                        return self._beautify(item), 'sandbox_capture', f'Layer {i} source ({len(item)} chars)', trace
+                if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
+                    return self._beautify(item), 'sandbox_capture', f'Layer {i} source ({len(item)} chars)', trace
         except Exception as e:
             diags.append(f"Sandbox crashed: {str(e)}")
 
         try:
             lune_data, lune_info = self._run_lune(source)
-            trace.append({'stage': 'lune', 'info': lune_info})
-            if lune_info.get('error'):
-                reasons['lune'] = lune_info['error']
+            trace.append({'stage': 'lune'})
             if lune_data:
                 if isinstance(lune_data, bytes) and len(lune_data) >= 12:
                     bc = self.bytecode_harvester.extract(lune_data)
@@ -180,8 +158,8 @@ class DeobfEngine:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
                             return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
-        except Exception as e:
-            diags.append(f"Lune crashed: {str(e)}")
+        except Exception:
+            pass
 
         try:
             raw_bytecode = self.bytecode_harvester.deep_scan(source)
@@ -191,15 +169,13 @@ class DeobfEngine:
                     return self._beautify(dc), 'deep_scan_unluac', f'Deep scan ({len(dc)} chars)', trace
                 if err: reasons['deep_scan_unluac'] = err
                 return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bc ({len(raw_bytecode)}B)', trace
-        except Exception as e:
-            diags.append(f"Deep scan crashed: {str(e)}")
+        except Exception:
+            pass
 
-        parts = []
+        parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
-            parts.append('Errors: ' + '; '.join(f"{k}: {v[:80]}" for k, v in reasons.items()))
-        if diags:
-            parts.append('Steps: ' + '; '.join(diags[:4]))
-        reason = '\n'.join(parts) if parts else f'All {len(trace)} stages exhausted'
+            parts.append('Errors: ' + '; '.join(f"{k}: {v[:60]}" for k, v in reasons.items()))
+        reason = '\n'.join(parts)
         return '', 'unable', reason, trace
 
     def _extract_wearedevs_bytecode(self, source, diags):
@@ -219,30 +195,52 @@ class DeobfEngine:
         empty_count = sum(1 for d in original_table if len(d)==0)
         b64_reverse = self._extract_custom_b64_reverse(source)
         shuffle_pairs = self._extract_shuffle_pairs(source)
-        working = list(original_table)
-        for lo, hi in shuffle_pairs:
-            lo_idx, hi_idx = lo - 1, hi - 1
-            while lo_idx < hi_idx:
-                working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
-                lo_idx += 1
-                hi_idx -= 1
-        decoded_chunks = []
-        for chunk in working:
-            if len(chunk) == 0:
-                continue
-            decoded = self._decode_custom_b64(chunk, b64_reverse)
-            if decoded:
-                decoded_chunks.append(decoded)
-        if not decoded_chunks:
-            diags.append(f"no b64 decoded ({len(strings)} strs, {empty_count} empty, {len(b64_reverse)} b64map, {len(shuffle_pairs)} shuffles)")
+
+        def apply_shuffles(table, pairs):
+            working = list(table)
+            for lo, hi in pairs:
+                lo_idx, hi_idx = lo - 1, hi - 1
+                while lo_idx < hi_idx:
+                    working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
+                    lo_idx += 1
+                    hi_idx -= 1
+            return working
+
+        def decode_and_find(table):
+            decoded_chunks = []
+            for chunk in table:
+                if len(chunk) == 0:
+                    continue
+                decoded = self._decode_custom_b64(chunk, b64_reverse)
+                if decoded:
+                    decoded_chunks.append(decoded)
+            if not decoded_chunks:
+                return None
+            combined = b''.join(decoded_chunks)
+            bc = self.bytecode_harvester.extract(combined)
+            if bc:
+                return bc
             return None
-        combined = b''.join(decoded_chunks)
-        hex_preview = binascii.hexlify(combined[:16]).decode()
-        bc = self.bytecode_harvester.extract(combined)
+
+        # Try normal order
+        working = apply_shuffles(original_table, shuffle_pairs)
+        bc = decode_and_find(working)
         if bc:
             diags.append(f"OK {len(bc)}B bc, {len(strings)} strs")
             return bc
-        diags.append(f"no bc sig: {hex_preview} ({len(combined)}B, {len(strings)} strs, {empty_count} empty, {len(b64_reverse)} b64map, {len(shuffle_pairs)} shuff)")
+
+        # Try reversed shuffle order
+        reversed_pairs = list(reversed(shuffle_pairs))
+        working = apply_shuffles(original_table, reversed_pairs)
+        bc = decode_and_find(working)
+        if bc:
+            diags.append(f"OK {len(bc)}B bc (reversed shuffles)")
+            return bc
+
+        # If still no bc, report hex preview
+        combined = b''.join([self._decode_custom_b64(c, b64_reverse) or b'' for c in working if len(c)>0])
+        hex_preview = binascii.hexlify(combined[:16]).decode() if combined else 'empty'
+        diags.append(f"no bc sig: {hex_preview} ({len(strings)} strs, {len(b64_reverse)} b64map, {len(shuffle_pairs)} shuff)")
         return None
 
     def _extract_custom_b64_reverse(self, source):
@@ -467,9 +465,8 @@ class DeobfEngine:
             if jar_dir:
                 os.makedirs(jar_dir, exist_ok=True)
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
-            print("[engine] unluac.jar downloaded successfully", file=sys.stderr)
-        except Exception as e:
-            print(f"[engine] unluac.jar download failed: {e}", file=sys.stderr)
+        except Exception:
+            pass
 
     @staticmethod
     def _is_valid_lua(code):
