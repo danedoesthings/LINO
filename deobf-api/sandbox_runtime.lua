@@ -145,6 +145,11 @@ local function _new_proxy(name)
     return p
 end
 
+-- Mock newproxy: returns a proxy object (userdata not needed)
+local function newproxy(addmetatable)
+    return _new_proxy("newproxy")
+end
+
 local _players_service = _new_proxy("Players")
 local _local_player = {
     UserId = 1,
@@ -275,6 +280,7 @@ local _safe_globals = {
     spawn = function(f) pcall(f) end,
     delay = function(t, f) pcall(f) end,
     task = { wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end },
+    newproxy = newproxy,
     Instance = _new_proxy("Instance"),
     Vector3 = _new_proxy("Vector3"),
     Vector2 = _new_proxy("Vector2"),
