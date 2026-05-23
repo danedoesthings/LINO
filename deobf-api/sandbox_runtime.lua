@@ -235,6 +235,7 @@ local _safe_globals = {
     string = string,
     table = table,
     math = math,
+    io = io,
     os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "01/01/2000" end, difftime = function() return 0 end },
     coroutine = coroutine,
     bit32 = bit32_real,
