@@ -63,15 +63,20 @@ class DeobfEngine:
         trace.append({'stage': 'fingerprint', 'details': fingerprint, 'input_size': input_size, 'input_lines': input_lines})
 
         try:
-            wearedevs_bc = self._extract_wearedevs_bytecode(source, diags)
-            trace.append({'stage': 'wearedevs_extractor', 'bytecode_found': wearedevs_bc is not None})
-            if wearedevs_bc:
-                dc, err = self._run_unluac(wearedevs_bc)
-                if dc and self._is_valid_lua(dc):
-                    return self._beautify(dc), 'wearedevs_unluac', f'Decompiled ({len(dc)} chars)', trace
-                if err:
-                    reasons['wearedevs_unluac'] = err
-                return base64.b64encode(wearedevs_bc).decode('ascii'), 'bytecode', f'Bytecode ({len(wearedevs_bc)}B). unluac: {err}', trace
+            wearedevs_result = self._extract_wearedevs_source(source, diags)
+            trace.append({'stage': 'wearedevs_extractor', 'success': wearedevs_result is not None})
+            if wearedevs_result:
+                if isinstance(wearedevs_result, bytes):
+                    # bytecode
+                    dc, err = self._run_unluac(wearedevs_result)
+                    if dc and self._is_valid_lua(dc):
+                        return self._beautify(dc), 'wearedevs_unluac', f'Decompiled ({len(dc)} chars)', trace
+                    if err:
+                        reasons['wearedevs_unluac'] = err
+                    return base64.b64encode(wearedevs_result).decode('ascii'), 'bytecode', f'Bytecode ({len(wearedevs_result)}B). unluac: {err}', trace
+                else:
+                    # source string
+                    return self._beautify(wearedevs_result), 'wearedevs_source', f'Source recovered ({len(wearedevs_result)} chars)', trace
         except Exception as e:
             diags.append(f"WeAreDevs crashed: {str(e)}")
             trace.append({'stage': 'wearedevs_extractor_error', 'error': str(e)})
@@ -105,16 +110,8 @@ class DeobfEngine:
                             else:
                                 chunk_no_bc += 1
                         elif isinstance(chunk, str):
-                            nested_bc = self._extract_bytecode(chunk)
-                            if nested_bc:
-                                dc, err = self._run_unluac(nested_bc)
-                                if dc and self._is_valid_lua(dc):
-                                    return self._beautify(dc), f'{lifter_name}_nested_unluac', f'{lifter_name} nested ({len(dc)} chars)', trace
-                                if err: reasons[f'{lifter_name}_nested_unluac'] = err
                             if self._is_valid_lua(chunk) and len(chunk) > 200:
-                                rec_result, rec_type, rec_diag, rec_trace = self.process(chunk)
-                                if rec_result and rec_type != 'unable':
-                                    return rec_result, f'recursive_{rec_type}', f'Recursive: {rec_diag}', trace + rec_trace
+                                return self._beautify(chunk), f'{lifter_name}_source', f'{lifter_name} source ({len(chunk)} chars)', trace
                             else:
                                 chunk_no_bc += 1
                     diags.append(f"{lifter_name}: {len(decoded_chunks)} chunks, {chunk_no_bc} no bc")
@@ -157,6 +154,12 @@ class DeobfEngine:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
                             return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
+                try:
+                    text = lune_data.decode('utf-8', errors='replace')
+                    if self._is_valid_lua(text):
+                        return self._beautify(text), 'lune_capture', f'Lune source ({len(text)} chars)', trace
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -177,7 +180,8 @@ class DeobfEngine:
         reason = '\n'.join(parts)
         return '', 'unable', reason, trace
 
-    def _extract_wearedevs_bytecode(self, source, diags):
+    def _extract_wearedevs_source(self, source, diags):
+        """Extract either bytecode or Lua source from the obfuscated script's string table."""
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("no string table")
@@ -191,7 +195,6 @@ class DeobfEngine:
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
             original_table.append(decoded if decoded else b'')
-        empty_count = sum(1 for d in original_table if len(d)==0)
         b64_reverse = self._extract_custom_b64_reverse(source)
         shuffle_pairs = self._extract_shuffle_pairs(source)
 
@@ -205,7 +208,8 @@ class DeobfEngine:
                     hi_idx -= 1
             return working
 
-        def decode_and_find(table):
+        def decode_table(table):
+            """Decode base64 strings and return combined bytes."""
             decoded_chunks = []
             for chunk in table:
                 if len(chunk) == 0:
@@ -215,31 +219,60 @@ class DeobfEngine:
                     decoded_chunks.append(decoded)
             if not decoded_chunks:
                 return None
-            combined = b''.join(decoded_chunks)
-            bc = self.bytecode_harvester.extract(combined)
+            return b''.join(decoded_chunks)
+
+        def check_result(data):
+            """Check if data is bytecode or Lua source, return appropriate type."""
+            # Try bytecode first
+            bc = self.bytecode_harvester.extract(data)
             if bc:
-                return bc
+                return bc  # bytes
+            # Try as UTF-8 source
+            try:
+                text = data.decode('utf-8')
+                if self._is_valid_lua(text):
+                    return text  # str
+            except UnicodeDecodeError:
+                pass
+            try:
+                text = data.decode('latin-1')
+                if self._is_valid_lua(text):
+                    return text
+            except Exception:
+                pass
             return None
 
-        # Try normal order
+        # Try normal shuffle order
         working = apply_shuffles(original_table, shuffle_pairs)
-        bc = decode_and_find(working)
-        if bc:
-            diags.append(f"OK {len(bc)}B bc, {len(strings)} strs")
-            return bc
+        combined = decode_table(working)
+        if combined:
+            result = check_result(combined)
+            if result is not None:
+                if isinstance(result, bytes):
+                    diags.append(f"OK bytecode {len(result)}B")
+                else:
+                    diags.append(f"OK source {len(result)} chars")
+                return result
 
         # Try reversed shuffle order
         reversed_pairs = list(reversed(shuffle_pairs))
         working = apply_shuffles(original_table, reversed_pairs)
-        bc = decode_and_find(working)
-        if bc:
-            diags.append(f"OK {len(bc)}B bc (reversed shuffles)")
-            return bc
+        combined = decode_table(working)
+        if combined:
+            result = check_result(combined)
+            if result is not None:
+                if isinstance(result, bytes):
+                    diags.append(f"OK bytecode {len(result)}B (reversed shuff)")
+                else:
+                    diags.append(f"OK source {len(result)} chars (reversed shuff)")
+                return result
 
-        # If still no bc, report hex preview
-        combined = b''.join([self._decode_custom_b64(c, b64_reverse) or b'' for c in working if len(c)>0])
-        hex_preview = binascii.hexlify(combined[:16]).decode() if combined else 'empty'
-        diags.append(f"no bc sig: {hex_preview} ({len(strings)} strs, {len(b64_reverse)} b64map, {len(shuffle_pairs)} shuff)")
+        # Report failure with preview
+        if combined:
+            hex_preview = binascii.hexlify(combined[:16]).decode()
+        else:
+            hex_preview = "empty"
+        diags.append(f"no valid result: {hex_preview}")
         return None
 
     def _extract_custom_b64_reverse(self, source):
@@ -248,7 +281,6 @@ class DeobfEngine:
             return {}
         body = m.group(1)
         reverse = {}
-        # Parse entries with numeric string keys: ["\055"]=value  (capture all digits after backslash)
         for key_match in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
             key_str = key_match.group(1)
             val_expr = key_match.group(2)
@@ -257,14 +289,12 @@ class DeobfEngine:
                 key_char = self._decode_wearedevs_string(key_str)
                 if key_char:
                     reverse[val] = key_char.decode('latin-1')
-        # Parse entries with identifier keys: key=value
         for key_match in re.finditer(r'(?<![\["\'])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
             key_str = key_match.group(1)
             val_expr = key_match.group(2)
             val = self._safe_eval(val_expr.strip())
             if val is not None and 0 <= val < 64:
                 reverse[val] = key_str
-        # Fill gaps with standard base64
         std_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         for i, ch in enumerate(std_b64):
             if i not in reverse:
