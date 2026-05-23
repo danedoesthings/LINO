@@ -404,7 +404,8 @@ local function _run_input()
         return
     end
     setfenv(f, _G)
-    local ok, result = xpcall(f, _error_handler)
+    local proxy_arg = setmetatable({}, { __index = function(t,k) if type(k) == "number" then return "" else return rawget(t,k) or "" end end })
+    local ok, result = xpcall(function() return f(proxy_arg) end, _error_handler)
     if not ok then
         local errfile = io.open(outdir .. "/error.txt", "a")
         if errfile then
