@@ -8,6 +8,7 @@ def _lua_str(path):
     return '"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 def _lua_table_literal(strings):
+    """Build a Lua table literal from a list of already‑escaped Lua strings."""
     parts = []
     for s in strings:
         parts.append('"' + s + '"')
@@ -24,25 +25,12 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
     try:
         inp = os.path.join(temp_dir, 'input.lua')
         drv = os.path.join(temp_dir, 'driver.lua')
-        varargs_path = os.path.join(temp_dir, 'varargs.lua')
         try:
             raw = source.encode('utf-8', errors='replace') if isinstance(source, str) else source
             with open(inp, 'wb') as f:
                 f.write(raw)
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
-        if varargs and isinstance(varargs, list):
-            try:
-                table_literal = _lua_table_literal(varargs)
-                with open(varargs_path, 'w', encoding='utf-8') as f:
-                    f.write('return ' + table_literal)
-                print(f"[sandbox] wrote {len(varargs)} varargs to {varargs_path}", file=sys.stderr)
-            except Exception as e:
-                error_log.append(f'WRITE_VARARGS_ERROR: {e}')
-                varargs_path = None
-        else:
-            varargs_path = None
-            print(f"[sandbox] no varargs provided (type={type(varargs)})", file=sys.stderr)
         try:
             with open(RUNTIME_PATH, 'r', encoding='utf-8') as f:
                 runtime = f.read()
@@ -51,14 +39,26 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         out_dir = temp_dir.replace('\\', '/')
         inp_path = inp.replace('\\', '/')
         driver = runtime.replace('"OUTDIR_PLACEHOLDER"', _lua_str(out_dir)).replace('"INPATH_PLACEHOLDER"', _lua_str(inp_path))
+
+        # Embed varargs directly by replacing the bare placeholder with a Lua table literal
+        if varargs and isinstance(varargs, list):
+            table_literal = _lua_table_literal(varargs)
+            driver = driver.replace('VARARGS_PLACEHOLDER', table_literal)
+            print(f"[sandbox] embedded {len(varargs)} varargs into driver", file=sys.stderr)
+        else:
+            driver = driver.replace('VARARGS_PLACEHOLDER', 'nil')
+            print(f"[sandbox] no varargs, set to nil", file=sys.stderr)
+
         try:
             with open(drv, 'w', encoding='utf-8') as f:
                 f.write(driver)
         except Exception as e:
             return [], [], f'WRITE_DRIVER_ERROR: {e}'
+
         env = os.environ.copy()
         env['LUA_PATH'] = os.path.join(APP_DIR, '?.lua') + ';' + env.get('LUA_PATH', '')
         env['LUA_CPATH'] = os.path.join(APP_DIR, '?.so') + ';' + env.get('LUA_CPATH', '')
+
         proc_error = ''
         stdout_output = ''
         stderr_output = ''
@@ -83,6 +83,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
             error_log.append(f'STDOUT: {stdout_output.strip()[:500]}')
         if stderr_output.strip():
             error_log.append(f'STDERR: {stderr_output.strip()[:500]}')
+
         i = 1
         while True:
             p = os.path.join(temp_dir, f'layer_{i}.lua')
