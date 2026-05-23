@@ -270,17 +270,20 @@ class DeobfEngine:
             return None
         diags.append(f"WeAreDevs: decoded {len(decoded_strings)} strings")
         print(f"[engine] WeAreDevs: decoded {len(decoded_strings)} strings", file=sys.stderr)
-        # Parse shuffle pairs from nested table
+        # Parse shuffle pairs from the for loop
         shuffle_pairs = self._extract_shuffle_pairs(source)
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle ranges")
         print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle ranges", file=sys.stderr)
         working = list(decoded_strings)
         for lo, hi in shuffle_pairs:
-            if 0 <= lo < len(working) and 0 <= hi < len(working) and lo < hi:
-                working[lo:hi+1] = reversed(working[lo:hi+1])
+            # Ranges are 1-indexed in Lua
+            lo0 = lo - 1
+            hi0 = hi - 1
+            if 0 <= lo0 < len(working) and 0 <= hi0 < len(working) and lo0 < hi0:
+                working[lo0:hi0+1] = reversed(working[lo0:hi0+1])
         combined = b''.join(working)
         diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
-        print(f"[engine] WeAreDevs: combined {len(combined)} bytes", file=sys.stderr)
+        print(f"[engine] WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}", file=sys.stderr)
         bc = self.bytecode_harvester.extract(combined)
         if bc:
             diags.append(f"WeAreDevs: bytecode extracted ({len(bc)} bytes)")
@@ -291,25 +294,21 @@ class DeobfEngine:
         return None
 
     def _extract_shuffle_pairs(self, source):
-        """Extract range pairs from the nested shuffle table like {{a,b};{c,d};{e,f}}"""
-        # Find the for loop that shuffles
-        match = re.search(r'for E,l in ipairs\((\{[^}]*\{[^}]*\}[^}]*\})\)', source)
-        if not match:
+        """Extract {start,end} pairs from the shuffle loop ipairs table."""
+        # Find the ipairs argument: ipairs({{...};{...};{...}})
+        m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
+        if not m:
             return []
-        outer = match.group(1)
-        # Extract inner tables: {number_expr, number_expr}
-        inner_tables = re.findall(r'\{([-\d()+\-*/ ]+);([-\d()+\-*/ ]+)\}', outer)
-        if not inner_tables:
-            inner_tables = re.findall(r'\{([-\d()+\-*/ ]+),([-\d()+\-*/ ]+)\}', outer)
+        outer = m.group(1)
+        # Extract inner tables: {expression;expression} or {expression,expression}
+        # The inner tables use ; or , as separator
+        inner_tables = re.findall(r'\{([-\d()+\-*/\s]+)[;,]([-\d()+\-*/\s]+)\}', outer)
         ranges = []
         for expr1, expr2 in inner_tables:
-            try:
-                lo = self._safe_eval(expr1.strip())
-                hi = self._safe_eval(expr2.strip())
-                if lo is not None and hi is not None:
-                    ranges.append((lo, hi))
-            except Exception:
-                pass
+            lo = self._safe_eval(expr1.strip())
+            hi = self._safe_eval(expr2.strip())
+            if lo is not None and hi is not None:
+                ranges.append((lo, hi))
         return ranges
 
     @staticmethod
@@ -322,7 +321,6 @@ class DeobfEngine:
         if not re.match(r'^[\d+\-*/()]+$', expr):
             return None
         try:
-            # Python's eval is safe here because we restricted the charset
             return eval(expr)
         except Exception:
             return None
