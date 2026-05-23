@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys
 from transformers import (
     AdvancedWeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
     XORStringDecoder, NumberArrayDecoder, StandardBase64Decoder,
@@ -219,16 +219,20 @@ class DeobfEngine:
         return '', 'unable', reason, trace
 
     def _extract_wearedevs_bytecode(self, source, diags):
+        print("[engine] _extract_wearedevs_bytecode called", file=sys.stderr)
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("WeAreDevs: no string table found")
+            print("[engine] WeAreDevs: no string table", file=sys.stderr)
             return None
         table_body = m.group(1)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
             diags.append(f"WeAreDevs: only {len(strings)} strings in table")
+            print(f"[engine] WeAreDevs: only {len(strings)} strings", file=sys.stderr)
             return None
         diags.append(f"WeAreDevs: found {len(strings)} escaped strings")
+        print(f"[engine] WeAreDevs: {len(strings)} strings", file=sys.stderr)
         decoded_strings = []
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
@@ -236,8 +240,10 @@ class DeobfEngine:
                 decoded_strings.append(decoded)
         if not decoded_strings:
             diags.append("WeAreDevs: no strings decoded")
+            print("[engine] WeAreDevs: no strings decoded", file=sys.stderr)
             return None
         diags.append(f"WeAreDevs: decoded {len(decoded_strings)} strings")
+        print(f"[engine] WeAreDevs: decoded {len(decoded_strings)} strings", file=sys.stderr)
         shuffle_match = re.search(r'for E,l in ipairs\((\{[^}]+\})\)', source)
         shuffle_pairs = []
         if shuffle_match:
@@ -245,6 +251,7 @@ class DeobfEngine:
             for i in range(0, len(nums) - 1, 2):
                 shuffle_pairs.append((int(nums[i]), int(nums[i+1])))
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle pairs")
+        print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle pairs", file=sys.stderr)
         working = list(decoded_strings)
         for a, b in shuffle_pairs:
             lo, hi = a - 1, b - 1
@@ -252,11 +259,14 @@ class DeobfEngine:
                 working[lo:hi+1] = reversed(working[lo:hi+1])
         combined = b''.join(working)
         diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
+        print(f"[engine] WeAreDevs: combined {len(combined)} bytes", file=sys.stderr)
         bc = self.bytecode_harvester.extract(combined)
         if bc:
             diags.append(f"WeAreDevs: bytecode extracted ({len(bc)} bytes)")
+            print(f"[engine] WeAreDevs: bytecode {len(bc)} bytes", file=sys.stderr)
             return bc
         diags.append("WeAreDevs: no bytecode signature found in combined data")
+        print("[engine] WeAreDevs: no bytecode signature", file=sys.stderr)
         return None
 
     @staticmethod
