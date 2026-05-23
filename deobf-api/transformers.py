@@ -2,6 +2,9 @@ import re, base64, struct, string, itertools
 from collections import Counter
 
 class BaseLifter:
+    def get_diag(self):
+        return {}
+
     def _unescape_lua_string(self, s):
         result = []
         i = 0
@@ -34,15 +37,33 @@ class BaseLifter:
         return ''.join(result)
 
 class AdvancedWeAreDevsLifter(BaseLifter):
+    def __init__(self):
+        self.string_tables_found = 0
+        self.b64_maps_found = 0
+        self.shuffle_sets_found = 0
+        self.iife_extracted = False
+
+    def get_diag(self):
+        return {
+            'string_tables': self.string_tables_found,
+            'b64_maps': self.b64_maps_found,
+            'shuffle_sets': self.shuffle_sets_found,
+            'iife_extracted': self.iife_extracted
+        }
+
     def lift(self, source):
         results = []
         iife_table = self._extract_iife_string_table(source)
         if iife_table:
+            self.iife_extracted = True
             string_tables = [iife_table] + self._find_all_string_tables(source)
         else:
             string_tables = self._find_all_string_tables(source)
+        self.string_tables_found = len(string_tables)
         b64_maps = self._find_all_b64_maps(source)
+        self.b64_maps_found = len(b64_maps)
         shuffle_sets = self._find_all_shuffle_sets(source)
+        self.shuffle_sets_found = len(shuffle_sets)
         for str_table in string_tables:
             working = list(str_table)
             for shuf in shuffle_sets:
@@ -65,11 +86,11 @@ class AdvancedWeAreDevsLifter(BaseLifter):
         return results
 
     def _extract_iife_string_table(self, source):
-        m = re.search(r'return\s*\(\s*function\s*\([^)]*\)\s*.*?end\s*\)\s*\(\s*(\{.*?\})\s*\)', source, re.DOTALL)
+        m = re.search(r'return\s+(?:\(\s*)?function\s*\([^)]*\)(.*?)end\s*(?:\))?\s*\(\s*(\{)', source, re.DOTALL)
         if not m:
             return None
-        table_raw = m.group(1)
-        table_body = self._extract_balanced_braces(source, m.start(1))
+        brace_pos = m.start(2)
+        table_body = self._extract_balanced_braces(source, brace_pos)
         if not table_body:
             return None
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
