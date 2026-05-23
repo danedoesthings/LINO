@@ -6,6 +6,7 @@ local _real_tostring = tostring
 local _real_debug_traceback = debug.traceback
 local _real_xpcall = xpcall
 local _real_setfenv = setfenv
+local _real_getfenv = getfenv
 local _real_loadfile = loadfile
 local _real_pairs = pairs
 local _real_ipairs = ipairs
@@ -22,6 +23,23 @@ local _real_string_byte = string.byte
 local _real_math_floor = math.floor
 local _real_math_random = math.random
 local _real_math_randomseed = math.randomseed
+
+local _real_G = _real_getfenv(0) or _G
+_real_rawset(_real_G, "ipairs", _real_ipairs)
+_real_rawset(_real_G, "pairs", _real_pairs)
+_real_rawset(_real_G, "next", _real_next)
+_real_rawset(_real_G, "tostring", _real_tostring)
+_real_rawset(_real_G, "type", _real_type)
+_real_rawset(_real_G, "unpack", _real_unpack)
+_real_rawset(_real_G, "select", _real_select)
+_real_rawset(_real_G, "setmetatable", _real_setmetatable)
+_real_rawset(_real_G, "getmetatable", _real_getmetatable)
+_real_rawset(_real_G, "rawget", _real_rawget)
+_real_rawset(_real_G, "rawset", _real_rawset)
+_real_rawset(_real_G, "pcall", pcall)
+_real_rawset(_real_G, "xpcall", _real_xpcall)
+_real_rawset(_real_G, "error", error)
+_real_rawset(_real_G, "assert", assert)
 
 local function _pure_bit32()
     local bit = {}
@@ -324,6 +342,19 @@ _real_setmetatable(_G, _env_mt)
 _real_rawset(_G, "ipairs", _real_ipairs)
 _real_rawset(_G, "pairs", _real_pairs)
 _real_rawset(_G, "next", _real_next)
+_real_rawset(_G, "tostring", _real_tostring)
+_real_rawset(_G, "type", _real_type)
+_real_rawset(_G, "unpack", _real_unpack)
+_real_rawset(_G, "select", _real_select)
+_real_rawset(_G, "setmetatable", _real_setmetatable)
+_real_rawset(_G, "getmetatable", _real_getmetatable)
+_real_rawset(_G, "rawget", _real_rawget)
+_real_rawset(_G, "rawset", _real_rawset)
+_real_rawset(_G, "pcall", pcall)
+_real_rawset(_G, "xpcall", _real_xpcall)
+_real_rawset(_G, "error", error)
+_real_rawset(_G, "assert", assert)
+
 local _capture_count = 0
 local _orig_loadstring = loadstring
 
