@@ -62,7 +62,7 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint, 'input_size': input_size, 'input_lines': input_lines})
 
-        iife_bc = self._extract_iife_bytecode(source)
+        iife_bc = self._extract_iife_bytecode(source, diags)
         if iife_bc:
             trace.append({'stage': 'iife_extractor', 'bytecode_size': len(iife_bc)})
             dc, err = self._run_unluac(iife_bc)
@@ -71,8 +71,6 @@ class DeobfEngine:
             if err:
                 reasons['iife_unluac'] = err
             return base64.b64encode(iife_bc).decode('ascii'), 'bytecode', f'IIFE bytecode ({len(iife_bc)}B). unluac: {err}', trace
-        else:
-            diags.append("IIFE extractor: no bytecode found")
 
         result = self._try_rapid_string_decode(source, trace)
         if result:
@@ -220,40 +218,47 @@ class DeobfEngine:
             reason = f'All {len(trace)} stages exhausted, no valid output'
         return '', 'unable', reason, trace
 
-    def _extract_iife_bytecode(self, source):
-        m = re.search(r'return\s+', source)
-        if not m:
+    def _extract_iife_bytecode(self, source, diags):
+        func_matches = list(re.finditer(r'function\s*\(', source))
+        diags.append(f"IIFE: found {len(func_matches)} function( patterns")
+        if not func_matches:
             return None
-        pos = m.end()
-        if pos >= len(source):
-            return None
-        call_start = source.find('(', pos)
-        if call_start == -1:
-            return None
-        open_pos = source.find('{', call_start)
-        if open_pos == -1:
-            return None
-        table_body = self._extract_balanced_braces(source, open_pos)
-        if not table_body:
-            return None
-        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
-        if len(strings) < 4:
-            return None
-        decoded_strings = [self._unescape_lua_string(s) for s in strings]
-        if not any(len(s) > 20 for s in decoded_strings):
-            return None
-        b64_maps = self._find_all_b64_maps(source)
-        shuffle_sets = self._find_all_shuffle_sets(source)
-        working = list(decoded_strings)
-        for shuf in shuffle_sets:
-            working = self._apply_shuffle(working, shuf)
-        for b64_map in b64_maps:
-            for s in working:
-                decoded = self._decode_custom_b64(s, b64_map)
-                if decoded and len(decoded) > 4:
-                    bc = self.bytecode_harvester.extract(decoded)
-                    if bc:
-                        return bc
+        for fm in func_matches:
+            pos = fm.start()
+            block_start = source.rfind('return', 0, pos)
+            if block_start == -1:
+                block_start = source.rfind('(', 0, pos)
+                if block_start == -1:
+                    continue
+            segment = source[block_start:]
+            brace_pos = segment.find('{')
+            if brace_pos == -1:
+                continue
+            table_body = self._extract_balanced_braces(segment, brace_pos)
+            if not table_body:
+                continue
+            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+            diags.append(f"IIFE: table at offset {block_start+brace_pos}, {len(strings)} strings, body len {len(table_body)}")
+            if len(strings) < 4:
+                continue
+            decoded_strings = [self._unescape_lua_string(s) for s in strings]
+            if not any(len(s) > 20 for s in decoded_strings):
+                continue
+            b64_maps = self._find_all_b64_maps(source)
+            shuffle_sets = self._find_all_shuffle_sets(source)
+            diags.append(f"IIFE: {len(decoded_strings)} strings, {len(b64_maps)} b64 maps, {len(shuffle_sets)} shuffle sets")
+            working = list(decoded_strings)
+            for shuf in shuffle_sets:
+                working = self._apply_shuffle(working, shuf)
+            for b64_map in b64_maps:
+                for s in working:
+                    decoded = self._decode_custom_b64(s, b64_map)
+                    if decoded and len(decoded) > 4:
+                        bc = self.bytecode_harvester.extract(decoded)
+                        if bc:
+                            diags.append(f"IIFE: bytecode found ({len(bc)} bytes)")
+                            return bc
+        diags.append("IIFE: no bytecode produced from any table")
         return None
 
     @staticmethod
