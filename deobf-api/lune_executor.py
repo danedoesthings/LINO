@@ -195,7 +195,7 @@ end
 """
 
 async def execute_and_capture(lua_source):
-    info = {"stub_globals": [], "runtime_error": None, "capture_success": False}
+    info = {"stub_globals": [], "runtime_error": None, "capture_success": False, "stderr": ""}
     with tempfile.TemporaryDirectory() as tmpdir:
         tag = hashlib.md5(lua_source.encode(errors="replace")).hexdigest()[:8]
         script_path = os.path.join(tmpdir, f"input_{tag}.luau")
@@ -212,6 +212,7 @@ async def execute_and_capture(lua_source):
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=EXECUTION_TIMEOUT)
+                info["stderr"] = stderr.decode("utf-8", errors="replace")[:1000] if stderr else ""
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
