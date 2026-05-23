@@ -69,6 +69,8 @@ class DeobfEngine:
             layers, caps, diag = execute_sandbox(source, timeout=120)
 
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+        if diag:
+            reasons['sandbox'] = diag[:300]
 
         if layers:
             for i, item in enumerate(layers):
@@ -93,6 +95,32 @@ class DeobfEngine:
             if len(combined) > 200 and self._is_valid_lua(combined):
                 return self._beautify(combined), 'sandbox_strings', 'Captured strings reconstructed', trace
 
+        # Fallback: try other lifters and decoders
+        for lifter in self.lifters:
+            try:
+                decoded_chunks = lifter.lift(source)
+                if decoded_chunks:
+                    for chunk in decoded_chunks:
+                        if isinstance(chunk, bytes):
+                            bc = self.bytecode_harvester.extract(chunk)
+                            if bc:
+                                dc, err = self._run_unluac(bc)
+                                if dc and self._is_valid_lua(dc):
+                                    return self._beautify(dc), 'lifter_unluac', 'Lifter bytecode decompiled', trace
+                        elif isinstance(chunk, str) and self._is_valid_lua(chunk) and len(chunk) > 200:
+                            return self._beautify(chunk), 'lifter_source', 'Lifter source recovered', trace
+            except Exception:
+                pass
+
+        try:
+            all_strings = self.string_decoder.decode_all(source)
+            if all_strings:
+                combined = '\n'.join(all_strings)
+                if len(combined) > 200 and self._is_valid_lua(combined):
+                    return self._beautify(combined), 'string_decode', 'String decode', trace
+        except Exception:
+            pass
+
         lune_data, lune_info = self._run_lune(source)
         if lune_data:
             if isinstance(lune_data, bytes) and len(lune_data) >= 12:
@@ -104,7 +132,7 @@ class DeobfEngine:
             try:
                 text = lune_data.decode('utf-8', errors='replace')
                 if self._is_valid_lua(text):
-                    return self._beautify(text), 'lune_capture', 'Source captured via Lune', trace
+                    return self._beautify(text), 'lune_capture', 'Lune source', trace
             except Exception:
                 pass
 
@@ -113,17 +141,14 @@ class DeobfEngine:
             dc, err = self._run_unluac(raw_bytecode)
             if dc and self._is_valid_lua(dc):
                 return self._beautify(dc), 'deep_scan_unluac', 'Deep scan bytecode decompiled', trace
-            if err: reasons['deep_scan_unluac'] = err
-            return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bytecode ({len(raw_bytecode)}B)', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
-            parts.append('Errors: ' + '; '.join(f"{k}: {v[:60]}" for k, v in reasons.items()))
-        reason = '\n'.join(parts) if parts else (diag if diag else 'All stages exhausted')
+            parts.append('Info: ' + '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items()))
+        reason = '\n'.join(parts)
         return '', 'unable', reason, trace
 
     def _decode_string_table(self, source, diags):
-        # Return the original escaped strings in the order they appear in the table
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             return None
@@ -131,35 +156,7 @@ class DeobfEngine:
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
             return None
-        # No shuffling – return raw escaped strings as they are
         return strings
-
-    def _extract_shuffle_pairs(self, source):
-        # Still needed? Not for this fix, but keep for compatibility
-        m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
-        if not m:
-            return []
-        outer = m.group(1)
-        inner_tables = re.findall(r'\{([-\d()+\-*/\s]+)[;,]([-\d()+\-*/\s]+)\}', outer)
-        ranges = []
-        for expr1, expr2 in inner_tables:
-            lo = self._safe_eval(expr1.strip())
-            hi = self._safe_eval(expr2.strip())
-            if lo is not None and hi is not None:
-                ranges.append((lo, hi))
-        return ranges
-
-    @staticmethod
-    def _safe_eval(expr):
-        expr = expr.replace(' ', '')
-        if not expr:
-            return None
-        if not re.match(r'^[\d+\-*/()]+$', expr):
-            return None
-        try:
-            return eval(expr)
-        except Exception:
-            return None
 
     def _extract_bytecode(self, data):
         if isinstance(data, bytes):
