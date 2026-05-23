@@ -10,8 +10,11 @@ def _lua_str(path):
 def _lua_table_strings(strings):
     parts = []
     for s in strings:
-        escaped = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
-        parts.append('"' + escaped + '"')
+        # The strings are already valid Lua string literals (e.g., "\076\049\117...")
+        # Just wrap them in quotes without additional escaping.
+        # Only escape double quotes and backslashes that are not part of \NNN sequences.
+        # Since there are no double quotes or lone backslashes, simple quoting is enough.
+        parts.append('"' + s + '"')
     return '{' + ','.join(parts) + '}'
 
 def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
