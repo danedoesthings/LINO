@@ -130,26 +130,15 @@ class DeobfEngine:
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
             return None
-        original_table = []
-        for s in strings:
-            decoded = self._decode_wearedevs_string(s)
-            original_table.append(decoded if decoded else b'')
         shuffle_pairs = self._extract_shuffle_pairs(source)
-        working = list(original_table)
+        working = list(strings)  # raw escaped strings
         for lo, hi in shuffle_pairs:
             lo_idx, hi_idx = lo - 1, hi - 1
             while lo_idx < hi_idx:
                 working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
                 lo_idx += 1
                 hi_idx -= 1
-        # Return as list of strings
-        result = []
-        for chunk in working:
-            if len(chunk) == 0:
-                result.append('')
-            else:
-                result.append(chunk.decode('latin-1'))
-        return result
+        return working
 
     def _extract_shuffle_pairs(self, source):
         m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
@@ -176,26 +165,6 @@ class DeobfEngine:
             return eval(expr)
         except Exception:
             return None
-
-    @staticmethod
-    def _decode_wearedevs_string(s):
-        result = bytearray()
-        i = 0
-        while i < len(s):
-            if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
-                j = i + 1
-                while j < len(s) and s[j].isdigit() and j - i < 4:
-                    j += 1
-                try:
-                    val = int(s[i+1:j])
-                    if 0 <= val <= 255:
-                        result.append(val)
-                except ValueError:
-                    pass
-                i = j
-            else:
-                i += 1
-        return bytes(result)
 
     def _extract_bytecode(self, data):
         if isinstance(data, bytes):
