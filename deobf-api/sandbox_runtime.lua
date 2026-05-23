@@ -1,6 +1,27 @@
 local outdir = "OUTDIR_PLACEHOLDER"
 local inpath = "INPATH_PLACEHOLDER"
 
+local _real_io_open = io.open
+local _real_tostring = tostring
+local _real_debug_traceback = debug.traceback
+local _real_xpcall = xpcall
+local _real_setfenv = setfenv
+local _real_loadfile = loadfile
+local _real_pairs = pairs
+local _real_type = type
+local _real_select = select
+local _real_unpack = unpack
+local _real_rawget = rawget
+local _real_rawset = rawset
+local _real_setmetatable = setmetatable
+local _real_getmetatable = getmetatable
+local _real_next = next
+local _real_table_concat = table.concat
+local _real_string_byte = string.byte
+local _real_math_floor = math.floor
+local _real_math_random = math.random
+local _real_math_randomseed = math.randomseed
+
 local function _pure_bit32()
     local bit = {}
     function bit.bxor(a, b)
@@ -8,7 +29,7 @@ local function _pure_bit32()
         while a > 0 or b > 0 do
             local abit, bbit = a % 2, b % 2
             if abit ~= bbit then r = r + p end
-            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+            a, b, p = _real_math_floor(a/2), _real_math_floor(b/2), p * 2
         end
         return r
     end
@@ -17,7 +38,7 @@ local function _pure_bit32()
         while a > 0 and b > 0 do
             local abit, bbit = a % 2, b % 2
             if abit == 1 and bbit == 1 then r = r + p end
-            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+            a, b, p = _real_math_floor(a/2), _real_math_floor(b/2), p * 2
         end
         return r
     end
@@ -26,7 +47,7 @@ local function _pure_bit32()
         while a > 0 or b > 0 do
             local abit, bbit = a % 2, b % 2
             if abit == 1 or bbit == 1 then r = r + p end
-            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+            a, b, p = _real_math_floor(a/2), _real_math_floor(b/2), p * 2
         end
         return r
     end
@@ -35,7 +56,7 @@ local function _pure_bit32()
         local r = 0
         for i = 0, bits-1 do
             if a % 2 == 0 then r = r + 2^i end
-            a = math.floor(a/2)
+            a = _real_math_floor(a/2)
         end
         return r
     end
@@ -43,11 +64,11 @@ local function _pure_bit32()
         return a * 2^n
     end
     function bit.rshift(a, n)
-        return math.floor(a / 2^n)
+        return _real_math_floor(a / 2^n)
     end
     function bit.arshift(a, n)
-        if a >= 0 then return math.floor(a / 2^n)
-        else return bit.bor(math.floor(a / 2^n), bit.bnot(2^(32-n)-1)) end
+        if a >= 0 then return _real_math_floor(a / 2^n)
+        else return bit.bor(_real_math_floor(a / 2^n), bit.bnot(2^(32-n)-1)) end
     end
     function bit.rol(a, n)
         local bits = 32
@@ -71,16 +92,16 @@ local bit_real   = bit32_real
 
 local _proxy_mt = {
     __index = function(t, k)
-        if type(k) == "number" then return 0 end
+        if _real_type(k) == "number" then return 0 end
         local child = {}
-        setmetatable(child, _proxy_mt)
-        rawset(t, k, child)
+        _real_setmetatable(child, _proxy_mt)
+        _real_rawset(t, k, child)
         return child
     end,
-    __newindex = function(t, k, v) rawset(t, k, v) end,
+    __newindex = function(t, k, v) _real_rawset(t, k, v) end,
     __call = function(t, ...)
         local result = {}
-        setmetatable(result, _proxy_mt)
+        _real_setmetatable(result, _proxy_mt)
         return result
     end,
     __add = function() return 0 end,
@@ -90,17 +111,17 @@ local _proxy_mt = {
     __mod = function() return 0 end,
     __pow = function() return 0 end,
     __unm = function() return 0 end,
-    __concat = function(a, b) return tostring(a) .. tostring(b) end,
+    __concat = function(a, b) return _real_tostring(a) .. _real_tostring(b) end,
     __eq = function() return false end,
     __lt = function() return false end,
     __le = function() return false end,
-    __tostring = function(t) return tostring(rawget(t, "_name") or "proxy") end,
+    __tostring = function(t) return _real_tostring(_real_rawget(t, "_name") or "proxy") end,
     __len = function() return 0 end,
 }
 
 local function _new_proxy(name)
     local p = { _name = name or "proxy" }
-    setmetatable(p, _proxy_mt)
+    _real_setmetatable(p, _proxy_mt)
     return p
 end
 
@@ -122,8 +143,8 @@ _players_service.GetPlayers = function() return { _local_player } end
 _players_service.GetPlayerByUserId = function() return _local_player end
 
 local _game = _new_proxy("game")
-rawset(_game, "GetService", function(self, name)
-    local svc = _new_proxy("Service:" .. tostring(name))
+_real_rawset(_game, "GetService", function(self, name)
+    local svc = _new_proxy("Service:" .. _real_tostring(name))
     if name == "Players" then return _players_service end
     if name == "ReplicatedStorage" then return _new_proxy("ReplicatedStorage") end
     if name == "ServerStorage" then return _new_proxy("ServerStorage") end
@@ -148,20 +169,20 @@ rawset(_game, "GetService", function(self, name)
     if name == "PhysicsService" then return _new_proxy("PhysicsService") end
     return svc
 end)
-rawset(_game, "Players", _players_service)
-rawset(_game, "Workspace", _new_proxy("Workspace"))
-rawset(_game, "ReplicatedStorage", _new_proxy("ReplicatedStorage"))
-rawset(_game, "ServerStorage", _new_proxy("ServerStorage"))
-rawset(_game, "ServerScriptService", _new_proxy("ServerScriptService"))
-rawset(_game, "Lighting", _new_proxy("Lighting"))
-rawset(_game, "StarterGui", _new_proxy("StarterGui"))
-rawset(_game, "StarterPack", _new_proxy("StarterPack"))
-rawset(_game, "StarterPlayer", _new_proxy("StarterPlayer"))
-rawset(_game, "PlaceId", 1)
-rawset(_game, "JobId", "00000000-0000-0000-0000-000000000000")
-rawset(_game, "CreatorId", 0)
-rawset(_game, "CreatorType", _new_proxy("CreatorType"))
-rawset(_game, "IsLoaded", function() return true end)
+_real_rawset(_game, "Players", _players_service)
+_real_rawset(_game, "Workspace", _new_proxy("Workspace"))
+_real_rawset(_game, "ReplicatedStorage", _new_proxy("ReplicatedStorage"))
+_real_rawset(_game, "ServerStorage", _new_proxy("ServerStorage"))
+_real_rawset(_game, "ServerScriptService", _new_proxy("ServerScriptService"))
+_real_rawset(_game, "Lighting", _new_proxy("Lighting"))
+_real_rawset(_game, "StarterGui", _new_proxy("StarterGui"))
+_real_rawset(_game, "StarterPack", _new_proxy("StarterPack"))
+_real_rawset(_game, "StarterPlayer", _new_proxy("StarterPlayer"))
+_real_rawset(_game, "PlaceId", 1)
+_real_rawset(_game, "JobId", "00000000-0000-0000-0000-000000000000")
+_real_rawset(_game, "CreatorId", 0)
+_real_rawset(_game, "CreatorType", _new_proxy("CreatorType"))
+_real_rawset(_game, "IsLoaded", function() return true end)
 
 game = _game
 workspace = _new_proxy("Workspace")
@@ -178,35 +199,35 @@ local _safe_globals = {
     print = function(...)
         local args = {...}
         local parts = {}
-        for i = 1, select("#", ...) do
-            parts[i] = tostring(args[i])
+        for i = 1, _real_select("#", ...) do
+            parts[i] = _real_tostring(args[i])
         end
-        local capfile = io.open(outdir .. "/cap.txt", "a")
+        local capfile = _real_io_open(outdir .. "/cap.txt", "a")
         if capfile then
-            capfile:write(table.concat(parts, "\t") .. "---SEP---")
+            capfile:write(_real_table_concat(parts, "\t") .. "---SEP---")
             capfile:close()
         end
     end,
     warn = function(...)
-        local capfile = io.open(outdir .. "/cap.txt", "a")
+        local capfile = _real_io_open(outdir .. "/cap.txt", "a")
         if capfile then
-            capfile:write(tostring(select(1, ...)) .. "---SEP---")
+            capfile:write(_real_tostring(_real_select(1, ...)) .. "---SEP---")
             capfile:close()
         end
     end,
     error = function(msg, level)
-        local errfile = io.open(outdir .. "/error.txt", "w")
+        local errfile = _real_io_open(outdir .. "/error.txt", "w")
         if errfile then
-            errfile:write(tostring(msg))
+            errfile:write(_real_tostring(msg))
             errfile:close()
         end
         error(msg, level or 0)
     end,
     assert = function(v, msg)
         if not v then
-            local errfile = io.open(outdir .. "/error.txt", "w")
+            local errfile = _real_io_open(outdir .. "/error.txt", "w")
             if errfile then
-                errfile:write(tostring(msg or "assertion failed"))
+                errfile:write(_real_tostring(msg or "assertion failed"))
                 errfile:close()
             end
         end
@@ -214,28 +235,28 @@ local _safe_globals = {
     end,
     pcall = function(f, ...)
         local args = {...}
-        local results = { pcall(f, unpack(args)) }
-        return unpack(results)
+        local results = { pcall(f, _real_unpack(args)) }
+        return _real_unpack(results)
     end,
     xpcall = function(f, errhandler)
-        return xpcall(f, errhandler)
+        return _real_xpcall(f, errhandler)
     end,
-    type = type,
-    tostring = tostring,
+    type = _real_type,
+    tostring = _real_tostring,
     tonumber = tonumber,
-    pairs = pairs,
+    pairs = _real_pairs,
     ipairs = ipairs,
-    next = next,
-    rawget = rawget,
-    rawset = rawset,
-    setmetatable = setmetatable,
-    getmetatable = getmetatable,
-    select = select,
-    unpack = unpack,
+    next = _real_next,
+    rawget = _real_rawget,
+    rawset = _real_rawset,
+    setmetatable = _real_setmetatable,
+    getmetatable = _real_getmetatable,
+    select = _real_select,
+    unpack = _real_unpack,
     string = string,
     table = table,
     math = math,
-    io = io,
+    io = { open = _real_io_open },
     os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "01/01/2000" end, difftime = function() return 0 end },
     coroutine = coroutine,
     bit32 = bit32_real,
@@ -280,7 +301,7 @@ local _safe_globals = {
     settings = _new_proxy("settings"),
     UserSettings = _new_proxy("UserSettings"),
     require = function(id)
-        return _new_proxy("require:" .. tostring(id))
+        return _new_proxy("require:" .. _real_tostring(id))
     end,
 }
 
@@ -288,38 +309,38 @@ local _env_mt = {
     __index = function(t, k)
         local v = _safe_globals[k]
         if v ~= nil then return v end
-        if type(k) == "string" then
+        if _real_type(k) == "string" then
             return _new_proxy(k)
         end
         return nil
     end,
     __newindex = function(t, k, v)
-        rawset(t, k, v)
+        _real_rawset(t, k, v)
     end,
 }
 
-setmetatable(_G, _env_mt)
+_real_setmetatable(_G, _env_mt)
 local _capture_count = 0
 local _orig_loadstring = loadstring
 
 loadstring = function(chunk, chunkname)
-    if chunk and type(chunk) == "string" and #chunk > 0 then
+    if chunk and _real_type(chunk) == "string" and #chunk > 0 then
         _capture_count = _capture_count + 1
-        local layer_path = outdir .. "/layer_" .. tostring(_capture_count) .. ".lua"
-        local f = io.open(layer_path, "w")
+        local layer_path = outdir .. "/layer_" .. _real_tostring(_capture_count) .. ".lua"
+        local f = _real_io_open(layer_path, "w")
         if f then
             f:write(chunk)
             f:close()
         end
         local dump_path = outdir .. "/dump.bin"
-        local dumpf = io.open(dump_path, "wb")
+        local dumpf = _real_io_open(dump_path, "wb")
         if dumpf then
             dumpf:write(chunk)
             dumpf:close()
         end
         local fn, compile_err = _orig_loadstring(chunk, chunkname)
         if fn then
-            setfenv(fn, _G)
+            _real_setfenv(fn, _G)
             return fn, nil
         end
         return function() end, compile_err
@@ -333,7 +354,7 @@ local _orig_string_dump = string.dump
 string.dump = function(func, strip)
     local bc = _orig_string_dump(func, strip)
     local dump_path = outdir .. "/dump.bin"
-    local f = io.open(dump_path, "wb")
+    local f = _real_io_open(dump_path, "wb")
     if f then
         f:write(bc)
         f:close()
@@ -345,48 +366,49 @@ local function _scan_table(t, name, depth, visited)
     if depth > 10 then return end
     if visited[t] then return end
     visited[t] = true
-    local memfile = io.open(outdir .. "/memory.txt", "a")
+    local memfile = _real_io_open(outdir .. "/memory.txt", "a")
     if memfile then
-        memfile:write(tostring(name) .. " = " .. tostring(t) .. "---MEMSEP---")
+        memfile:write(_real_tostring(name) .. " = " .. _real_tostring(t) .. "---MEMSEP---")
         memfile:close()
     end
-    if type(t) == "table" then
-        for k, v in pairs(t) do
-            if type(v) == "string" and #v >= 12 then
+    if _real_type(t) == "table" then
+        for k, v in _real_pairs(t) do
+            if _real_type(v) == "string" and #v >= 12 then
                 local bytes = {}
                 for i = 1, #v do
-                    bytes[i] = string.byte(v, i)
+                    bytes[i] = _real_string_byte(v, i)
                 end
                 if bytes[1] == 27 and bytes[2] == 76 and bytes[3] == 117 and bytes[4] == 97 then
-                    local sofile = io.open(outdir .. "/sandbox_output.lua", "w")
+                    local sofile = _real_io_open(outdir .. "/sandbox_output.lua", "w")
                     if sofile then
                         sofile:write("SANDBOX_OUTPUT_START")
                         for i = 1, #bytes do
-                            sofile:write("\\" .. tostring(bytes[i]))
+                            sofile:write("\\" .. _real_tostring(bytes[i]))
                         end
                         sofile:write("SANDBOX_OUTPUT_END")
                         sofile:close()
                     end
                 end
             end
-            if type(v) == "table" or type(v) == "function" then
-                _scan_table(v, name .. "." .. tostring(k), depth + 1, visited)
+            if _real_type(v) == "table" or _real_type(v) == "function" then
+                _scan_table(v, name .. "." .. _real_tostring(k), depth + 1, visited)
             end
         end
     end
 end
 
-local diagfile = io.open(outdir .. "/diag.txt", "w")
+local diagfile = _real_io_open(outdir .. "/diag.txt", "w")
 if diagfile then
     diagfile:write("Sandbox starting...\n")
     diagfile:close()
 end
 
-setfenv(1, _G)
+_real_setfenv(1, _G)
 
 local function _error_handler(err)
-    local traceback_str = debug.traceback(err, 3)
-    local errfile = io.open(outdir .. "/error.txt", "w")
+    local msg = _real_tostring(err)
+    local traceback_str = _real_debug_traceback(msg, 2)
+    local errfile = _real_io_open(outdir .. "/error.txt", "w")
     if errfile then
         errfile:write(traceback_str)
         errfile:close()
@@ -395,35 +417,35 @@ local function _error_handler(err)
 end
 
 local function _run_input()
-    local f, err = loadfile(inpath)
+    local f, err = _real_loadfile(inpath)
     if not f then
-        local errfile = io.open(outdir .. "/error.txt", "w")
+        local errfile = _real_io_open(outdir .. "/error.txt", "w")
         if errfile then
-            errfile:write("LOADFILE_ERROR: " .. tostring(err))
+            errfile:write("LOADFILE_ERROR: " .. _real_tostring(err))
             errfile:close()
         end
         return
     end
-    setfenv(f, _G)
-    local proxy_arg = setmetatable({}, { __index = function(t,k) if type(k) == "number" then return "" else return rawget(t,k) or "" end end })
-    local ok, result = xpcall(function() return f(proxy_arg) end, _error_handler)
+    _real_setfenv(f, _G)
+    local proxy_arg = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
+    local ok, result = _real_xpcall(function() return f(proxy_arg) end, _error_handler)
     if not ok then
-        local errfile = io.open(outdir .. "/error.txt", "a")
+        local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
-            errfile:write("\nEXECUTION_ERROR: " .. tostring(result))
+            errfile:write("\nEXECUTION_ERROR: " .. _real_tostring(result))
             errfile:close()
         end
     end
     local visited = {}
     _scan_table(_G, "_G", 0, visited)
-    for k, v in pairs(_safe_globals) do
-        if type(v) == "table" then
+    for k, v in _real_pairs(_safe_globals) do
+        if _real_type(v) == "table" then
             _scan_table(v, k, 0, visited)
         end
     end
-    local diagfile2 = io.open(outdir .. "/diag.txt", "a")
+    local diagfile2 = _real_io_open(outdir .. "/diag.txt", "a")
     if diagfile2 then
-        diagfile2:write("Sandbox complete. Captures: " .. tostring(_capture_count) .. "\n")
+        diagfile2:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
         diagfile2:close()
     end
 end
