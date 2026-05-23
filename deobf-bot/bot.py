@@ -134,6 +134,13 @@ async def deobf_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         retry_seconds = error.retry_after
         await ctx.send(f'Cooldown active. Try again in {retry_seconds:.0f}s (resets <t:{int(datetime.datetime.utcnow().timestamp() + retry_seconds)}:R>)')
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send('Missing required argument. Usage: `=deobf <file>` or paste code.')
+    elif isinstance(error, commands.CommandInvokeError):
+        log.error(f"Command invoke error: {error.original}")
+        await ctx.send(f'An internal error occurred. Check the logs.')
+    else:
+        log.error(f"Unhandled command error: {error}")
 
 @tree.command(name='deobf', description='Deobfuscate a Lua file')
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
@@ -147,9 +154,21 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
     res = await run_deobf(raw, file.filename)
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
 
+@slash_deobf.error
+async def slash_deobf_error(interaction: discord.Interaction, error):
+    log.error(f"Slash command error: {error}")
+    try:
+        await interaction.followup.send(f'An error occurred: {str(error)[:1000]}', ephemeral=True)
+    except Exception:
+        pass
+
 @bot.event
 async def on_ready():
-    await tree.sync()
+    try:
+        await tree.sync()
+        log.info(f'Synced commands globally')
+    except Exception as e:
+        log.error(f"Failed to sync commands: {e}")
     log.info(f'Ready: {bot.user} | API: {API_URL}')
 
 if __name__ == '__main__':
