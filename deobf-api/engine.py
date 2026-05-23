@@ -246,30 +246,30 @@ class DeobfEngine:
 
     def _extract_wearedevs_bytecode(self, source, diags):
         print("[engine] _extract_wearedevs_bytecode called", file=sys.stderr)
+        # 1. Find the string table R
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("WeAreDevs: no string table found")
-            print("[engine] WeAreDevs: no string table", file=sys.stderr)
             return None
         table_body = m.group(1)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
             diags.append(f"WeAreDevs: only {len(strings)} strings in table")
-            print(f"[engine] WeAreDevs: only {len(strings)} strings", file=sys.stderr)
             return None
         diags.append(f"WeAreDevs: found {len(strings)} escaped strings")
-        print(f"[engine] WeAreDevs: {len(strings)} strings", file=sys.stderr)
-        # Build original table with exact indices (1-indexed), preserving empties
+        # 2. Decode escapes -> original_table (preserving empties)
         original_table = []
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
             original_table.append(decoded if decoded else b'')
         diags.append(f"WeAreDevs: decoded {len(strings)} strings ({sum(1 for d in original_table if len(d)==0)} empty)")
-        print(f"[engine] WeAreDevs: decoded {len(strings)} strings", file=sys.stderr)
-        # Parse shuffle pairs from the for loop
+        # 3. Parse the custom base64 map N
+        b64_reverse = self._extract_custom_b64_reverse(source)
+        diags.append(f"WeAreDevs: custom b64 map has {len(b64_reverse)} entries")
+        # 4. Parse shuffle pairs
         shuffle_pairs = self._extract_shuffle_pairs(source)
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle ranges")
-        print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle ranges", file=sys.stderr)
+        # 5. Apply shuffle
         working = list(original_table)
         for lo, hi in shuffle_pairs:
             lo_idx = lo - 1
@@ -278,19 +278,84 @@ class DeobfEngine:
                 working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
                 lo_idx += 1
                 hi_idx -= 1
-        # Filter out empty strings before concatenating
-        non_empty = [d for d in working if len(d) > 0]
-        combined = b''.join(non_empty)
+        # 6. Decode each shuffled string through custom base64
+        decoded_chunks = []
+        for chunk in working:
+            if len(chunk) == 0:
+                continue
+            decoded = self._decode_custom_b64(chunk, b64_reverse)
+            if decoded:
+                decoded_chunks.append(decoded)
+        if not decoded_chunks:
+            diags.append("WeAreDevs: no chunks decoded from custom b64")
+            return None
+        diags.append(f"WeAreDevs: {len(decoded_chunks)} chunks decoded from custom b64")
+        # 7. Concatenate and find bytecode
+        combined = b''.join(decoded_chunks)
         diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
         print(f"[engine] WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}", file=sys.stderr)
         bc = self.bytecode_harvester.extract(combined)
         if bc:
             diags.append(f"WeAreDevs: bytecode extracted ({len(bc)} bytes)")
-            print(f"[engine] WeAreDevs: bytecode {len(bc)} bytes", file=sys.stderr)
             return bc
         diags.append("WeAreDevs: no bytecode signature found in combined data")
-        print("[engine] WeAreDevs: no bytecode signature", file=sys.stderr)
         return None
+
+    def _extract_custom_b64_reverse(self, source):
+        """Extract the N table and build a reverse map: value -> character."""
+        m = re.search(r'local N=\{([^}]+)\}', source)
+        if not m:
+            return {}
+        body = m.group(1)
+        # Entries: key=value; or ["key"]=value
+        entries = re.findall(r'(\[\"\\?\d+\"\]|\[\"\\?\d+\"\]|\w+)=([-\d()+\-*/]+)', body)
+        # Also handle string keys: ["\055"]=135105-135089
+        entries2 = re.findall(r'\["(\\.)"\]=([-\d()+\-*/]+)', body)
+        reverse = {}
+        # Process numeric-string keys
+        for key_str, val_expr in entries2:
+            val = self._safe_eval(val_expr.strip())
+            if val is not None:
+                # key_str is like "\055" — decode it
+                key_char = self._decode_wearedevs_string(key_str)
+                if key_char:
+                    reverse[val] = key_char.decode('latin-1')
+        # Process identifier keys (single chars like M, V, q, etc.)
+        for key_str, val_expr in entries:
+            if key_str.startswith('['):
+                continue
+            val = self._safe_eval(val_expr.strip())
+            if val is not None and len(key_str) == 1:
+                reverse[val] = key_str
+        # Fill in standard base64 chars for any missing values 0-63
+        std_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        for i, ch in enumerate(std_b64):
+            if i not in reverse:
+                reverse[i] = ch
+        return reverse
+
+    def _decode_custom_b64(self, data, reverse_map):
+        """Decode bytes using the custom base64 reverse map (value -> char)."""
+        if not reverse_map or len(data) == 0:
+            return None
+        # Build forward map: char -> value
+        forward = {v: k for k, v in reverse_map.items()}
+        bit_buf = 0
+        bits = 0
+        out = bytearray()
+        for byte_val in data:
+            char = chr(byte_val) if byte_val < 256 else ''
+            if char not in forward:
+                if byte_val == ord('='):
+                    break
+                continue
+            val = forward[char]
+            bit_buf = (bit_buf << 6) | val
+            bits += 6
+            while bits >= 8:
+                bits -= 8
+                out.append((bit_buf >> bits) & 0xFF)
+        return bytes(out)
 
     def _extract_shuffle_pairs(self, source):
         """Extract {start,end} pairs from the shuffle loop ipairs table."""
