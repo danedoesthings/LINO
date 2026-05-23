@@ -56,276 +56,100 @@ class DeobfEngine:
         trace = []
         diags = []
         reasons = {}
-        input_size = len(source.encode('utf-8', errors='replace'))
-        input_lines = len(source.splitlines())
 
         fingerprint = self.fingerprinter.analyze(source)
-        trace.append({'stage': 'fingerprint', 'details': fingerprint, 'input_size': input_size, 'input_lines': input_lines})
+        trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        try:
-            wearedevs_result = self._extract_wearedevs_source(source, diags)
-            trace.append({'stage': 'wearedevs_extractor', 'success': wearedevs_result is not None})
-            if wearedevs_result:
-                if isinstance(wearedevs_result, bytes):
-                    dc, err = self._run_unluac(wearedevs_result)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'wearedevs_unluac', f'Decompiled ({len(dc)} chars)', trace
-                    if err:
-                        reasons['wearedevs_unluac'] = err
-                    return base64.b64encode(wearedevs_result).decode('ascii'), 'bytecode', f'Bytecode ({len(wearedevs_result)}B). unluac: {err}', trace
-                else:
-                    return self._beautify(wearedevs_result), 'wearedevs_source', f'Source recovered ({len(wearedevs_result)} chars)', trace
-        except Exception as e:
-            diags.append(f"WeAreDevs crashed: {str(e)}")
-            trace.append({'stage': 'wearedevs_extractor_error', 'error': str(e)})
-
-        try:
-            result = self._try_rapid_string_decode(source, trace)
-            if result:
-                bc = self._extract_bytecode(result)
-                if bc:
-                    dc, err = self._run_unluac(bc)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'rapid_decode_unluac', f'Rapid decode ({len(dc)} chars)', trace
-                    if err: reasons['rapid_decode_unluac'] = err
-        except Exception as e:
-            diags.append(f"Rapid decode crashed: {str(e)}")
-
-        for lifter in self.lifters:
-            lifter_name = lifter.__class__.__name__
-            try:
-                decoded_chunks = lifter.lift(source)
-                if decoded_chunks:
-                    chunk_no_bc = 0
-                    for chunk in decoded_chunks:
-                        if isinstance(chunk, bytes):
-                            bc = self.bytecode_harvester.extract(chunk)
-                            if bc:
-                                dc, err = self._run_unluac(bc)
-                                if dc and self._is_valid_lua(dc):
-                                    return self._beautify(dc), f'{lifter_name}_unluac', f'{lifter_name} ({len(dc)} chars)', trace
-                                if err: reasons[f'{lifter_name}_unluac'] = err
-                            else:
-                                chunk_no_bc += 1
-                        elif isinstance(chunk, str):
-                            if self._is_valid_lua(chunk) and len(chunk) > 200:
-                                return self._beautify(chunk), f'{lifter_name}_source', f'{lifter_name} source ({len(chunk)} chars)', trace
-                            else:
-                                chunk_no_bc += 1
-                    diags.append(f"{lifter_name}: {len(decoded_chunks)} chunks, {chunk_no_bc} no bc")
-            except Exception as e:
-                diags.append(f"{lifter_name} crashed: {str(e)}")
-
-        try:
-            all_strings = self.string_decoder.decode_all(source)
-            if all_strings:
-                combined = '\n'.join(all_strings)
-                if len(combined) > 200 and self._is_valid_lua(combined):
-                    return self._beautify(combined), 'string_decode', f'String decode ({len(combined)} chars)', trace
-        except Exception as e:
-            diags.append(f"String decoder crashed: {str(e)}")
-
-        try:
+        # Decode the string table to pass as varargs to sandbox
+        string_table = self._decode_string_table(source, diags)
+        if string_table:
+            diags.append(f"decoded {len(string_table)} strings for sandbox")
+            layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+        else:
             layers, caps, diag = execute_sandbox(source, timeout=120)
-            trace.append({'stage': 'sandbox', 'layers': len(layers)})
-            if diag: reasons['sandbox'] = diag[:150]
-            if layers:
-                diags.append(f"sandbox: {len(layers)} layers")
+
+        trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+
+        if layers:
             for i, item in enumerate(layers):
                 if isinstance(item, bytes) and len(item) >= 12:
                     bc = self.bytecode_harvester.extract(item)
                     if bc:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
-                            return self._beautify(dc), 'sandbox_unluac', f'Sandbox layer {i} ({len(dc)} chars)', trace
-                if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
-                    return self._beautify(item), 'sandbox_capture', f'Layer {i} source ({len(item)} chars)', trace
-        except Exception as e:
-            diags.append(f"Sandbox crashed: {str(e)}")
-
-        try:
-            lune_data, lune_info = self._run_lune(source)
-            if lune_data:
-                if isinstance(lune_data, bytes) and len(lune_data) >= 12:
-                    bc = self.bytecode_harvester.extract(lune_data)
+                            return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
+                if isinstance(item, str):
+                    bc = self._extract_bytecode(item)
                     if bc:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
-                            return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
-                try:
-                    text = lune_data.decode('utf-8', errors='replace')
-                    if self._is_valid_lua(text):
-                        return self._beautify(text), 'lune_capture', f'Lune source ({len(text)} chars)', trace
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                            return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
+                    if len(item) > 100 and self._is_valid_lua(item):
+                        return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
 
-        try:
-            raw_bytecode = self.bytecode_harvester.deep_scan(source)
-            if raw_bytecode:
-                dc, err = self._run_unluac(raw_bytecode)
-                if dc and self._is_valid_lua(dc):
-                    return self._beautify(dc), 'deep_scan_unluac', f'Deep scan ({len(dc)} chars)', trace
-                if err: reasons['deep_scan_unluac'] = err
-                return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bc ({len(raw_bytecode)}B)', trace
-        except Exception:
-            pass
+        all_text = [c for c in caps if isinstance(c, str) and len(c) > 20]
+        if all_text:
+            combined = '\n'.join(all_text)
+            if len(combined) > 200 and self._is_valid_lua(combined):
+                return self._beautify(combined), 'sandbox_strings', 'Captured strings reconstructed', trace
+
+        lune_data, lune_info = self._run_lune(source)
+        if lune_data:
+            if isinstance(lune_data, bytes) and len(lune_data) >= 12:
+                bc = self.bytecode_harvester.extract(lune_data)
+                if bc:
+                    dc, err = self._run_unluac(bc)
+                    if dc and self._is_valid_lua(dc):
+                        return self._beautify(dc), 'lune_unluac', 'Lune bytecode decompiled', trace
+            try:
+                text = lune_data.decode('utf-8', errors='replace')
+                if self._is_valid_lua(text):
+                    return self._beautify(text), 'lune_capture', 'Source captured via Lune', trace
+            except Exception:
+                pass
+
+        raw_bytecode = self.bytecode_harvester.deep_scan(source)
+        if raw_bytecode:
+            dc, err = self._run_unluac(raw_bytecode)
+            if dc and self._is_valid_lua(dc):
+                return self._beautify(dc), 'deep_scan_unluac', 'Deep scan bytecode decompiled', trace
+            if err: reasons['deep_scan_unluac'] = err
+            return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bytecode ({len(raw_bytecode)}B)', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
             parts.append('Errors: ' + '; '.join(f"{k}: {v[:60]}" for k, v in reasons.items()))
-        reason = '\n'.join(parts)
+        reason = '\n'.join(parts) if parts else (diag if diag else 'All stages exhausted')
         return '', 'unable', reason, trace
 
-    def _extract_wearedevs_source(self, source, diags):
+    def _decode_string_table(self, source, diags):
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
-            diags.append("no string table")
             return None
         table_body = m.group(1)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
-            diags.append(f"only {len(strings)} strings")
             return None
         original_table = []
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
             original_table.append(decoded if decoded else b'')
-        b64_reverse = self._extract_custom_b64_reverse(source)
         shuffle_pairs = self._extract_shuffle_pairs(source)
-
-        def apply_shuffles(table, pairs):
-            working = list(table)
-            for lo, hi in pairs:
-                lo_idx, hi_idx = lo - 1, hi - 1
-                while lo_idx < hi_idx:
-                    working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
-                    lo_idx += 1
-                    hi_idx -= 1
-            return working
-
-        def decode_table(table):
-            decoded_chunks = []
-            for chunk in table:
-                if len(chunk) == 0:
-                    continue
-                decoded = self._decode_custom_b64(chunk, b64_reverse)
-                if decoded:
-                    decoded_chunks.append(decoded)
-            if not decoded_chunks:
-                return None
-            return b''.join(decoded_chunks)
-
-        def check_result(data):
-            # Try bytecode
-            bc = self.bytecode_harvester.extract(data)
-            if bc:
-                return bc
-            # Try as source if it's mostly printable and has some Lua keywords
-            printable = sum(1 for b in data if 32 <= b < 127 or b in (10, 13, 9))
-            if printable / max(len(data), 1) >= 0.6 and len(data) >= 50:
-                try:
-                    text = data.decode('utf-8')
-                    words = set(re.findall(r'\b\w+\b', text[:5000]))
-                    if len(words & LUA_KEYWORDS) >= 2:
-                        return text
-                except Exception:
-                    pass
-                try:
-                    text = data.decode('latin-1')
-                    words = set(re.findall(r'\b\w+\b', text[:5000]))
-                    if len(words & LUA_KEYWORDS) >= 2:
-                        return text
-                except Exception:
-                    pass
-            return None
-
-        # Try normal shuffle order
-        working = apply_shuffles(original_table, shuffle_pairs)
-        combined = decode_table(working)
-        if combined:
-            result = check_result(combined)
-            if result is not None:
-                diags.append(f"OK {'bc' if isinstance(result,bytes) else 'src'} {len(result)}B")
-                return result
-
-        # Try reversed shuffle order
-        reversed_pairs = list(reversed(shuffle_pairs))
-        working = apply_shuffles(original_table, reversed_pairs)
-        combined = decode_table(working)
-        if combined:
-            result = check_result(combined)
-            if result is not None:
-                diags.append(f"OK {'bc' if isinstance(result,bytes) else 'src'} {len(result)}B (rev)")
-                return result
-
-        # Fallback: if combined is mostly printable, return it as source
-        if combined and len(combined) >= 50:
-            try:
-                text = combined.decode('utf-8')
-                if sum(1 for c in text if c.isprintable() or c in '\n\r\t') / len(text) >= 0.6:
-                    diags.append(f"partial src {len(text)} chars (low confidence)")
-                    return text
-            except Exception:
-                pass
-            try:
-                text = combined.decode('latin-1')
-                if sum(1 for c in text if c.isprintable() or c in '\n\r\t') / len(text) >= 0.6:
-                    diags.append(f"partial src {len(text)} chars (latin-1)")
-                    return text
-            except Exception:
-                pass
-
-        diags.append(f"no valid result: {binascii.hexlify(combined[:32]).decode() if combined else 'empty'} ({len(combined)}B)")
-        return None
-
-    def _extract_custom_b64_reverse(self, source):
-        m = re.search(r'local N=\{([^}]+)\}', source)
-        if not m:
-            return {}
-        body = m.group(1)
-        reverse = {}
-        for key_match in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
-            key_str = key_match.group(1)
-            val_expr = key_match.group(2)
-            val = self._safe_eval(val_expr.strip())
-            if val is not None and 0 <= val < 64:
-                key_char = self._decode_wearedevs_string(key_str)
-                if key_char:
-                    reverse[val] = key_char.decode('latin-1')
-        for key_match in re.finditer(r'(?<![\["\'])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
-            key_str = key_match.group(1)
-            val_expr = key_match.group(2)
-            val = self._safe_eval(val_expr.strip())
-            if val is not None and 0 <= val < 64:
-                reverse[val] = key_str
-        std_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        for i, ch in enumerate(std_b64):
-            if i not in reverse:
-                reverse[i] = ch
-        return reverse
-
-    def _decode_custom_b64(self, data, reverse_map):
-        if not reverse_map or len(data) == 0:
-            return None
-        forward = {v: k for k, v in reverse_map.items()}
-        bit_buf = 0
-        bits = 0
-        out = bytearray()
-        for byte_val in data:
-            char = chr(byte_val) if byte_val < 256 else ''
-            if char not in forward:
-                if byte_val == ord('='):
-                    break
-                continue
-            val = forward[char]
-            bit_buf = (bit_buf << 6) | val
-            bits += 6
-            while bits >= 8:
-                bits -= 8
-                out.append((bit_buf >> bits) & 0xFF)
-        return bytes(out)
+        working = list(original_table)
+        for lo, hi in shuffle_pairs:
+            lo_idx, hi_idx = lo - 1, hi - 1
+            while lo_idx < hi_idx:
+                working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
+                lo_idx += 1
+                hi_idx -= 1
+        # Return as list of strings
+        result = []
+        for chunk in working:
+            if len(chunk) == 0:
+                result.append('')
+            else:
+                result.append(chunk.decode('latin-1'))
+        return result
 
     def _extract_shuffle_pairs(self, source):
         m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
@@ -373,19 +197,6 @@ class DeobfEngine:
                 i += 1
         return bytes(result)
 
-    def _try_rapid_string_decode(self, source, trace):
-        patterns = [
-            r'local\s+\w+\s*=\s*\{([^}]+)\}',
-            r'local\s+\w+\s*=\s*\{\s*([^\}]{50,})\s*\}',
-            r'=\s*\{\s*("[^"]{50,}"[,\s]*)+',
-        ]
-        for pat in patterns:
-            matches = re.findall(pat, source, re.DOTALL)
-            if matches:
-                trace.append({'stage': 'rapid_decode_pattern', 'pattern': pat, 'matches': len(matches)})
-                return source
-        return None
-
     def _extract_bytecode(self, data):
         if isinstance(data, bytes):
             return self.bytecode_harvester.extract(data)
@@ -394,58 +205,6 @@ class DeobfEngine:
                 return data.encode('latin-1')
             return self.bytecode_harvester.extract(data.encode('latin-1'))
         return None
-
-    def _extract_bytecode_from_sandbox_output(self, item):
-        start = item.find('SANDBOX_OUTPUT_START')
-        end = item.find('SANDBOX_OUTPUT_END', start)
-        if start == -1 or end == -1:
-            return None
-        block = item[start + len('SANDBOX_OUTPUT_START'):end]
-        patterns = [
-            r'"((?:\\\d{1,3}){12,}[^"]*)"',
-            r"'((?:\\\d{1,3}){12,}[^']*)'",
-            r'"([\x00-\xff]{12,})"',
-            r'\[==?\[(.*?)\]==?\]',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, block, re.DOTALL):
-                raw = m.group(1)
-                decoded = self._decode_escaped_bytes(raw)
-                if decoded and len(decoded) >= 12:
-                    bc = self.bytecode_harvester.extract(decoded)
-                    if bc:
-                        return bc
-        return None
-
-    @staticmethod
-    def _decode_escaped_bytes(s):
-        try:
-            result = bytearray()
-            i = 0
-            while i < len(s):
-                if s[i] == '\\' and i + 1 < len(s):
-                    if s[i+1] == '\\':
-                        result.append(ord('\\'))
-                        i += 2
-                        continue
-                    j = i + 1
-                    while j < len(s) and s[j].isdigit():
-                        j += 1
-                    if j > i + 1:
-                        val = int(s[i+1:j])
-                        if 0 <= val <= 255:
-                            result.append(val)
-                        i = j
-                    else:
-                        escape_map = {'n': 10, 'r': 13, 't': 9, '0': 0, 'a': 7, 'b': 8, 'f': 12, 'v': 11}
-                        result.append(escape_map.get(s[i+1], ord(s[i+1])))
-                        i += 2
-                else:
-                    result.append(ord(s[i]))
-                    i += 1
-            return bytes(result)
-        except Exception:
-            return None
 
     def _run_lune(self, source):
         try:
