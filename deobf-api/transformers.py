@@ -87,7 +87,32 @@ class AdvancedWeAreDevsLifter(BaseLifter):
                 decoded = [self._unescape_lua_string(s) for s in strings]
                 if any(len(s) > 20 for s in decoded):
                     tables.append(decoded)
+        for m in re.finditer(r'\(\s*function\s*\([^)]*\)\s*.*?end\s*\)\s*\(\s*(\{.*?\})\s*\)', source, re.DOTALL):
+            table_raw = m.group(1)
+            table_body = self._extract_balanced_braces(source, m.start(1))
+            if table_body:
+                strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+                if len(strings) >= 4:
+                    decoded = [self._unescape_lua_string(s) for s in strings]
+                    if any(len(s) > 20 for s in decoded):
+                        tables.append(decoded)
         return tables
+
+    def _extract_balanced_braces(self, text, start):
+        if start >= len(text) or text[start] != '{':
+            return None
+        depth = 0
+        i = start
+        while i < len(text):
+            c = text[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i+1]
+            i += 1
+        return None
 
     def _find_all_b64_maps(self, source):
         maps = []
