@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback
 from transformers import (
     AdvancedWeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
     XORStringDecoder, NumberArrayDecoder, StandardBase64Decoder,
@@ -45,12 +45,17 @@ class DeobfEngine:
             'base64_decoding', 'multi_pass', 'recursive_unpacking',
             'control_flow_recovery', 'constant_propagation'
         }
+        self._java_available = shutil.which('java') is not None
 
     def get_capabilities(self):
-        return self.capabilities
+        caps = set(self.capabilities)
+        if not self._java_available:
+            caps.discard('bytecode_decompilation')
+        return list(caps)
 
     def process(self, source):
         trace = []
+        diags = []
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'findings': fingerprint})
 
@@ -61,6 +66,7 @@ class DeobfEngine:
                 dc, err = self._run_unluac(bc)
                 if dc and self._is_valid_lua(dc):
                     return self._beautify(dc), 'rapid_decode_unluac', 'Rapid string decode + unluac', trace
+                if err: diags.append(f"unluac: {err}")
 
         for lifter in self.lifters:
             lifter_name = lifter.__class__.__name__
@@ -75,13 +81,17 @@ class DeobfEngine:
                                 dc, err = self._run_unluac(bc)
                                 if dc and self._is_valid_lua(dc):
                                     return self._beautify(dc), f'{lifter_name}_unluac', f'Decompiled via {lifter_name}', trace
+                                if err: diags.append(f"{lifter_name}_unluac: {err}")
                                 trace.append({'stage': f'{lifter_name}_bytecode', 'size': len(bc), 'unluac_error': err})
+                            else:
+                                diags.append(f"{lifter_name} bytecode not found in chunk")
                         elif isinstance(chunk, str):
                             nested_bc = self._extract_bytecode(chunk)
                             if nested_bc:
                                 dc, err = self._run_unluac(nested_bc)
                                 if dc and self._is_valid_lua(dc):
                                     return self._beautify(dc), f'{lifter_name}_nested_unluac', f'Nested bytecode decompiled via {lifter_name}', trace
+                                if err: diags.append(f"{lifter_name}_nested_unluac: {err}")
                             if self._is_valid_lua(chunk) and len(chunk) > 200:
                                 rec_result, rec_type, rec_diag, rec_trace = self.process(chunk)
                                 if rec_result and rec_type != 'unable':
@@ -89,7 +99,9 @@ class DeobfEngine:
                                 if self._is_valid_lua(chunk):
                                     return self._beautify(chunk), f'{lifter_name}_source', f'Source recovered via {lifter_name}', trace
             except Exception as e:
-                trace.append({'stage': f'lifter_{lifter_name}_error', 'error': str(e)})
+                err_detail = traceback.format_exc()
+                diags.append(f"{lifter_name} error: {str(e)}")
+                trace.append({'stage': f'lifter_{lifter_name}_error', 'error': str(e), 'traceback': err_detail})
 
         all_strings = self.string_decoder.decode_all(source)
         if all_strings:
@@ -103,9 +115,11 @@ class DeobfEngine:
                     dc, err = self._run_unluac(bc)
                     if dc and self._is_valid_lua(dc):
                         return self._beautify(dc), 'string_decode_unluac', 'Bytecode from decoded strings + unluac', trace
+                    if err: diags.append(f"string_decode_unluac: {err}")
 
         layers, caps, diag = execute_sandbox(source, timeout=120)
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps), 'diag': diag[:200] if diag else ''})
+        if diag: diags.append(f"sandbox: {diag}")
         if not layers and diag and ('attempt to index local' in diag or 'attempt to index a nil value' in diag):
             wrapped_source = self._wrap_varargs_source(source, diag)
             if wrapped_source:
@@ -116,6 +130,7 @@ class DeobfEngine:
                     diag = diag2 if diag2 else diag
                     trace.append({'stage': 'sandbox_retry_varargs', 'success': True})
                 else:
+                    diags.append(f"sandbox_retry: {diag2}")
                     trace.append({'stage': 'sandbox_retry_varargs', 'success': False, 'diag': diag2[:200] if diag2 else ''})
 
         for i, item in enumerate(layers):
@@ -125,18 +140,21 @@ class DeobfEngine:
                     dc, err = self._run_unluac(bc)
                     if dc and self._is_valid_lua(dc):
                         return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
+                    if err: diags.append(f"sandbox_unluac layer {i}: {err}")
             if isinstance(item, str):
                 bc = self._extract_bytecode(item)
                 if bc:
                     dc, err = self._run_unluac(bc)
                     if dc and self._is_valid_lua(dc):
                         return self._beautify(dc), 'sandbox_unluac', f'Layer {i} string bytecode decompiled', trace
+                    if err: diags.append(f"sandbox_unluac string layer {i}: {err}")
                 if 'SANDBOX_OUTPUT_START' in item:
                     bc2 = self._extract_bytecode_from_sandbox_output(item)
                     if bc2:
                         dc, err = self._run_unluac(bc2)
                         if dc and self._is_valid_lua(dc):
                             return self._beautify(dc), 'sandbox_scan', 'State scan bytecode decompiled', trace
+                        if err: diags.append(f"sandbox_scan: {err}")
                 if len(item) > 100 and self._is_valid_lua(item):
                     return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
 
@@ -148,6 +166,8 @@ class DeobfEngine:
 
         lune_data, lune_info = self._run_lune(source)
         trace.append({'stage': 'lune', 'info': lune_info})
+        if lune_info.get('error'):
+            diags.append(f"lune: {lune_info['error']}")
         if lune_data:
             if isinstance(lune_data, bytes) and len(lune_data) >= 12:
                 bc = self.bytecode_harvester.extract(lune_data)
@@ -155,6 +175,7 @@ class DeobfEngine:
                     dc, err = self._run_unluac(bc)
                     if dc and self._is_valid_lua(dc):
                         return self._beautify(dc), 'lune_unluac', 'Lune bytecode decompiled', trace
+                    if err: diags.append(f"lune_unluac: {err}")
             try:
                 text = lune_data.decode('utf-8', errors='replace')
                 if self._is_valid_lua(text):
@@ -168,9 +189,10 @@ class DeobfEngine:
             dc, err = self._run_unluac(raw_bytecode)
             if dc and self._is_valid_lua(dc):
                 return self._beautify(dc), 'deep_scan_unluac', 'Deep scan bytecode decompiled', trace
+            if err: diags.append(f"deep_scan_unluac: {err}")
             return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bytecode ({len(raw_bytecode)}B). unluac: {err}', trace
 
-        reason = diag or 'All strategies exhausted'
+        reason = '; '.join(diags) if diags else (diag or 'All strategies exhausted')
         return '', 'unable', reason, trace
 
     def _try_rapid_string_decode(self, source, trace):
@@ -257,47 +279,44 @@ class DeobfEngine:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             return loop.run_until_complete(execute_and_capture(source))
-        except Exception:
-            return None, {'error': 'lune_execution_failed'}
+        except Exception as e:
+            return None, {'error': f'lune_execution_failed: {str(e)}'}
 
     def _run_unluac(self, bytecode):
+        if not self._java_available:
+            return None, "java not installed"
         if not os.path.isfile(self.unluac_path):
             self._ensure_unluac_jar()
         if not os.path.isfile(self.unluac_path):
-            return None, "unluac.jar not found"
-        java_bin = shutil.which('java')
-        if not java_bin:
-            return None, "java not found"
+            return None, "unluac.jar missing"
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
                 tmp.write(bytecode)
                 tmp_path = tmp.name
             result = subprocess.run(
-                [java_bin, '-jar', self.unluac_path, '--rawstring', tmp_path],
-                capture_output=True, text=True, timeout=45
+                ['java', '-jar', self.unluac_path, '--rawstring', tmp_path],
+                capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout, None
             if result.stderr and 'version' in result.stderr.lower():
                 result2 = subprocess.run(
-                    [java_bin, '-jar', self.unluac_path, tmp_path],
-                    capture_output=True, text=True, timeout=45
+                    ['java', '-jar', self.unluac_path, tmp_path],
+                    capture_output=True, text=True, timeout=30
                 )
                 if result2.returncode == 0 and result2.stdout.strip():
                     return result2.stdout, None
                 return None, result2.stderr[:300]
             return None, result.stderr[:300] if result.stderr else 'no output'
         except subprocess.TimeoutExpired:
-            return None, "timeout"
+            return None, "unluac timeout"
         except Exception as e:
             return None, str(e)
         finally:
             if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+                try: os.unlink(tmp_path)
+                except OSError: pass
 
     def _ensure_unluac_jar(self):
         try:
