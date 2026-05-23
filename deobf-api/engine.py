@@ -260,27 +260,36 @@ class DeobfEngine:
         diags.append(f"WeAreDevs: found {len(strings)} escaped strings")
         print(f"[engine] WeAreDevs: {len(strings)} strings", file=sys.stderr)
         decoded_strings = []
+        skipped_empty = 0
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
-            if decoded:
+            if decoded and len(decoded) > 0:
                 decoded_strings.append(decoded)
+            else:
+                skipped_empty += 1
         if not decoded_strings:
             diags.append("WeAreDevs: no strings decoded")
             print("[engine] WeAreDevs: no strings decoded", file=sys.stderr)
             return None
-        diags.append(f"WeAreDevs: decoded {len(decoded_strings)} strings")
-        print(f"[engine] WeAreDevs: decoded {len(decoded_strings)} strings", file=sys.stderr)
+        diag_msg = f"WeAreDevs: decoded {len(decoded_strings)} strings"
+        if skipped_empty > 0:
+            diag_msg += f" ({skipped_empty} empty skipped)"
+        diags.append(diag_msg)
+        print(f"[engine] {diag_msg}", file=sys.stderr)
         # Parse shuffle pairs from the for loop
         shuffle_pairs = self._extract_shuffle_pairs(source)
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle ranges")
         print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle ranges", file=sys.stderr)
         working = list(decoded_strings)
+        # Apply shuffle exactly as the Lua code does: element-by-element swap from right to left
         for lo, hi in shuffle_pairs:
-            # Ranges are 1-indexed in Lua
-            lo0 = lo - 1
-            hi0 = hi - 1
-            if 0 <= lo0 < len(working) and 0 <= hi0 < len(working) and lo0 < hi0:
-                working[lo0:hi0+1] = reversed(working[lo0:hi0+1])
+            # Lua is 1-indexed; our list is 0-indexed
+            lo_idx = lo - 1
+            hi_idx = hi - 1
+            while lo_idx < hi_idx:
+                working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
+                lo_idx += 1
+                hi_idx -= 1
         combined = b''.join(working)
         diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
         print(f"[engine] WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}", file=sys.stderr)
@@ -295,13 +304,10 @@ class DeobfEngine:
 
     def _extract_shuffle_pairs(self, source):
         """Extract {start,end} pairs from the shuffle loop ipairs table."""
-        # Find the ipairs argument: ipairs({{...};{...};{...}})
         m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
         if not m:
             return []
         outer = m.group(1)
-        # Extract inner tables: {expression;expression} or {expression,expression}
-        # The inner tables use ; or , as separator
         inner_tables = re.findall(r'\{([-\d()+\-*/\s]+)[;,]([-\d()+\-*/\s]+)\}', outer)
         ranges = []
         for expr1, expr2 in inner_tables:
@@ -317,7 +323,6 @@ class DeobfEngine:
         expr = expr.replace(' ', '')
         if not expr:
             return None
-        # Only allow digits, operators, parentheses, minus sign
         if not re.match(r'^[\d+\-*/()]+$', expr):
             return None
         try:
