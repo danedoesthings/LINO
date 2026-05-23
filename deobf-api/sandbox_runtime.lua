@@ -390,41 +390,6 @@ string.dump = function(func, strip)
     return bc
 end
 
-local function _scan_table(t, name, depth, visited)
-    if depth > 10 then return end
-    if visited[t] then return end
-    visited[t] = true
-    local memfile = _real_io_open(outdir .. "/memory.txt", "a")
-    if memfile then
-        memfile:write(_real_tostring(name) .. " = " .. _real_tostring(t) .. "---MEMSEP---")
-        memfile:close()
-    end
-    if _real_type(t) == "table" then
-        for k, v in _real_pairs(t) do
-            if _real_type(v) == "string" and #v >= 12 then
-                local bytes = {}
-                for i = 1, #v do
-                    bytes[i] = _real_string_byte(v, i)
-                end
-                if bytes[1] == 27 and bytes[2] == 76 and bytes[3] == 117 and bytes[4] == 97 then
-                    local sofile = _real_io_open(outdir .. "/sandbox_output.lua", "w")
-                    if sofile then
-                        sofile:write("SANDBOX_OUTPUT_START")
-                        for i = 1, #bytes do
-                            sofile:write("\\" .. _real_tostring(bytes[i]))
-                        end
-                        sofile:write("SANDBOX_OUTPUT_END")
-                        sofile:close()
-                    end
-                end
-            end
-            if _real_type(v) == "table" or _real_type(v) == "function" then
-                _scan_table(v, name .. "." .. _real_tostring(k), depth + 1, visited)
-            end
-        end
-    end
-end
-
 local diagfile = _real_io_open(outdir .. "/diag.txt", "w")
 if diagfile then
     diagfile:write("Sandbox starting...\n")
@@ -456,23 +421,43 @@ local function _run_input()
     end
     _real_setfenv(f, _G)
     
-    -- Load args from file if available
     local args_table = nil
     if argspath ~= "nil" and argspath ~= "ARGSPATH_PLACEHOLDER" then
         local args_chunk = _real_loadfile(argspath)
         if args_chunk then
             _real_setfenv(args_chunk, _G)
-            local ok, result = pcall(args_chunk)
-            if ok and _real_type(result) == "table" then
-                args_table = result
+            local load_ok, loaded = pcall(args_chunk)
+            if load_ok and _real_type(loaded) == "table" then
+                args_table = loaded
             end
         end
     end
     
     local ok, result
     if args_table then
-        ok, result = _real_xpcall(function() return f(_real_unpack(args_table)) end, _error_handler)
+        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+        if diagf then
+            diagf:write("Args loaded: " .. _real_tostring(#args_table) .. " strings\n")
+            diagf:write("Arg[1] preview: " .. _real_tostring(args_table[1] or "nil"):sub(1,40) .. "\n")
+            diagf:close()
+        end
+        ok, result = _real_xpcall(function()
+            local run_ok, run_result = pcall(f, _real_unpack(args_table))
+            if not run_ok then
+                local errfile = _real_io_open(outdir .. "/error.txt", "a")
+                if errfile then
+                    errfile:write("\nVM_CRASH: " .. _real_tostring(run_result))
+                    errfile:close()
+                end
+            end
+            return run_result
+        end, _error_handler)
     else
+        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+        if diagf then
+            diagf:write("Args not loaded, using proxy\n")
+            diagf:close()
+        end
         local proxy_arg = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
         ok, result = _real_xpcall(function() return f(proxy_arg) end, _error_handler)
     end
@@ -484,17 +469,10 @@ local function _run_input()
             errfile:close()
         end
     end
-    local visited = {}
-    _scan_table(_G, "_G", 0, visited)
-    for k, v in _real_pairs(_safe_globals) do
-        if _real_type(v) == "table" then
-            _scan_table(v, k, 0, visited)
-        end
-    end
-    local diagfile2 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagfile2 then
-        diagfile2:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
-        diagfile2:close()
+    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf then
+        diagf:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
+        diagf:close()
     end
 end
 
