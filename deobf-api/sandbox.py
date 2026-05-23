@@ -7,13 +7,10 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 def _lua_str(path):
     return '"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
-def _lua_table_strings(strings):
+def _lua_table_literal(strings):
+    """Build a Lua table literal from a list of strings, each already escaped."""
     parts = []
     for s in strings:
-        # The strings are already valid Lua string literals (e.g., "\076\049\117...")
-        # Just wrap them in quotes without additional escaping.
-        # Only escape double quotes and backslashes that are not part of \NNN sequences.
-        # Since there are no double quotes or lone backslashes, simple quoting is enough.
         parts.append('"' + s + '"')
     return '{' + ','.join(parts) + '}'
 
@@ -28,22 +25,12 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
     try:
         inp = os.path.join(temp_dir, 'input.lua')
         drv = os.path.join(temp_dir, 'driver.lua')
-        args_path = None
         try:
             raw = source.encode('utf-8', errors='replace') if isinstance(source, str) else source
             with open(inp, 'wb') as f:
                 f.write(raw)
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
-        if varargs and isinstance(varargs, list):
-            args_path = os.path.join(temp_dir, 'args.lua')
-            try:
-                table_lua = 'return ' + _lua_table_strings(varargs)
-                with open(args_path, 'w', encoding='utf-8') as f:
-                    f.write(table_lua)
-            except Exception as e:
-                error_log.append(f'WRITE_ARGS_ERROR: {e}')
-                args_path = None
         try:
             with open(RUNTIME_PATH, 'r', encoding='utf-8') as f:
                 runtime = f.read()
@@ -52,19 +39,24 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         out_dir = temp_dir.replace('\\', '/')
         inp_path = inp.replace('\\', '/')
         driver = runtime.replace('"OUTDIR_PLACEHOLDER"', _lua_str(out_dir)).replace('"INPATH_PLACEHOLDER"', _lua_str(inp_path))
-        if args_path:
-            args_lua_path = args_path.replace('\\', '/')
-            driver = driver.replace('"ARGSPATH_PLACEHOLDER"', _lua_str(args_lua_path))
+
+        # Embed varargs directly as a Lua table literal
+        if varargs and isinstance(varargs, list):
+            table_literal = _lua_table_literal(varargs)
+            driver = driver.replace('"VARARGS_PLACEHOLDER"', table_literal)
         else:
-            driver = driver.replace('"ARGSPATH_PLACEHOLDER"', 'nil')
+            driver = driver.replace('"VARARGS_PLACEHOLDER"', 'nil')
+
         try:
             with open(drv, 'w', encoding='utf-8') as f:
                 f.write(driver)
         except Exception as e:
             return [], [], f'WRITE_DRIVER_ERROR: {e}'
+
         env = os.environ.copy()
         env['LUA_PATH'] = os.path.join(APP_DIR, '?.lua') + ';' + env.get('LUA_PATH', '')
         env['LUA_CPATH'] = os.path.join(APP_DIR, '?.so') + ';' + env.get('LUA_CPATH', '')
+
         proc_error = ''
         stdout_output = ''
         stderr_output = ''
@@ -89,6 +81,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
             error_log.append(f'STDOUT: {stdout_output.strip()[:500]}')
         if stderr_output.strip():
             error_log.append(f'STDERR: {stderr_output.strip()[:500]}')
+
         i = 1
         while True:
             p = os.path.join(temp_dir, f'layer_{i}.lua')
