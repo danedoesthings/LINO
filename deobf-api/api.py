@@ -2,6 +2,7 @@ import os
 import base64
 import traceback
 import logging
+import hashlib
 from flask import Flask, request, jsonify
 from engine import DeobfEngine
 
@@ -15,12 +16,28 @@ engine = DeobfEngine()
 def health():
     return jsonify({
         'ok': True,
-        'version': '4.0.0',
+        'version': '4.1.0',
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
         'unluac_exists': os.path.isfile(engine.unluac_path)
     })
+
+@app.route('/debug')
+def debug():
+    engine_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'engine.py')
+    try:
+        with open(engine_path, 'r') as f:
+            code = f.read()
+        sha = hashlib.sha256(code.encode()).hexdigest()[:16]
+        has_extractor = '_extract_wearedevs_bytecode' in code
+        return jsonify({
+            'engine_sha': sha,
+            'has_wearedevs_extractor': has_extractor,
+            'engine_size': len(code)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 @app.route('/deobf', methods=['POST'])
 def deobf():
