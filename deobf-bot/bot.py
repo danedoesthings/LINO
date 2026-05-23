@@ -83,7 +83,7 @@ async def run_deobf(raw_bytes, filename):
     em.add_field(name='Input', value=filename, inline=True)
     em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
     if diagnostic:
-        diag_text = _truncate(diagnostic, 900)
+        diag_text = _truncate(diagnostic, 1020)
         em.add_field(name='Diagnostic', value=f'```\n{diag_text}\n```', inline=False)
     if trace:
         stages = [t.get('stage', '?') for t in trace[:10]]
