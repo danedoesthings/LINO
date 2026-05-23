@@ -1,5 +1,6 @@
 local outdir = "OUTDIR_PLACEHOLDER"
 local inpath = "INPATH_PLACEHOLDER"
+local argspath = "ARGSPATH_PLACEHOLDER"
 
 local _real_io_open = io.open
 local _real_tostring = tostring
@@ -173,19 +174,6 @@ _real_rawset(_game, "GetService", function(self, name)
     if name == "StarterGui" then return _new_proxy("StarterGui") end
     if name == "StarterPack" then return _new_proxy("StarterPack") end
     if name == "StarterPlayer" then return _new_proxy("StarterPlayer") end
-    if name == "SoundService" then return _new_proxy("SoundService") end
-    if name == "Chat" then return _new_proxy("Chat") end
-    if name == "TeleportService" then return _new_proxy("TeleportService") end
-    if name == "MarketplaceService" then return _new_proxy("MarketplaceService") end
-    if name == "InsertService" then return _new_proxy("InsertService") end
-    if name == "HttpService" then return _new_proxy("HttpService") end
-    if name == "RunService" then return _new_proxy("RunService") end
-    if name == "UserInputService" then return _new_proxy("UserInputService") end
-    if name == "ContextActionService" then return _new_proxy("ContextActionService") end
-    if name == "TweenService" then return _new_proxy("TweenService") end
-    if name == "CollectionService" then return _new_proxy("CollectionService") end
-    if name == "Debris" then return _new_proxy("Debris") end
-    if name == "PhysicsService" then return _new_proxy("PhysicsService") end
     return svc
 end)
 _real_rawset(_game, "Players", _players_service)
@@ -213,6 +201,7 @@ local _safe_globals = {
     workspace = _new_proxy("Workspace"),
     script = _new_proxy("script"),
     shared = {},
+    _G = {},
     _VERSION = "Lua 5.1",
     print = function(...)
         local args = {...}
@@ -442,6 +431,8 @@ if diagfile then
     diagfile:close()
 end
 
+_real_setfenv(1, _G)
+
 local function _error_handler(err)
     local msg = _real_tostring(err)
     local traceback_str = _real_debug_traceback(msg, 2)
@@ -464,8 +455,28 @@ local function _run_input()
         return
     end
     _real_setfenv(f, _G)
-    local proxy_arg = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
-    local ok, result = _real_xpcall(function() return f(proxy_arg) end, _error_handler)
+    
+    -- Load args from file if available
+    local args_table = nil
+    if argspath ~= "nil" and argspath ~= "ARGSPATH_PLACEHOLDER" then
+        local args_chunk = _real_loadfile(argspath)
+        if args_chunk then
+            _real_setfenv(args_chunk, _G)
+            local ok, result = pcall(args_chunk)
+            if ok and _real_type(result) == "table" then
+                args_table = result
+            end
+        end
+    end
+    
+    local ok, result
+    if args_table then
+        ok, result = _real_xpcall(function() return f(_real_unpack(args_table)) end, _error_handler)
+    else
+        local proxy_arg = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
+        ok, result = _real_xpcall(function() return f(proxy_arg) end, _error_handler)
+    end
+    
     if not ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
