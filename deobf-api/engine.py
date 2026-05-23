@@ -123,6 +123,7 @@ class DeobfEngine:
         return '', 'unable', reason, trace
 
     def _decode_string_table(self, source, diags):
+        # Return the original escaped strings in the order they appear in the table
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             return None
@@ -130,17 +131,11 @@ class DeobfEngine:
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
             return None
-        shuffle_pairs = self._extract_shuffle_pairs(source)
-        working = list(strings)  # raw escaped strings
-        for lo, hi in shuffle_pairs:
-            lo_idx, hi_idx = lo - 1, hi - 1
-            while lo_idx < hi_idx:
-                working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
-                lo_idx += 1
-                hi_idx -= 1
-        return working
+        # No shuffling – return raw escaped strings as they are
+        return strings
 
     def _extract_shuffle_pairs(self, source):
+        # Still needed? Not for this fix, but keep for compatibility
         m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
         if not m:
             return []
