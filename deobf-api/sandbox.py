@@ -7,7 +7,14 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 def _lua_str(path):
     return '"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
-def execute_sandbox(source, use_emulator=False, timeout=120):
+def _lua_table_strings(strings):
+    parts = []
+    for s in strings:
+        escaped = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+        parts.append('"' + escaped + '"')
+    return '{' + ','.join(parts) + '}'
+
+def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
     if not os.path.isfile(RUNTIME_PATH):
         return [], [], f'MISSING_RUNTIME: {RUNTIME_PATH}'
     error_log, layers, caps, diag = [], [], [], ''
@@ -18,12 +25,22 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
     try:
         inp = os.path.join(temp_dir, 'input.lua')
         drv = os.path.join(temp_dir, 'driver.lua')
+        args_path = None
         try:
             raw = source.encode('utf-8', errors='replace') if isinstance(source, str) else source
             with open(inp, 'wb') as f:
                 f.write(raw)
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
+        if varargs and isinstance(varargs, list):
+            args_path = os.path.join(temp_dir, 'args.lua')
+            try:
+                table_lua = 'return ' + _lua_table_strings(varargs)
+                with open(args_path, 'w', encoding='utf-8') as f:
+                    f.write(table_lua)
+            except Exception as e:
+                error_log.append(f'WRITE_ARGS_ERROR: {e}')
+                args_path = None
         try:
             with open(RUNTIME_PATH, 'r', encoding='utf-8') as f:
                 runtime = f.read()
@@ -32,6 +49,11 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
         out_dir = temp_dir.replace('\\', '/')
         inp_path = inp.replace('\\', '/')
         driver = runtime.replace('"OUTDIR_PLACEHOLDER"', _lua_str(out_dir)).replace('"INPATH_PLACEHOLDER"', _lua_str(inp_path))
+        if args_path:
+            args_lua_path = args_path.replace('\\', '/')
+            driver = driver.replace('"ARGSPATH_PLACEHOLDER"', _lua_str(args_lua_path))
+        else:
+            driver = driver.replace('"ARGSPATH_PLACEHOLDER"', 'nil')
         try:
             with open(drv, 'w', encoding='utf-8') as f:
                 f.write(driver)
@@ -74,7 +96,6 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
                     data = f.read()
                 if data:
                     layers.append(data)
-                    error_log.append(f'Layer {i}: {len(data)} chars, starts with: {data[:80]}')
             except Exception as e:
                 error_log.append(f'READ_LAYER_{i}_ERROR: {e}')
             i += 1
@@ -85,19 +106,8 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
                     bc = f.read()
                 if bc and len(bc) >= 12:
                     layers.append(bc)
-                    error_log.append(f'dump.bin: {len(bc)} bytes, starts with: {bc[:20].hex()}')
             except Exception as e:
                 error_log.append(f'READ_DUMP_ERROR: {e}')
-        so_path = os.path.join(temp_dir, 'sandbox_output.lua')
-        if os.path.exists(so_path):
-            try:
-                with open(so_path, encoding='utf-8', errors='replace') as f:
-                    so_data = f.read()
-                if so_data.strip():
-                    layers.append(so_data)
-                    error_log.append(f'sandbox_output.lua: {len(so_data)} chars')
-            except Exception as e:
-                error_log.append(f'READ_SANDBOX_OUTPUT_ERROR: {e}')
         capf = os.path.join(temp_dir, 'cap.txt')
         if os.path.exists(capf):
             try:
@@ -108,7 +118,6 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
                         s = part.strip()
                         if len(s) > 5:
                             caps.append(s)
-                    error_log.append(f'cap.txt: {len(caps)} entries')
             except Exception as e:
                 error_log.append(f'READ_CAP_ERROR: {e}')
         memf = os.path.join(temp_dir, 'memory.txt')
@@ -121,7 +130,6 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
                         s = part.strip()
                         if len(s) > 10:
                             caps.append(s)
-                    error_log.append(f'memory.txt: {len(caps)} total caps')
             except Exception as e:
                 error_log.append(f'READ_MEM_ERROR: {e}')
         diag_parts = []
@@ -143,7 +151,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
         if not layers and not caps and not diag:
             diag = 'NO_OUTPUT'
         if not proc_error and not layers:
-            diag = (diag or '') + '\nNo layers captured - script may not call loadstring'
+            diag = (diag or '') + '\nNo layers captured'
     except Exception as e:
         diag = f'SANDBOX_FATAL: {e}\n{traceback.format_exc()}'
     finally:
