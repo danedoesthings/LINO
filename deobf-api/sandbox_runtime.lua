@@ -1,6 +1,74 @@
 local outdir = "OUTDIR_PLACEHOLDER"
 local inpath = "INPATH_PLACEHOLDER"
 
+local function _pure_bit32()
+    local bit = {}
+    function bit.bxor(a, b)
+        local r, p = 0, 1
+        while a > 0 or b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit ~= bbit then r = r + p end
+            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+        end
+        return r
+    end
+    function bit.band(a, b)
+        local r, p = 0, 1
+        while a > 0 and b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit == 1 and bbit == 1 then r = r + p end
+            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+        end
+        return r
+    end
+    function bit.bor(a, b)
+        local r, p = 0, 1
+        while a > 0 or b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit == 1 or bbit == 1 then r = r + p end
+            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+        end
+        return r
+    end
+    function bit.bnot(a, bits)
+        bits = bits or 32
+        local r = 0
+        for i = 0, bits-1 do
+            if a % 2 == 0 then r = r + 2^i end
+            a = math.floor(a/2)
+        end
+        return r
+    end
+    function bit.lshift(a, n)
+        return a * 2^n
+    end
+    function bit.rshift(a, n)
+        return math.floor(a / 2^n)
+    end
+    function bit.arshift(a, n)
+        if a >= 0 then return math.floor(a / 2^n)
+        else return bit.bor(math.floor(a / 2^n), bit.bnot(2^(32-n)-1)) end
+    end
+    function bit.rol(a, n)
+        local bits = 32
+        n = n % bits
+        local left = bit.band(bit.lshift(a, n), 2^bits-1)
+        local right = bit.rshift(a, bits-n)
+        return bit.bor(left, right)
+    end
+    function bit.ror(a, n)
+        local bits = 32
+        n = n % bits
+        local left = bit.lshift(bit.band(a, 2^n-1), bits-n)
+        local right = bit.rshift(a, n)
+        return bit.bor(left, right)
+    end
+    return bit
+end
+
+local bit32_real = _pure_bit32()
+local bit_real   = bit32_real
+
 local _proxy_mt = {
     __index = function(t, k)
         if type(k) == "number" then return 0 end
@@ -145,7 +213,8 @@ local _safe_globals = {
         return v, msg
     end,
     pcall = function(f, ...)
-        local results = { pcall(f, ...) }
+        local args = {...}
+        local results = { pcall(f, unpack(args)) }
         return unpack(results)
     end,
     xpcall = function(f, errhandler)
@@ -168,8 +237,8 @@ local _safe_globals = {
     math = math,
     os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "01/01/2000" end, difftime = function() return 0 end },
     coroutine = coroutine,
-    bit32 = _new_proxy("bit32"),
-    bit = _new_proxy("bit"),
+    bit32 = bit32_real,
+    bit = bit_real,
     tick = function() return 0 end,
     time = function() return 0 end,
     wait = function() end,
@@ -247,6 +316,12 @@ loadstring = function(chunk, chunkname)
             dumpf:write(chunk)
             dumpf:close()
         end
+        local fn, compile_err = _orig_loadstring(chunk, chunkname)
+        if fn then
+            setfenv(fn, _G)
+            return fn, nil
+        end
+        return function() end, compile_err
     end
     return function() end, nil
 end
@@ -306,7 +381,7 @@ if diagfile then
     diagfile:close()
 end
 
-setfenv(0, _G)
+setfenv(1, _G)
 
 local function _run_input()
     local f, err = loadfile(inpath)
