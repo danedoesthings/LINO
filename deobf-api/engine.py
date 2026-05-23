@@ -246,7 +246,6 @@ class DeobfEngine:
 
     def _extract_wearedevs_bytecode(self, source, diags):
         print("[engine] _extract_wearedevs_bytecode called", file=sys.stderr)
-        # 1. Find the string table R
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("WeAreDevs: no string table found")
@@ -257,19 +256,16 @@ class DeobfEngine:
             diags.append(f"WeAreDevs: only {len(strings)} strings in table")
             return None
         diags.append(f"WeAreDevs: found {len(strings)} escaped strings")
-        # 2. Decode escapes -> original_table (preserving empties)
         original_table = []
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
             original_table.append(decoded if decoded else b'')
-        diags.append(f"WeAreDevs: decoded {len(strings)} strings ({sum(1 for d in original_table if len(d)==0)} empty)")
-        # 3. Parse the custom base64 map N
-        b64_reverse = self._extract_custom_b64_reverse(source)
+        empty_count = sum(1 for d in original_table if len(d)==0)
+        diags.append(f"WeAreDevs: decoded {len(strings)} strings ({empty_count} empty)")
+        b64_reverse = self._extract_custom_b64_reverse(source, diags)
         diags.append(f"WeAreDevs: custom b64 map has {len(b64_reverse)} entries")
-        # 4. Parse shuffle pairs
         shuffle_pairs = self._extract_shuffle_pairs(source)
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle ranges")
-        # 5. Apply shuffle
         working = list(original_table)
         for lo, hi in shuffle_pairs:
             lo_idx = lo - 1
@@ -278,7 +274,6 @@ class DeobfEngine:
                 working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
                 lo_idx += 1
                 hi_idx -= 1
-        # 6. Decode each shuffled string through custom base64
         decoded_chunks = []
         for chunk in working:
             if len(chunk) == 0:
@@ -290,55 +285,52 @@ class DeobfEngine:
             diags.append("WeAreDevs: no chunks decoded from custom b64")
             return None
         diags.append(f"WeAreDevs: {len(decoded_chunks)} chunks decoded from custom b64")
-        # 7. Concatenate and find bytecode
         combined = b''.join(decoded_chunks)
-        diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
-        print(f"[engine] WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}", file=sys.stderr)
+        hex_preview = binascii.hexlify(combined[:16]).decode()
+        diags.append(f"WeAreDevs: combined {len(combined)} bytes, preview: {hex_preview}")
+        print(f"[engine] WeAreDevs: combined {len(combined)} bytes, preview: {hex_preview}", file=sys.stderr)
         bc = self.bytecode_harvester.extract(combined)
         if bc:
             diags.append(f"WeAreDevs: bytecode extracted ({len(bc)} bytes)")
             return bc
-        diags.append("WeAreDevs: no bytecode signature found in combined data")
+        diags.append(f"WeAreDevs: no bytecode signature in combined data (first 16: {hex_preview})")
         return None
 
-    def _extract_custom_b64_reverse(self, source):
+    def _extract_custom_b64_reverse(self, source, diags):
         """Extract the N table and build a reverse map: value -> character."""
         m = re.search(r'local N=\{([^}]+)\}', source)
         if not m:
             return {}
         body = m.group(1)
-        # Entries: key=value; or ["key"]=value
-        entries = re.findall(r'(\[\"\\?\d+\"\]|\[\"\\?\d+\"\]|\w+)=([-\d()+\-*/]+)', body)
-        # Also handle string keys: ["\055"]=135105-135089
-        entries2 = re.findall(r'\["(\\.)"\]=([-\d()+\-*/]+)', body)
         reverse = {}
-        # Process numeric-string keys
-        for key_str, val_expr in entries2:
+        # Parse entries with numeric string keys: ["\055"]=value
+        for key_match in re.finditer(r'\["(\\.)"\]\s*=\s*([-\d()+\-*/]+)', body):
+            key_str = key_match.group(1)
+            val_expr = key_match.group(2)
             val = self._safe_eval(val_expr.strip())
-            if val is not None:
-                # key_str is like "\055" — decode it
+            if val is not None and 0 <= val < 64:
                 key_char = self._decode_wearedevs_string(key_str)
                 if key_char:
                     reverse[val] = key_char.decode('latin-1')
-        # Process identifier keys (single chars like M, V, q, etc.)
-        for key_str, val_expr in entries:
-            if key_str.startswith('['):
-                continue
+        # Parse entries with identifier keys: key=value
+        for key_match in re.finditer(r'(?<![\["\'])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
+            key_str = key_match.group(1)
+            val_expr = key_match.group(2)
             val = self._safe_eval(val_expr.strip())
-            if val is not None and len(key_str) == 1:
+            if val is not None and 0 <= val < 64:
                 reverse[val] = key_str
-        # Fill in standard base64 chars for any missing values 0-63
+        # Fill gaps with standard base64
         std_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         for i, ch in enumerate(std_b64):
             if i not in reverse:
                 reverse[i] = ch
+        diags.append(f"B64 map sample: {dict(sorted(list(reverse.items()))[:5])}")
         return reverse
 
     def _decode_custom_b64(self, data, reverse_map):
         """Decode bytes using the custom base64 reverse map (value -> char)."""
         if not reverse_map or len(data) == 0:
             return None
-        # Build forward map: char -> value
         forward = {v: k for k, v in reverse_map.items()}
         bit_buf = 0
         bits = 0
@@ -358,7 +350,6 @@ class DeobfEngine:
         return bytes(out)
 
     def _extract_shuffle_pairs(self, source):
-        """Extract {start,end} pairs from the shuffle loop ipairs table."""
         m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
         if not m:
             return []
@@ -374,7 +365,6 @@ class DeobfEngine:
 
     @staticmethod
     def _safe_eval(expr):
-        """Safely evaluate a simple arithmetic expression with +, -, *, /, ()"""
         expr = expr.replace(' ', '')
         if not expr:
             return None
