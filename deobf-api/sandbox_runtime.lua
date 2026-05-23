@@ -425,41 +425,42 @@ local function _run_input()
         return
     end
     _real_setfenv(f, _G)
-    
-    local args_table = nil
-    if varargs_embedded ~= nil and _real_type(varargs_embedded) == "table" then
-        args_table = varargs_embedded
-    end
-    
-    local ok, result
-    if args_table then
+
+    if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
         local diagf = _real_io_open(outdir .. "/diag.txt", "a")
         if diagf then
-            diagf:write("Args loaded: " .. _real_tostring(#args_table) .. " strings\n")
-            diagf:write("Arg[1] preview: " .. _real_tostring(args_table[1] or "nil"):sub(1,40) .. "\n")
+            diagf:write("Args not embedded, using proxy\n")
             diagf:close()
         end
-        ok, result = _real_xpcall(function()
-            local run_ok, run_result = pcall(f, _real_unpack(args_table))
-            if not run_ok then
-                local errfile = _real_io_open(outdir .. "/error.txt", "a")
-                if errfile then
-                    errfile:write("\nVM_CRASH: " .. _real_tostring(run_result))
-                    errfile:close()
-                end
+        varargs_embedded = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
+    end
+
+    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf then
+        diagf:write("Args loaded: " .. _real_tostring(#varargs_embedded) .. " strings\n")
+        diagf:close()
+    end
+
+    local ok, result = _real_xpcall(function()
+        local run_ok, run_result = pcall(f,
+            _real_getfenv(0) or _G,
+            _real_unpack,
+            newproxy,
+            _real_setmetatable,
+            _real_getmetatable,
+            _real_select,
+            varargs_embedded
+        )
+        if not run_ok then
+            local errfile = _real_io_open(outdir .. "/error.txt", "a")
+            if errfile then
+                errfile:write("\nVM_CRASH: " .. _real_tostring(run_result))
+                errfile:close()
             end
-            return run_result
-        end, _error_handler)
-    else
-        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf then
-            diagf:write("Args not loaded, using proxy\n")
-            diagf:close()
         end
-        local proxy_arg = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
-        ok, result = _real_xpcall(function() return f(proxy_arg) end, _error_handler)
-    end
-    
+        return run_result
+    end, _error_handler)
+
     if not ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
@@ -467,10 +468,10 @@ local function _run_input()
             errfile:close()
         end
     end
-    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf then
-        diagf:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
-        diagf:close()
+    local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf2 then
+        diagf2:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
+        diagf2:close()
     end
 end
 
