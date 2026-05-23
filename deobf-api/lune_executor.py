@@ -3,6 +3,75 @@ import asyncio, os, tempfile, hashlib
 EXECUTION_TIMEOUT = 15
 LUNE_BIN = os.environ.get("LUNE_BIN", "lune")
 
+_BIT32_FALLBACK = """
+local function _pure_bit32()
+    local bit = {}
+    function bit.bxor(a, b)
+        local r, p = 0, 1
+        while a > 0 or b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit ~= bbit then r = r + p end
+            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+        end
+        return r
+    end
+    function bit.band(a, b)
+        local r, p = 0, 1
+        while a > 0 and b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit == 1 and bbit == 1 then r = r + p end
+            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+        end
+        return r
+    end
+    function bit.bor(a, b)
+        local r, p = 0, 1
+        while a > 0 or b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit == 1 or bbit == 1 then r = r + p end
+            a, b, p = math.floor(a/2), math.floor(b/2), p * 2
+        end
+        return r
+    end
+    function bit.bnot(a, bits)
+        bits = bits or 32
+        local r = 0
+        for i = 0, bits-1 do
+            if a % 2 == 0 then r = r + 2^i end
+            a = math.floor(a/2)
+        end
+        return r
+    end
+    function bit.lshift(a, n)
+        return a * 2^n
+    end
+    function bit.rshift(a, n)
+        return math.floor(a / 2^n)
+    end
+    function bit.arshift(a, n)
+        if a >= 0 then return math.floor(a / 2^n)
+        else return bit.bor(math.floor(a / 2^n), bit.bnot(2^(32-n)-1)) end
+    end
+    function bit.rol(a, n)
+        local bits = 32
+        n = n % bits
+        local left = bit.band(bit.lshift(a, n), 2^bits-1)
+        local right = bit.rshift(a, bits-n)
+        return bit.bor(left, right)
+    end
+    function bit.ror(a, n)
+        local bits = 32
+        n = n % bits
+        local left = bit.lshift(bit.band(a, 2^n-1), bits-n)
+        local right = bit.rshift(a, n)
+        return bit.bor(left, right)
+    end
+    return bit
+end
+if not bit32 then bit32 = _pure_bit32() end
+if not bit then bit = _pure_bit32() end
+"""
+
 _SHIM_PART1 = r"""
 local function make_proxy(name)
     local proxy = setmetatable({}, {
@@ -27,6 +96,8 @@ local function make_proxy(name)
     })
     return proxy
 end
+
+""" + _BIT32_FALLBACK + r"""
 
 local _player = {
     UserId = 1, Name = "Player", DisplayName = "Player",
@@ -91,8 +162,6 @@ delay  = function(t, f) pcall(f) end
 tick   = function() return 0 end
 time   = function() return 0 end
 os     = { time = function() return 0 end, clock = function() return 0 end, date = function() return "" end }
-bit32  = bit32 or make_proxy("bit32")
-bit    = bit or make_proxy("bit")
 
 local _captured = false
 local _outpath  = """
