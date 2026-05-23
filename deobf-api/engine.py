@@ -67,7 +67,6 @@ class DeobfEngine:
             trace.append({'stage': 'wearedevs_extractor', 'success': wearedevs_result is not None})
             if wearedevs_result:
                 if isinstance(wearedevs_result, bytes):
-                    # bytecode
                     dc, err = self._run_unluac(wearedevs_result)
                     if dc and self._is_valid_lua(dc):
                         return self._beautify(dc), 'wearedevs_unluac', f'Decompiled ({len(dc)} chars)', trace
@@ -75,7 +74,6 @@ class DeobfEngine:
                         reasons['wearedevs_unluac'] = err
                     return base64.b64encode(wearedevs_result).decode('ascii'), 'bytecode', f'Bytecode ({len(wearedevs_result)}B). unluac: {err}', trace
                 else:
-                    # source string
                     return self._beautify(wearedevs_result), 'wearedevs_source', f'Source recovered ({len(wearedevs_result)} chars)', trace
         except Exception as e:
             diags.append(f"WeAreDevs crashed: {str(e)}")
@@ -181,7 +179,6 @@ class DeobfEngine:
         return '', 'unable', reason, trace
 
     def _extract_wearedevs_source(self, source, diags):
-        """Extract either bytecode or Lua source from the obfuscated script's string table."""
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("no string table")
@@ -209,7 +206,6 @@ class DeobfEngine:
             return working
 
         def decode_table(table):
-            """Decode base64 strings and return combined bytes."""
             decoded_chunks = []
             for chunk in table:
                 if len(chunk) == 0:
@@ -222,24 +218,27 @@ class DeobfEngine:
             return b''.join(decoded_chunks)
 
         def check_result(data):
-            """Check if data is bytecode or Lua source, return appropriate type."""
-            # Try bytecode first
+            # Try bytecode
             bc = self.bytecode_harvester.extract(data)
             if bc:
-                return bc  # bytes
-            # Try as UTF-8 source
-            try:
-                text = data.decode('utf-8')
-                if self._is_valid_lua(text):
-                    return text  # str
-            except UnicodeDecodeError:
-                pass
-            try:
-                text = data.decode('latin-1')
-                if self._is_valid_lua(text):
-                    return text
-            except Exception:
-                pass
+                return bc
+            # Try as source if it's mostly printable and has some Lua keywords
+            printable = sum(1 for b in data if 32 <= b < 127 or b in (10, 13, 9))
+            if printable / max(len(data), 1) >= 0.6 and len(data) >= 50:
+                try:
+                    text = data.decode('utf-8')
+                    words = set(re.findall(r'\b\w+\b', text[:5000]))
+                    if len(words & LUA_KEYWORDS) >= 2:
+                        return text
+                except Exception:
+                    pass
+                try:
+                    text = data.decode('latin-1')
+                    words = set(re.findall(r'\b\w+\b', text[:5000]))
+                    if len(words & LUA_KEYWORDS) >= 2:
+                        return text
+                except Exception:
+                    pass
             return None
 
         # Try normal shuffle order
@@ -248,10 +247,7 @@ class DeobfEngine:
         if combined:
             result = check_result(combined)
             if result is not None:
-                if isinstance(result, bytes):
-                    diags.append(f"OK bytecode {len(result)}B")
-                else:
-                    diags.append(f"OK source {len(result)} chars")
+                diags.append(f"OK {'bc' if isinstance(result,bytes) else 'src'} {len(result)}B")
                 return result
 
         # Try reversed shuffle order
@@ -261,18 +257,27 @@ class DeobfEngine:
         if combined:
             result = check_result(combined)
             if result is not None:
-                if isinstance(result, bytes):
-                    diags.append(f"OK bytecode {len(result)}B (reversed shuff)")
-                else:
-                    diags.append(f"OK source {len(result)} chars (reversed shuff)")
+                diags.append(f"OK {'bc' if isinstance(result,bytes) else 'src'} {len(result)}B (rev)")
                 return result
 
-        # Report failure with preview
-        if combined:
-            hex_preview = binascii.hexlify(combined[:16]).decode()
-        else:
-            hex_preview = "empty"
-        diags.append(f"no valid result: {hex_preview}")
+        # Fallback: if combined is mostly printable, return it as source
+        if combined and len(combined) >= 50:
+            try:
+                text = combined.decode('utf-8')
+                if sum(1 for c in text if c.isprintable() or c in '\n\r\t') / len(text) >= 0.6:
+                    diags.append(f"partial src {len(text)} chars (low confidence)")
+                    return text
+            except Exception:
+                pass
+            try:
+                text = combined.decode('latin-1')
+                if sum(1 for c in text if c.isprintable() or c in '\n\r\t') / len(text) >= 0.6:
+                    diags.append(f"partial src {len(text)} chars (latin-1)")
+                    return text
+            except Exception:
+                pass
+
+        diags.append(f"no valid result: {binascii.hexlify(combined[:32]).decode() if combined else 'empty'} ({len(combined)}B)")
         return None
 
     def _extract_custom_b64_reverse(self, source):
