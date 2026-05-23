@@ -36,7 +36,11 @@ class BaseLifter:
 class AdvancedWeAreDevsLifter(BaseLifter):
     def lift(self, source):
         results = []
-        string_tables = self._find_all_string_tables(source)
+        iife_table = self._extract_iife_string_table(source)
+        if iife_table:
+            string_tables = [iife_table] + self._find_all_string_tables(source)
+        else:
+            string_tables = self._find_all_string_tables(source)
         b64_maps = self._find_all_b64_maps(source)
         shuffle_sets = self._find_all_shuffle_sets(source)
         for str_table in string_tables:
@@ -59,6 +63,22 @@ class AdvancedWeAreDevsLifter(BaseLifter):
                     if decoded and len(decoded) > 4:
                         results.append(decoded)
         return results
+
+    def _extract_iife_string_table(self, source):
+        m = re.search(r'return\s*\(\s*function\s*\([^)]*\)\s*.*?end\s*\)\s*\(\s*(\{.*?\})\s*\)', source, re.DOTALL)
+        if not m:
+            return None
+        table_raw = m.group(1)
+        table_body = self._extract_balanced_braces(source, m.start(1))
+        if not table_body:
+            return None
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+        if len(strings) < 4:
+            return None
+        decoded = [self._unescape_lua_string(s) for s in strings]
+        if any(len(s) > 20 for s in decoded):
+            return decoded
+        return None
 
     def _find_all_string_tables(self, source):
         tables = []
