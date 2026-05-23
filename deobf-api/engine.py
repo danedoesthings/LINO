@@ -73,7 +73,7 @@ class DeobfEngine:
             try:
                 decoded_chunks = lifter.lift(source)
                 if decoded_chunks:
-                    trace.append({'stage': f'lifter_{lifter_name}', 'chunks': len(decoded_chunks)})
+                    chunk_no_bc = 0
                     for chunk in decoded_chunks:
                         if isinstance(chunk, bytes):
                             bc = self.bytecode_harvester.extract(chunk)
@@ -82,9 +82,8 @@ class DeobfEngine:
                                 if dc and self._is_valid_lua(dc):
                                     return self._beautify(dc), f'{lifter_name}_unluac', f'Decompiled via {lifter_name}', trace
                                 if err: diags.append(f"{lifter_name}_unluac: {err}")
-                                trace.append({'stage': f'{lifter_name}_bytecode', 'size': len(bc), 'unluac_error': err})
                             else:
-                                diags.append(f"{lifter_name} bytecode not found in chunk")
+                                chunk_no_bc += 1
                         elif isinstance(chunk, str):
                             nested_bc = self._extract_bytecode(chunk)
                             if nested_bc:
@@ -98,6 +97,9 @@ class DeobfEngine:
                                     return rec_result, f'recursive_{rec_type}', f'Recursive: {rec_diag}', trace + rec_trace
                                 if self._is_valid_lua(chunk):
                                     return self._beautify(chunk), f'{lifter_name}_source', f'Source recovered via {lifter_name}', trace
+                    if chunk_no_bc > 0:
+                        diags.append(f"{lifter_name}: {len(decoded_chunks)} chunks, {chunk_no_bc} no bytecode")
+                    trace.append({'stage': f'lifter_{lifter_name}', 'chunks': len(decoded_chunks)})
             except Exception as e:
                 err_detail = traceback.format_exc()
                 diags.append(f"{lifter_name} error: {str(e)}")
@@ -120,18 +122,6 @@ class DeobfEngine:
         layers, caps, diag = execute_sandbox(source, timeout=120)
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps), 'diag': diag[:200] if diag else ''})
         if diag: diags.append(f"sandbox: {diag}")
-        if not layers and diag and ('attempt to index local' in diag or 'attempt to index a nil value' in diag):
-            wrapped_source = self._wrap_varargs_source(source, diag)
-            if wrapped_source:
-                layers2, caps2, diag2 = execute_sandbox(wrapped_source, timeout=120)
-                if layers2 or caps2:
-                    layers.extend(layers2)
-                    caps.extend(caps2)
-                    diag = diag2 if diag2 else diag
-                    trace.append({'stage': 'sandbox_retry_varargs', 'success': True})
-                else:
-                    diags.append(f"sandbox_retry: {diag2}")
-                    trace.append({'stage': 'sandbox_retry_varargs', 'success': False, 'diag': diag2[:200] if diag2 else ''})
 
         for i, item in enumerate(layers):
             if isinstance(item, bytes) and len(item) >= 12:
@@ -367,17 +357,3 @@ class DeobfEngine:
                 if any(line.startswith(w) for w in openers) and not line.rstrip().endswith('end'):
                     ind += 1
             return '\n'.join(out)
-
-    def _wrap_varargs_source(self, source, error_msg):
-        match = re.search(r"local '(\w+)'", error_msg)
-        if not match:
-            match = re.search(r"local (\w+) ", error_msg)
-        if not match:
-            return None
-        varname = match.group(1)
-        proxy_table_line = f'local {varname} = setmetatable({{}}, {{ __index = function(t, k) if type(k) == "number" then return "" else return rawget(t, k) or "" end end, __newindex = function() end, __call = function() return "" end, __tostring = function() return "" end, __len = function() return 100 end }})'
-        pattern = re.compile(rf'local\s+{varname}\s*=\s*\.\.\.', re.DOTALL)
-        modified = pattern.sub(proxy_table_line, source, count=1)
-        if modified != source:
-            return modified
-        return None
