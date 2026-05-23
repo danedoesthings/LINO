@@ -383,6 +383,16 @@ end
 
 setfenv(1, _G)
 
+local function _error_handler(err)
+    local traceback_str = debug.traceback(err, 3)
+    local errfile = io.open(outdir .. "/error.txt", "w")
+    if errfile then
+        errfile:write(traceback_str)
+        errfile:close()
+    end
+    return traceback_str
+end
+
 local function _run_input()
     local f, err = loadfile(inpath)
     if not f then
@@ -394,11 +404,11 @@ local function _run_input()
         return
     end
     setfenv(f, _G)
-    local ok, result = pcall(f)
+    local ok, result = xpcall(f, _error_handler)
     if not ok then
-        local errfile = io.open(outdir .. "/error.txt", "w")
+        local errfile = io.open(outdir .. "/error.txt", "a")
         if errfile then
-            errfile:write("EXECUTION_ERROR: " .. tostring(result))
+            errfile:write("\nEXECUTION_ERROR: " .. tostring(result))
             errfile:close()
         end
     end
