@@ -270,17 +270,12 @@ class DeobfEngine:
             return None
         diags.append(f"WeAreDevs: decoded {len(decoded_strings)} strings")
         print(f"[engine] WeAreDevs: decoded {len(decoded_strings)} strings", file=sys.stderr)
-        shuffle_match = re.search(r'for E,l in ipairs\((\{[^}]+\})\)', source)
-        shuffle_pairs = []
-        if shuffle_match:
-            nums = re.findall(r'(-?\d+)', shuffle_match.group(1))
-            for i in range(0, len(nums) - 1, 2):
-                shuffle_pairs.append((int(nums[i]), int(nums[i+1])))
-        diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle pairs")
-        print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle pairs", file=sys.stderr)
+        # Parse shuffle pairs from nested table
+        shuffle_pairs = self._extract_shuffle_pairs(source)
+        diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle ranges")
+        print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle ranges", file=sys.stderr)
         working = list(decoded_strings)
-        for a, b in shuffle_pairs:
-            lo, hi = a - 1, b - 1
+        for lo, hi in shuffle_pairs:
             if 0 <= lo < len(working) and 0 <= hi < len(working) and lo < hi:
                 working[lo:hi+1] = reversed(working[lo:hi+1])
         combined = b''.join(working)
@@ -294,6 +289,43 @@ class DeobfEngine:
         diags.append("WeAreDevs: no bytecode signature found in combined data")
         print("[engine] WeAreDevs: no bytecode signature", file=sys.stderr)
         return None
+
+    def _extract_shuffle_pairs(self, source):
+        """Extract range pairs from the nested shuffle table like {{a,b};{c,d};{e,f}}"""
+        # Find the for loop that shuffles
+        match = re.search(r'for E,l in ipairs\((\{[^}]*\{[^}]*\}[^}]*\})\)', source)
+        if not match:
+            return []
+        outer = match.group(1)
+        # Extract inner tables: {number_expr, number_expr}
+        inner_tables = re.findall(r'\{([-\d()+\-*/ ]+);([-\d()+\-*/ ]+)\}', outer)
+        if not inner_tables:
+            inner_tables = re.findall(r'\{([-\d()+\-*/ ]+),([-\d()+\-*/ ]+)\}', outer)
+        ranges = []
+        for expr1, expr2 in inner_tables:
+            try:
+                lo = self._safe_eval(expr1.strip())
+                hi = self._safe_eval(expr2.strip())
+                if lo is not None and hi is not None:
+                    ranges.append((lo, hi))
+            except Exception:
+                pass
+        return ranges
+
+    @staticmethod
+    def _safe_eval(expr):
+        """Safely evaluate a simple arithmetic expression with +, -, *, /, ()"""
+        expr = expr.replace(' ', '')
+        if not expr:
+            return None
+        # Only allow digits, operators, parentheses, minus sign
+        if not re.match(r'^[\d+\-*/()]+$', expr):
+            return None
+        try:
+            # Python's eval is safe here because we restricted the charset
+            return eval(expr)
+        except Exception:
+            return None
 
     @staticmethod
     def _decode_wearedevs_string(s):
