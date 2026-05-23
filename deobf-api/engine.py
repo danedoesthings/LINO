@@ -356,6 +356,9 @@ class DeobfEngine:
         if not match:
             return None
         varname = match.group(1)
-        proxy_table = "setmetatable({}, { __index = function(t, k) if type(k) == 'number' then return '' else return rawget(t, k) or '' end end, __newindex = function() end, __call = function() return '' end, __tostring = function() return '' end, __len = function() return 100 end })"
-        wrapper = f"(function(...) local {varname} = ...; {source} end)({proxy_table})"
-        return wrapper
+        proxy_table_line = f'local {varname} = setmetatable({{}}, {{ __index = function(t, k) if type(k) == "number" then return "" else return rawget(t, k) or "" end end, __newindex = function() end, __call = function() return "" end, __tostring = function() return "" end, __len = function() return 100 end }})'
+        pattern = re.compile(rf'local\s+{varname}\s*=\s*\.\.\.', re.DOTALL)
+        modified = pattern.sub(proxy_table_line, source, count=1)
+        if modified != source:
+            return modified
+        return None
