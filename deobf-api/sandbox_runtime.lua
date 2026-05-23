@@ -8,6 +8,7 @@ local _real_xpcall = xpcall
 local _real_setfenv = setfenv
 local _real_loadfile = loadfile
 local _real_pairs = pairs
+local _real_ipairs = ipairs
 local _real_type = type
 local _real_select = select
 local _real_unpack = unpack
@@ -245,7 +246,7 @@ local _safe_globals = {
     tostring = _real_tostring,
     tonumber = tonumber,
     pairs = _real_pairs,
-    ipairs = ipairs,
+    ipairs = _real_ipairs,
     next = _real_next,
     rawget = _real_rawget,
     rawset = _real_rawset,
@@ -320,6 +321,9 @@ local _env_mt = {
 }
 
 _real_setmetatable(_G, _env_mt)
+_real_rawset(_G, "ipairs", _real_ipairs)
+_real_rawset(_G, "pairs", _real_pairs)
+_real_rawset(_G, "next", _real_next)
 local _capture_count = 0
 local _orig_loadstring = loadstring
 
