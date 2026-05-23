@@ -48,8 +48,8 @@ class AdvancedWeAreDevsLifter(BaseLifter):
                     decoded = self._decode_custom_b64(s, b64_map)
                     if decoded and len(decoded) > 4:
                         results.append(decoded)
-        iife_tables = self._find_iife_inline_tables(source)
-        for tbl in iife_tables:
+        anonymous_tables = self._find_anonymous_string_tables(source)
+        for tbl in anonymous_tables:
             working = list(tbl)
             for shuf in shuffle_sets:
                 working = self._apply_shuffle(working, shuf)
@@ -78,18 +78,11 @@ class AdvancedWeAreDevsLifter(BaseLifter):
                     tables.append(decoded)
         return tables
 
-    def _find_iife_inline_tables(self, source):
+    def _find_anonymous_string_tables(self, source):
         tables = []
-        for m in re.finditer(r'\(\s*function\s*\([^)]*\)\s*.*?end\s*\)\s*\(\s*(\{[^}]*\})\s*\)', source, re.DOTALL):
-            table_body = m.group(1)
-            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
-            if len(strings) >= 4:
-                decoded = [self._unescape_lua_string(s) for s in strings]
-                if any(len(s) > 20 for s in decoded):
-                    tables.append(decoded)
-        for m in re.finditer(r'\(\s*function\s*\([^)]*\)\s*.*?end\s*\)\s*\(\s*(\{.*?\})\s*\)', source, re.DOTALL):
-            table_raw = m.group(1)
-            table_body = self._extract_balanced_braces(source, m.start(1))
+        for m in re.finditer(r'\{', source):
+            start = m.start()
+            table_body = self._extract_balanced_braces(source, start)
             if table_body:
                 strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
                 if len(strings) >= 4:
