@@ -106,7 +106,7 @@ class DeobfEngine:
 
         layers, caps, diag = execute_sandbox(source, timeout=120)
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps), 'diag': diag[:200] if diag else ''})
-        if not layers and not caps and diag and ('attempt to index local' in diag or 'attempt to index a nil value' in diag):
+        if not layers and diag and ('attempt to index local' in diag or 'attempt to index a nil value' in diag):
             wrapped_source = self._wrap_varargs_source(source, diag)
             if wrapped_source:
                 layers2, caps2, diag2 = execute_sandbox(wrapped_source, timeout=120)
@@ -356,21 +356,6 @@ class DeobfEngine:
         if not match:
             return None
         varname = match.group(1)
-        proxy_table = """setmetatable({}, {
-    __index = function(t, k)
-        if type(k) == 'number' then
-            local s = ''
-            for _ = 1, 12 do s = s .. string.char(math.random(65, 90)) end
-            return s
-        else return rawget(t, k) or '' end
-    end,
-    __newindex = function() end,
-    __call = function() return '' end,
-    __tostring = function() return '' end,
-    __len = function() return 100 end,
-})"""
-        wrapper = f"""math.randomseed(0)
-(function(...)
-{source}
-end)({proxy_table})"""
+        proxy_table = "setmetatable({}, { __index = function(t, k) if type(k) == 'number' then return '' else return rawget(t, k) or '' end end, __newindex = function() end, __call = function() return '' end, __tostring = function() return '' end, __len = function() return 100 end })"
+        wrapper = f"(function(...) local {varname} = ...; {source} end)({proxy_table})"
         return wrapper
