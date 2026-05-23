@@ -1,6 +1,6 @@
 local outdir = "OUTDIR_PLACEHOLDER"
 local inpath = "INPATH_PLACEHOLDER"
-local argspath = "ARGSPATH_PLACEHOLDER"
+local varargs_embedded = VARARGS_PLACEHOLDER
 
 local _real_io_open = io.open
 local _real_tostring = tostring
@@ -427,27 +427,8 @@ local function _run_input()
     _real_setfenv(f, _G)
     
     local args_table = nil
-    if argspath ~= "nil" and argspath ~= "ARGSPATH_PLACEHOLDER" then
-        local args_chunk = _real_loadfile(argspath)
-        if args_chunk then
-            _real_setfenv(args_chunk, _G)
-            local load_ok, loaded = pcall(args_chunk)
-            if load_ok and _real_type(loaded) == "table" then
-                args_table = loaded
-            else
-                local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-                if diagf then
-                    diagf:write("ARGS_LOAD_ERROR: " .. _real_tostring(loaded) .. "\n")
-                    diagf:close()
-                end
-            end
-        else
-            local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-            if diagf then
-                diagf:write("ARGS_FILE_LOAD_ERROR: could not load args file\n")
-                diagf:close()
-            end
-        end
+    if varargs_embedded ~= nil and _real_type(varargs_embedded) == "table" then
+        args_table = varargs_embedded
     end
     
     local ok, result
