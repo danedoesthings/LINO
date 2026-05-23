@@ -75,6 +75,10 @@ class DeobfEngine:
             lifter_name = lifter.__class__.__name__
             try:
                 decoded_chunks = lifter.lift(source)
+                if hasattr(lifter, 'get_diag'):
+                    lifter_diag = lifter.get_diag()
+                    if lifter_diag:
+                        diags.append(f"{lifter_name} found: {lifter_diag}")
                 if decoded_chunks:
                     chunk_no_bc = 0
                     chunk_bytes = 0
