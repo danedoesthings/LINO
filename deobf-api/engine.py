@@ -183,7 +183,7 @@ class DeobfEngine:
             matches = re.findall(pat, source, re.DOTALL)
             if matches:
                 trace.append({'stage': 'rapid_decode_pattern', 'matches': len(matches)})
-                break
+                return source
         return None
 
     def _extract_bytecode(self, data):
