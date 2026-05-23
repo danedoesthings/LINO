@@ -1,4 +1,4 @@
-import os, re, subprocess, tempfile, shutil, traceback, hashlib
+import os, re, subprocess, tempfile, shutil, traceback
 
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
 RUNTIME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox_runtime.lua')
@@ -41,15 +41,13 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
         env['LUA_PATH'] = os.path.join(APP_DIR, '?.lua') + ';' + env.get('LUA_PATH', '')
         env['LUA_CPATH'] = os.path.join(APP_DIR, '?.so') + ';' + env.get('LUA_CPATH', '')
         proc_error = ''
+        stderr_output = ''
         try:
             result = subprocess.run(
                 [LUA_BIN, drv],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=temp_dir,
-                env=env
+                capture_output=True, text=True, timeout=timeout, cwd=temp_dir, env=env
             )
+            stderr_output = result.stderr
             if result.returncode != 0:
                 proc_error = f'LUA_EXIT_{result.returncode}: {result.stderr[:400]}'
         except subprocess.TimeoutExpired:
@@ -60,6 +58,8 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
             proc_error = f'SUBPROCESS_ERROR: {e}'
         if proc_error:
             error_log.append(proc_error)
+        if stderr_output.strip():
+            error_log.append(f'STDERR: {stderr_output.strip()}')
         i = 1
         while True:
             p = os.path.join(temp_dir, f'layer_{i}.lua')
@@ -129,7 +129,7 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
             prefix = '\n'.join(error_log)
             diag = prefix + ('\n---\n' + diag if diag else '')
         if not layers and not caps and not diag:
-            diag = 'NO_OUTPUT: sandbox produced no output files'
+            diag = 'NO_OUTPUT'
     except Exception as e:
         diag = f'SANDBOX_FATAL: {e}\n{traceback.format_exc()}'
     finally:
