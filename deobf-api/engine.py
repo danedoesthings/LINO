@@ -52,38 +52,65 @@ class DeobfEngine:
     def get_capabilities(self):
         return list(self.capabilities)
 
+    @staticmethod
+    def _log(msg):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
+
     def process(self, source):
+        self._log("process: start")
         trace = []
         diags = []
         reasons = {}
         input_size = len(source.encode('utf-8', errors='replace'))
         input_lines = len(source.splitlines())
 
-        fingerprint = self.fingerprinter.analyze(source)
-        trace.append({'stage': 'fingerprint', 'details': fingerprint, 'input_size': input_size, 'input_lines': input_lines})
+        try:
+            fingerprint = self.fingerprinter.analyze(source)
+            trace.append({'stage': 'fingerprint', 'details': fingerprint, 'input_size': input_size, 'input_lines': input_lines})
+            self._log(f"fingerprint: {fingerprint.get('estimated_type','?')}")
+        except Exception as e:
+            self._log(f"fingerprint error: {e}")
+            trace.append({'stage': 'fingerprint', 'error': str(e)})
 
-        wearedevs_bc = self._extract_wearedevs_bytecode(source, diags)
-        if wearedevs_bc:
-            trace.append({'stage': 'wearedevs_extractor', 'bytecode_size': len(wearedevs_bc)})
-            dc, err = self._run_unluac(wearedevs_bc)
-            if dc and self._is_valid_lua(dc):
-                return self._beautify(dc), 'wearedevs_unluac', f'WeAreDevs string table + unluac ({len(dc)} chars)', trace
-            if err:
-                reasons['wearedevs_unluac'] = err
-            return base64.b64encode(wearedevs_bc).decode('ascii'), 'bytecode', f'WeAreDevs bytecode ({len(wearedevs_bc)}B). unluac: {err}', trace
-
-        result = self._try_rapid_string_decode(source, trace)
-        if result:
-            bc = self._extract_bytecode(result)
-            if bc:
-                dc, err = self._run_unluac(bc)
+        # -- WeAreDevs specific extractor ---------------------------------
+        try:
+            self._log("trying wearedevs extractor")
+            wearedevs_bc = self._extract_wearedevs_bytecode(source, diags)
+            if wearedevs_bc:
+                trace.append({'stage': 'wearedevs_extractor', 'bytecode_size': len(wearedevs_bc)})
+                self._log(f"wearedevs bytecode {len(wearedevs_bc)} bytes")
+                dc, err = self._run_unluac(wearedevs_bc)
                 if dc and self._is_valid_lua(dc):
-                    return self._beautify(dc), 'rapid_decode_unluac', f'Rapid string decode + unluac ({len(dc)} chars)', trace
-                if err: reasons['rapid_decode_unluac'] = err
+                    self._log("wearedevs unluac success")
+                    return self._beautify(dc), 'wearedevs_unluac', f'WeAreDevs extracted ({len(dc)} chars)', trace
+                if err:
+                    reasons['wearedevs_unluac'] = err
+                    self._log(f"wearedevs unluac fail: {err[:200]}")
+                return base64.b64encode(wearedevs_bc).decode('ascii'), 'bytecode', f'WeAreDevs bytecode ({len(wearedevs_bc)}B). unluac: {err}', trace
+        except Exception as e:
+            self._log(f"wearedevs extractor crash: {e}")
+            diags.append(f"wearedevs extractor crashed: {str(e)}")
+            reasons['wearedevs_extractor'] = traceback.format_exc()
 
+        # -- Rapid string decode -------------------------------------------
+        try:
+            result = self._try_rapid_string_decode(source, trace)
+            if result:
+                bc = self._extract_bytecode(result)
+                if bc:
+                    dc, err = self._run_unluac(bc)
+                    if dc and self._is_valid_lua(dc):
+                        return self._beautify(dc), 'rapid_decode_unluac', f'Rapid string decode ({len(dc)} chars)', trace
+                    if err: reasons['rapid_decode_unluac'] = err
+        except Exception as e:
+            self._log(f"rapid decode error: {e}")
+
+        # -- Lifters --------------------------------------------------------
         for lifter in self.lifters:
             lifter_name = lifter.__class__.__name__
             try:
+                self._log(f"lifter {lifter_name}")
                 decoded_chunks = lifter.lift(source)
                 if hasattr(lifter, 'get_diag'):
                     lifter_diag = lifter.get_diag()
@@ -110,140 +137,158 @@ class DeobfEngine:
                             if nested_bc:
                                 dc, err = self._run_unluac(nested_bc)
                                 if dc and self._is_valid_lua(dc):
-                                    return self._beautify(dc), f'{lifter_name}_nested_unluac', f'{lifter_name} nested bytecode decompiled ({len(dc)} chars)', trace
+                                    return self._beautify(dc), f'{lifter_name}_nested_unluac', f'{lifter_name} nested bytecode ({len(dc)} chars)', trace
                                 if err: reasons[f'{lifter_name}_nested_unluac'] = err
                             if self._is_valid_lua(chunk) and len(chunk) > 200:
                                 rec_result, rec_type, rec_diag, rec_trace = self.process(chunk)
                                 if rec_result and rec_type != 'unable':
                                     return rec_result, f'recursive_{rec_type}', f'Recursive {lifter_name}: {rec_diag}', trace + rec_trace
                                 if self._is_valid_lua(chunk):
-                                    return self._beautify(chunk), f'{lifter_name}_source', f'{lifter_name} source recovered ({len(chunk)} chars)', trace
+                                    return self._beautify(chunk), f'{lifter_name}_source', f'{lifter_name} source ({len(chunk)} chars)', trace
                             else:
                                 chunk_no_bc += 1
-                    summary = f"{lifter_name}: {len(decoded_chunks)} total ({chunk_bytes} bytes/{chunk_strs} str), {chunk_no_bc} no bytecode"
-                    if chunk_no_bc > 0 or not reasons.get(lifter_name):
-                        diags.append(summary)
+                    summary = f"{lifter_name}: {len(decoded_chunks)} chunks ({chunk_bytes}B/{chunk_strs}S), {chunk_no_bc} no bc"
+                    diags.append(summary)
                     trace.append({'stage': f'lifter_{lifter_name}', 'total_chunks': len(decoded_chunks), 'bytes': chunk_bytes, 'strs': chunk_strs, 'no_bc': chunk_no_bc})
             except Exception as e:
-                err_detail = traceback.format_exc()
+                self._log(f"lifter {lifter_name} crash: {e}")
                 reasons[f'{lifter_name}_error'] = str(e)
                 diags.append(f"{lifter_name} crashed: {str(e)[:200]}")
-                trace.append({'stage': f'lifter_{lifter_name}_error', 'error': str(e), 'traceback': err_detail[:2000]})
 
-        all_strings = self.string_decoder.decode_all(source)
-        if all_strings:
-            trace.append({'stage': 'string_decoder', 'count': len(all_strings)})
-            combined = '\n'.join(all_strings)
-            if len(combined) > 200 and self._is_valid_lua(combined):
-                return self._beautify(combined), 'string_decode', f'Reconstructed from {len(all_strings)} decoded strings ({len(combined)} chars)', trace
-            for i, s in enumerate(all_strings):
-                bc = self._extract_bytecode(s)
-                if bc:
-                    dc, err = self._run_unluac(bc)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'string_decode_unluac', f'Bytecode from string {i} + unluac ({len(dc)} chars)', trace
-                    if err: reasons[f'string_decode_unluac_{i}'] = err
-
-        layers, caps, diag = execute_sandbox(source, timeout=120)
-        trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps), 'diag': diag[:300] if diag else ''})
-        if diag: reasons['sandbox'] = diag
-        if layers:
-            diags.append(f"sandbox produced {len(layers)} layers, {len(caps)} caps")
-
-        for i, item in enumerate(layers):
-            if isinstance(item, bytes) and len(item) >= 12:
-                bc = self.bytecode_harvester.extract(item)
-                if bc:
-                    dc, err = self._run_unluac(bc)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled ({len(dc)} chars)', trace
-                    if err: reasons[f'sandbox_unluac_layer_{i}'] = err
-            if isinstance(item, str):
-                bc = self._extract_bytecode(item)
-                if bc:
-                    dc, err = self._run_unluac(bc)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'sandbox_unluac', f'Layer {i} string bytecode ({len(dc)} chars)', trace
-                    if err: reasons[f'sandbox_unluac_str_{i}'] = err
-                if 'SANDBOX_OUTPUT_START' in item:
-                    bc2 = self._extract_bytecode_from_sandbox_output(item)
-                    if bc2:
-                        dc, err = self._run_unluac(bc2)
+        # -- String decoder --------------------------------------------------
+        try:
+            all_strings = self.string_decoder.decode_all(source)
+            if all_strings:
+                trace.append({'stage': 'string_decoder', 'count': len(all_strings)})
+                combined = '\n'.join(all_strings)
+                if len(combined) > 200 and self._is_valid_lua(combined):
+                    return self._beautify(combined), 'string_decode', f'Strings combined ({len(combined)} chars)', trace
+                for i, s in enumerate(all_strings):
+                    bc = self._extract_bytecode(s)
+                    if bc:
+                        dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
-                            return self._beautify(dc), 'sandbox_scan', f'State scan bytecode ({len(dc)} chars)', trace
-                        if err: reasons['sandbox_scan'] = err
-                if len(item) > 100 and self._is_valid_lua(item):
-                    return self._beautify(item), 'sandbox_capture', f'Layer {i} source ({len(item)} chars)', trace
+                            return self._beautify(dc), 'string_decode_unluac', f'String {i} + unluac ({len(dc)} chars)', trace
+                        if err: reasons[f'string_decode_unluac_{i}'] = err
+        except Exception as e:
+            self._log(f"string_decoder error: {e}")
 
-        all_text = [c for c in caps if isinstance(c, str) and len(c) > 20]
-        if all_text:
-            combined = '\n'.join(all_text)
-            if len(combined) > 200 and self._is_valid_lua(combined):
-                return self._beautify(combined), 'sandbox_strings', f'Captured {len(all_text)} strings ({len(combined)} chars)', trace
+        # -- Sandbox --------------------------------------------------------
+        try:
+            self._log("sandbox execution")
+            layers, caps, diag = execute_sandbox(source, timeout=120)
+            trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps), 'diag': diag[:300] if diag else ''})
+            if diag: reasons['sandbox'] = diag
+            if layers:
+                diags.append(f"sandbox: {len(layers)} layers, {len(caps)} caps")
+            for i, item in enumerate(layers):
+                if isinstance(item, bytes) and len(item) >= 12:
+                    bc = self.bytecode_harvester.extract(item)
+                    if bc:
+                        dc, err = self._run_unluac(bc)
+                        if dc and self._is_valid_lua(dc):
+                            return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled ({len(dc)} chars)', trace
+                        if err: reasons[f'sandbox_unluac_layer_{i}'] = err
+                if isinstance(item, str):
+                    bc = self._extract_bytecode(item)
+                    if bc:
+                        dc, err = self._run_unluac(bc)
+                        if dc and self._is_valid_lua(dc):
+                            return self._beautify(dc), 'sandbox_unluac', f'Layer {i} string bytecode ({len(dc)} chars)', trace
+                        if err: reasons[f'sandbox_unluac_str_{i}'] = err
+                    if 'SANDBOX_OUTPUT_START' in item:
+                        bc2 = self._extract_bytecode_from_sandbox_output(item)
+                        if bc2:
+                            dc, err = self._run_unluac(bc2)
+                            if dc and self._is_valid_lua(dc):
+                                return self._beautify(dc), 'sandbox_scan', f'State scan bytecode ({len(dc)} chars)', trace
+                            if err: reasons['sandbox_scan'] = err
+                    if len(item) > 100 and self._is_valid_lua(item):
+                        return self._beautify(item), 'sandbox_capture', f'Layer {i} source ({len(item)} chars)', trace
+            all_text = [c for c in caps if isinstance(c, str) and len(c) > 20]
+            if all_text:
+                combined = '\n'.join(all_text)
+                if len(combined) > 200 and self._is_valid_lua(combined):
+                    return self._beautify(combined), 'sandbox_strings', f'Captured {len(all_text)} strings ({len(combined)} chars)', trace
+        except Exception as e:
+            self._log(f"sandbox error: {e}")
+            diags.append(f"sandbox crash: {str(e)}")
 
-        lune_data, lune_info = self._run_lune(source)
-        trace.append({'stage': 'lune', 'info': lune_info})
-        if lune_info.get('error'):
-            reasons['lune'] = lune_info['error']
-        if lune_data:
-            if isinstance(lune_data, bytes) and len(lune_data) >= 12:
-                bc = self.bytecode_harvester.extract(lune_data)
-                if bc:
-                    dc, err = self._run_unluac(bc)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'lune_unluac', f'Lune bytecode ({len(dc)} chars)', trace
-                    if err: reasons['lune_unluac'] = err
-            try:
-                text = lune_data.decode('utf-8', errors='replace')
-                if self._is_valid_lua(text):
-                    return self._beautify(text), 'lune_capture', f'Lune source ({len(text)} chars)', trace
-            except Exception:
-                pass
+        # -- Lune -----------------------------------------------------------
+        try:
+            lune_data, lune_info = self._run_lune(source)
+            trace.append({'stage': 'lune', 'info': lune_info})
+            if lune_info.get('error'):
+                reasons['lune'] = lune_info['error']
+            if lune_data:
+                if isinstance(lune_data, bytes) and len(lune_data) >= 12:
+                    bc = self.bytecode_harvester.extract(lune_data)
+                    if bc:
+                        dc, err = self._run_unluac(bc)
+                        if dc and self._is_valid_lua(dc):
+                            return self._beautify(dc), 'lune_unluac', f'Lune bytecode ({len(dc)} chars)', trace
+                        if err: reasons['lune_unluac'] = err
+                try:
+                    text = lune_data.decode('utf-8', errors='replace')
+                    if self._is_valid_lua(text):
+                        return self._beautify(text), 'lune_capture', f'Lune source ({len(text)} chars)', trace
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log(f"lune error: {e}")
 
-        raw_bytecode = self.bytecode_harvester.deep_scan(source)
-        if raw_bytecode:
-            bc_hex = binascii.hexlify(raw_bytecode[:32]).decode()
-            trace.append({'stage': 'deep_scan', 'bytecode_found': True, 'size': len(raw_bytecode), 'preview': bc_hex})
-            dc, err = self._run_unluac(raw_bytecode)
-            if dc and self._is_valid_lua(dc):
-                return self._beautify(dc), 'deep_scan_unluac', f'Deep scan bytecode ({len(dc)} chars)', trace
-            if err: reasons['deep_scan_unluac'] = err
-            return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bytecode ({len(raw_bytecode)}B). unluac: {err}', trace
+        # -- Deep scan -------------------------------------------------------
+        try:
+            raw_bytecode = self.bytecode_harvester.deep_scan(source)
+            if raw_bytecode:
+                bc_hex = binascii.hexlify(raw_bytecode[:32]).decode()
+                trace.append({'stage': 'deep_scan', 'bytecode_found': True, 'size': len(raw_bytecode), 'preview': bc_hex})
+                dc, err = self._run_unluac(raw_bytecode)
+                if dc and self._is_valid_lua(dc):
+                    return self._beautify(dc), 'deep_scan_unluac', f'Deep scan bytecode ({len(dc)} chars)', trace
+                if err: reasons['deep_scan_unluac'] = err
+                return base64.b64encode(raw_bytecode).decode('ascii'), 'bytecode', f'Raw bytecode ({len(raw_bytecode)}B). unluac: {err}', trace
+        except Exception as e:
+            self._log(f"deep scan error: {e}")
 
         if reasons:
             reason = '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items())
         elif diag:
             reason = diag
         else:
-            reason = f'All {len(trace)} stages exhausted, no valid output'
+            reason = f'All stages exhausted ({len(trace)} steps)'
+        self._log(f"process: failure - {reason}")
         return '', 'unable', reason, trace
 
     def _extract_wearedevs_bytecode(self, source, diags):
-        print("[engine] _extract_wearedevs_bytecode called", file=sys.stderr)
+        self._log("_extract_wearedevs_bytecode: searching")
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
-            diags.append("WeAreDevs: no string table found")
-            print("[engine] WeAreDevs: no string table", file=sys.stderr)
+            diags.append("WeAreDevs: no string table")
+            self._log("no string table found")
             return None
         table_body = m.group(1)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         if len(strings) < 10:
-            diags.append(f"WeAreDevs: only {len(strings)} strings in table")
-            print(f"[engine] WeAreDevs: only {len(strings)} strings", file=sys.stderr)
+            diags.append(f"WeAreDevs: only {len(strings)} strings")
+            self._log(f"only {len(strings)} strings")
             return None
-        diags.append(f"WeAreDevs: found {len(strings)} escaped strings")
-        print(f"[engine] WeAreDevs: {len(strings)} strings", file=sys.stderr)
+        diags.append(f"WeAreDevs: found {len(strings)} strings")
+        self._log(f"found {len(strings)} strings")
         decoded_strings = []
         for s in strings:
-            decoded = self._decode_wearedevs_string(s)
-            if decoded:
-                decoded_strings.append(decoded)
+            try:
+                dec = self._decode_wearedevs_string(s)
+                if dec:
+                    decoded_strings.append(dec)
+            except Exception as e:
+                self._log(f"decode string error: {e}")
         if not decoded_strings:
-            diags.append("WeAreDevs: no strings decoded")
-            print("[engine] WeAreDevs: no strings decoded", file=sys.stderr)
+            diags.append("WeAreDevs: no valid strings decoded")
+            self._log("no valid strings decoded")
             return None
         diags.append(f"WeAreDevs: decoded {len(decoded_strings)} strings")
-        print(f"[engine] WeAreDevs: decoded {len(decoded_strings)} strings", file=sys.stderr)
+        self._log(f"decoded {len(decoded_strings)} strings")
         shuffle_match = re.search(r'for E,l in ipairs\((\{[^}]+\})\)', source)
         shuffle_pairs = []
         if shuffle_match:
@@ -251,22 +296,20 @@ class DeobfEngine:
             for i in range(0, len(nums) - 1, 2):
                 shuffle_pairs.append((int(nums[i]), int(nums[i+1])))
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle pairs")
-        print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle pairs", file=sys.stderr)
         working = list(decoded_strings)
         for a, b in shuffle_pairs:
             lo, hi = a - 1, b - 1
             if 0 <= lo < len(working) and 0 <= hi < len(working) and lo < hi:
                 working[lo:hi+1] = reversed(working[lo:hi+1])
         combined = b''.join(working)
-        diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
-        print(f"[engine] WeAreDevs: combined {len(combined)} bytes", file=sys.stderr)
+        diags.append(f"WeAreDevs: combined {len(combined)} bytes, hex prefix {binascii.hexlify(combined[:12]).decode()}")
+        self._log(f"combined {len(combined)} bytes")
         bc = self.bytecode_harvester.extract(combined)
         if bc:
-            diags.append(f"WeAreDevs: bytecode extracted ({len(bc)} bytes)")
-            print(f"[engine] WeAreDevs: bytecode {len(bc)} bytes", file=sys.stderr)
+            self._log(f"bytecode extracted {len(bc)} bytes")
             return bc
-        diags.append("WeAreDevs: no bytecode signature found in combined data")
-        print("[engine] WeAreDevs: no bytecode signature", file=sys.stderr)
+        diags.append("WeAreDevs: no Lua signature in combined data")
+        self._log("no Lua signature")
         return None
 
     @staticmethod
