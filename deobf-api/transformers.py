@@ -17,7 +17,7 @@ class BaseLifter:
                 elif nc == '0': result.append('\0')
                 elif nc.isdigit():
                     j = i + 1
-                    while j < len(s) and s[j].isdigit() and j - i <= 4:
+                    while j < len(s) and s[j].isdigit() and j - i < 4:
                         j += 1
                     try:
                         code = int(s[i+1:j])
@@ -454,43 +454,95 @@ class BytecodeHarvester:
         try:
             if start + 12 > len(data):
                 return None
-            header_size = data[start + 5]
-            if start + header_size + 1 > len(data):
-                return None
-            size_upvalues = data[start + 7]
-            size_params = data[start + 11]
-            ptr = start + header_size + 1
-            if ptr >= len(data):
-                return None
-            size_code = struct.unpack('<I', data[ptr:ptr+4])[0]
-            ptr += 4 + size_code * 4
-            if ptr + 4 > len(data):
-                return None
-            size_constants = struct.unpack('<I', data[ptr:ptr+4])[0]
-            ptr += 4
-            for _ in range(size_constants):
+            version = data[start + 4]
+            format_ver = data[start + 5]
+            endian_flag = data[start + 6]
+            int_size = data[start + 7]
+            size_t_size = data[start + 8]
+            instruction_size = data[start + 9]
+            number_size = data[start + 10]
+            integral_flag = data[start + 11]
+            ptr = start + 12
+            if version == 0x51 and format_ver == 0:
+                if ptr + int_size > len(data):
+                    return None
+                if ptr + int_size + size_t_size > len(data):
+                    return None
+                source_name_len = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                if source_name_len > 0:
+                    ptr += source_name_len
                 if ptr >= len(data):
                     return None
-                const_type = data[ptr]
+                line_defined = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                last_line_defined = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                num_upvalues = data[ptr] if ptr < len(data) else 0
                 ptr += 1
-                if const_type == 4:
-                    if ptr + 4 > len(data):
+                num_params = data[ptr] if ptr < len(data) else 0
+                ptr += 1
+                is_vararg = data[ptr] if ptr < len(data) else 0
+                ptr += 1
+                max_stack_size = data[ptr] if ptr < len(data) else 0
+                ptr += 1
+                if ptr + int_size > len(data):
+                    return None
+                code_size = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                ptr += code_size * instruction_size
+                if ptr + int_size > len(data):
+                    return None
+                const_size = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                for _ in range(const_size):
+                    if ptr >= len(data):
                         return None
-                    str_len = struct.unpack('<I', data[ptr:ptr+4])[0]
-                    ptr += 4 + str_len
-                elif const_type == 3:
-                    ptr += 8
-                elif const_type == 1:
+                    const_type = data[ptr]
                     ptr += 1
-            if ptr + 4 > len(data):
-                return None
-            size_protos = struct.unpack('<I', data[ptr:ptr+4])[0]
-            ptr += 4
-            for _ in range(size_protos):
-                sub_end = self._find_bytecode_end(data, ptr)
-                if sub_end:
-                    ptr = sub_end
-            return ptr
+                    if const_type == 4:
+                        if ptr + int_size > len(data):
+                            return None
+                        str_len = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                        ptr += int_size + str_len
+                    elif const_type == 3:
+                        ptr += number_size
+                    elif const_type == 1:
+                        ptr += 1
+                if ptr + int_size > len(data):
+                    return None
+                proto_size = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                for _ in range(proto_size):
+                    sub_end = self._find_bytecode_end(data, ptr)
+                    if sub_end:
+                        ptr = sub_end
+                    else:
+                        return None
+                if ptr + int_size > len(data):
+                    return None
+                upvalue_count = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                for _ in range(upvalue_count):
+                    if ptr + 2 > len(data):
+                        return None
+                    ptr += 2
+                if ptr + int_size > len(data):
+                    return None
+                local_count = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                for _ in range(local_count):
+                    if ptr + int_size + 4 > len(data):
+                        return None
+                    str_len = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                    ptr += int_size + str_len + 4
+                if ptr + int_size > len(data):
+                    return None
+                lineinfo_count = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
+                ptr += int_size
+                ptr += lineinfo_count * int_size
+                return ptr
+            return len(data)
         except Exception:
             return len(data)
 
