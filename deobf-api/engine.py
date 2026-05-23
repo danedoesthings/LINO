@@ -73,7 +73,6 @@ class DeobfEngine:
                 if err:
                     reasons['wearedevs_unluac'] = err
                 return base64.b64encode(wearedevs_bc).decode('ascii'), 'bytecode', f'WeAreDevs bytecode ({len(wearedevs_bc)}B). unluac: {err}', trace
-            # else: the extractor already added diags
         except Exception as e:
             diags.append(f"WeAreDevs extractor crashed: {str(e)}")
             trace.append({'stage': 'wearedevs_extractor_error', 'error': str(e)})
@@ -236,8 +235,8 @@ class DeobfEngine:
         # Final reason
         if reasons:
             reason = '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items())
-        elif diag if 'diag' in dir() else '':
-            reason = diag
+        elif diags:
+            reason = '; '.join(diags[:5])
         else:
             reason = f'All {len(trace)} stages exhausted, no valid output'
         return '', 'unable', reason, trace
@@ -442,8 +441,9 @@ class DeobfEngine:
             if jar_dir:
                 os.makedirs(jar_dir, exist_ok=True)
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
-        except Exception:
-            pass
+            print("[engine] unluac.jar downloaded successfully", file=sys.stderr)
+        except Exception as e:
+            print(f"[engine] unluac.jar download failed: {e}", file=sys.stderr)
 
     @staticmethod
     def _is_valid_lua(code):
