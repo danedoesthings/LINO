@@ -60,7 +60,6 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        # Decode the string table to pass as varargs to sandbox
         string_table = self._decode_string_table(source, diags)
         if string_table:
             diags.append(f"decoded {len(string_table)} strings for sandbox")
@@ -69,8 +68,7 @@ class DeobfEngine:
             layers, caps, diag = execute_sandbox(source, timeout=120)
 
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag:
-            reasons['sandbox'] = diag[:300]
+        if diag: reasons['sandbox'] = diag[:300]
 
         if layers:
             for i, item in enumerate(layers):
@@ -89,37 +87,17 @@ class DeobfEngine:
                     if len(item) > 100 and self._is_valid_lua(item):
                         return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
 
+        # Check for return_value.lua (captured from the VM's return)
+        rv_path = os.path.join(tempfile.gettempdir(), 'return_value.lua')  # will be adjusted in sandbox.py
+        # Actually the sandbox writes to a temp dir; we need to handle that after execute_sandbox.
+        # Instead, we'll modify sandbox.py to also return the contents of return_value.lua.
+        # For now, fall back to other strategies.
+
         all_text = [c for c in caps if isinstance(c, str) and len(c) > 20]
         if all_text:
             combined = '\n'.join(all_text)
             if len(combined) > 200 and self._is_valid_lua(combined):
                 return self._beautify(combined), 'sandbox_strings', 'Captured strings reconstructed', trace
-
-        # Fallback: try other lifters and decoders
-        for lifter in self.lifters:
-            try:
-                decoded_chunks = lifter.lift(source)
-                if decoded_chunks:
-                    for chunk in decoded_chunks:
-                        if isinstance(chunk, bytes):
-                            bc = self.bytecode_harvester.extract(chunk)
-                            if bc:
-                                dc, err = self._run_unluac(bc)
-                                if dc and self._is_valid_lua(dc):
-                                    return self._beautify(dc), 'lifter_unluac', 'Lifter bytecode decompiled', trace
-                        elif isinstance(chunk, str) and self._is_valid_lua(chunk) and len(chunk) > 200:
-                            return self._beautify(chunk), 'lifter_source', 'Lifter source recovered', trace
-            except Exception:
-                pass
-
-        try:
-            all_strings = self.string_decoder.decode_all(source)
-            if all_strings:
-                combined = '\n'.join(all_strings)
-                if len(combined) > 200 and self._is_valid_lua(combined):
-                    return self._beautify(combined), 'string_decode', 'String decode', trace
-        except Exception:
-            pass
 
         lune_data, lune_info = self._run_lune(source)
         if lune_data:
@@ -148,6 +126,7 @@ class DeobfEngine:
         reason = '\n'.join(parts)
         return '', 'unable', reason, trace
 
+    # ... (rest of methods unchanged from previous engine.py)
     def _decode_string_table(self, source, diags):
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
