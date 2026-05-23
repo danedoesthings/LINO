@@ -213,7 +213,6 @@ local _safe_globals = {
     workspace = _new_proxy("Workspace"),
     script = _new_proxy("script"),
     shared = {},
-    _G = {},
     _VERSION = "Lua 5.1",
     print = function(...)
         local args = {...}
@@ -257,8 +256,9 @@ local _safe_globals = {
         local results = { pcall(f, _real_unpack(args)) }
         return _real_unpack(results)
     end,
-    xpcall = function(f, errhandler)
-        return _real_xpcall(f, errhandler)
+    xpcall = function(f, errhandler, ...)
+        local args = {...}
+        return _real_xpcall(function() return f(_real_unpack(args)) end, errhandler)
     end,
     type = _real_type,
     tostring = _real_tostring,
@@ -354,6 +354,8 @@ _real_rawset(_G, "pcall", pcall)
 _real_rawset(_G, "xpcall", _real_xpcall)
 _real_rawset(_G, "error", error)
 _real_rawset(_G, "assert", assert)
+_real_rawset(_G, "_G", _G)
+_safe_globals._G = _G
 
 local _capture_count = 0
 local _orig_loadstring = loadstring
@@ -384,6 +386,8 @@ loadstring = function(chunk, chunkname)
 end
 
 load = loadstring
+_real_rawset(_G, "loadstring", loadstring)
+_real_rawset(_G, "load", load)
 
 local _orig_string_dump = string.dump
 string.dump = function(func, strip)
@@ -437,8 +441,6 @@ if diagfile then
     diagfile:write("Sandbox starting...\n")
     diagfile:close()
 end
-
-_real_setfenv(1, _G)
 
 local function _error_handler(err)
     local msg = _real_tostring(err)
