@@ -150,7 +150,6 @@ class DeobfEngine:
 
         try:
             lune_data, lune_info = self._run_lune(source)
-            trace.append({'stage': 'lune'})
             if lune_data:
                 if isinstance(lune_data, bytes) and len(lune_data) >= 12:
                     bc = self.bytecode_harvester.extract(lune_data)
@@ -249,7 +248,8 @@ class DeobfEngine:
             return {}
         body = m.group(1)
         reverse = {}
-        for key_match in re.finditer(r'\["(\\.)"\]\s*=\s*([-\d()+\-*/]+)', body):
+        # Parse entries with numeric string keys: ["\055"]=value  (capture all digits after backslash)
+        for key_match in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
             key_str = key_match.group(1)
             val_expr = key_match.group(2)
             val = self._safe_eval(val_expr.strip())
@@ -257,12 +257,14 @@ class DeobfEngine:
                 key_char = self._decode_wearedevs_string(key_str)
                 if key_char:
                     reverse[val] = key_char.decode('latin-1')
+        # Parse entries with identifier keys: key=value
         for key_match in re.finditer(r'(?<![\["\'])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
             key_str = key_match.group(1)
             val_expr = key_match.group(2)
             val = self._safe_eval(val_expr.strip())
             if val is not None and 0 <= val < 64:
                 reverse[val] = key_str
+        # Fill gaps with standard base64
         std_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         for i, ch in enumerate(std_b64):
             if i not in reverse:
