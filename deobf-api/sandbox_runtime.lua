@@ -414,6 +414,20 @@ local function _error_handler(err)
     return traceback_str
 end
 
+local function _write_return_value(value)
+    local f = _real_io_open(outdir .. "/return_value.lua", "w")
+    if not f then return end
+    if _real_type(value) == "string" then
+        f:write(value)
+    elseif _real_type(value) == "function" then
+        local bc = _orig_string_dump(value, true)
+        if bc then
+            f:write(bc)
+        end
+    end
+    f:close()
+end
+
 local function _run_input()
     local f, err = _real_loadfile(inpath)
     if not f then
@@ -427,11 +441,6 @@ local function _run_input()
     _real_setfenv(f, _G)
 
     if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
-        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf then
-            diagf:write("Args not embedded, using proxy\n")
-            diagf:close()
-        end
         varargs_embedded = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
     end
 
@@ -457,6 +466,8 @@ local function _run_input()
                 errfile:write("\nVM_CRASH: " .. _real_tostring(run_result))
                 errfile:close()
             end
+        else
+            _write_return_value(run_result)
         end
         return run_result
     end, _error_handler)
