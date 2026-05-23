@@ -1,4 +1,4 @@
-import discord, io, os, re, logging, httpx, base64, asyncio
+import discord, io, os, re, logging, httpx, base64
 from discord.ext import commands
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%H:%M:%S')
@@ -67,9 +67,9 @@ async def run_deobf(raw_bytes, filename):
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
     em.add_field(name='Input', value=filename, inline=True)
     if diagnostic:
-        em.add_field(name='Diagnostic', value=diagnostic[:1000], inline=False)
+        em.add_field(name='Diagnostic', value=f'```\n{diagnostic[:900]}\n```', inline=False)
     if trace:
-        stages = [t.get('stage', '?') for t in trace[:8]]
+        stages = [t.get('stage', '?') for t in trace[:10]]
         em.add_field(name='Pipeline', value=' -> '.join(stages)[:1000], inline=False)
     files = []
     if result and detected != 'bytecode':
