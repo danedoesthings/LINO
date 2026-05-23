@@ -73,4 +73,84 @@ async def run_deobf(raw_bytes, filename):
     diagnostic = data.get('diagnostic', '')
     trace = data.get('trace', [])
     if detected in SUCCESS_METHODS:
-        title
+        title, color = 'Deobfuscation Complete', 0x2ecc71
+    elif detected == 'bytecode':
+        title, color = 'Bytecode Extracted', 0xe67e22
+    else:
+        title, color = 'Deobfuscation Failed', 0xe74c3c
+    em = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
+    em.add_field(name='Method', value=f'`{detected}`', inline=True)
+    em.add_field(name='Input', value=filename, inline=True)
+    em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
+    if diagnostic:
+        diag_text = _truncate(diagnostic, 900)
+        em.add_field(name='Diagnostic', value=f'```\n{diag_text}\n```', inline=False)
+    if trace:
+        stages = [t.get('stage', '?') for t in trace[:10]]
+        stage_text = ' -> '.join(stages)
+        em.add_field(name='Pipeline', value=_truncate(stage_text, 1000), inline=False)
+    em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
+    files = []
+    if result and detected != 'bytecode':
+        files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'deobf_{filename}'))
+    elif detected == 'bytecode' and result:
+        raw_out = base64.b64decode(result)
+        files.append(discord.File(fp=io.BytesIO(raw_out), filename=f'extracted_{filename}.luac'))
+    return {'embed': em, 'files': files}
+
+@bot.command(name='deobf')
+@commands.cooldown(1, 30, commands.BucketType.user)
+async def prefix_deobf(ctx):
+    raw, filename = None, 'input.lua'
+    if ctx.message.attachments:
+        att = ctx.message.attachments[0]
+        if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
+            return await ctx.send('Please attach a `.lua`, `.luau`, or `.txt` file.')
+        if att.size > MAX_BYTES:
+            return await ctx.send(f'File too large ({att.size} bytes, max {MAX_BYTES})')
+        raw, filename = await att.read(), att.filename
+    else:
+        body = ctx.message.content
+        cmd_end = body.lower().find('deobf')
+        if cmd_end != -1:
+            body = body[cmd_end + len('deobf'):].strip()
+        code = _extract_inline_code(body)
+        if not code:
+            return await ctx.send('Attach a `.lua` file or paste code after `=deobf`.')
+        raw = code.encode('utf-8')
+    log.info(f"Deobf request from {ctx.author} ({filename}, {len(raw)} bytes)")
+    msg = await ctx.send(embed=discord.Embed(title='Deobfuscating...', description=f'Processing {filename} ({len(raw)} bytes)', color=0x3498db))
+    res = await run_deobf(raw, filename)
+    try:
+        await msg.delete()
+    except discord.NotFound:
+        pass
+    except discord.Forbidden:
+        pass
+    await ctx.send(embed=res['embed'], files=res.get('files', []))
+
+@prefix_deobf.error
+async def deobf_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        retry_seconds = error.retry_after
+        await ctx.send(f'Cooldown active. Try again in {retry_seconds:.0f}s (resets <t:{int(datetime.datetime.utcnow().timestamp() + retry_seconds)}:R>)')
+
+@tree.command(name='deobf', description='Deobfuscate a Lua file')
+async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
+        return await interaction.response.send_message('Please attach a `.lua`, `.luau`, or `.txt` file.', ephemeral=True)
+    if file.size > MAX_BYTES:
+        return await interaction.response.send_message(f'File too large ({file.size} bytes, max {MAX_BYTES})', ephemeral=True)
+    await interaction.response.defer(thinking=True)
+    raw = await file.read()
+    log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
+    res = await run_deobf(raw, file.filename)
+    await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
+
+@bot.event
+async def on_ready():
+    await tree.sync()
+    log.info(f'Ready: {bot.user} | API: {API_URL}')
+
+if __name__ == '__main__':
+    bot.run(TOKEN)
