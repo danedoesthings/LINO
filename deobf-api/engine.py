@@ -65,6 +65,7 @@ class DeobfEngine:
         # Stage 1: WeAreDevs native extractor
         try:
             wearedevs_bc = self._extract_wearedevs_bytecode(source, diags)
+            trace.append({'stage': 'wearedevs_extractor', 'bytecode_found': wearedevs_bc is not None, 'diags': diags[-3:] if diags else []})
             if wearedevs_bc:
                 trace.append({'stage': 'wearedevs_extractor', 'bytecode_size': len(wearedevs_bc)})
                 dc, err = self._run_unluac(wearedevs_bc)
@@ -232,13 +233,15 @@ class DeobfEngine:
             diags.append(f"Deep scan crashed: {str(e)}")
             trace.append({'stage': 'deep_scan_error', 'error': str(e)})
 
-        # Final reason
+        # Final reason: combine reasons and diagnostics
+        parts = []
         if reasons:
-            reason = '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items())
-        elif diags:
-            reason = '; '.join(diags[:5])
-        else:
-            reason = f'All {len(trace)} stages exhausted, no valid output'
+            parts.append('Errors: ' + '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items()))
+        if diags:
+            parts.append('Details: ' + '; '.join(diags[:5]))
+        if not parts:
+            parts.append(f'All {len(trace)} stages exhausted, no valid output')
+        reason = '\n'.join(parts)
         return '', 'unable', reason, trace
 
     def _extract_wearedevs_bytecode(self, source, diags):
