@@ -62,6 +62,18 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint, 'input_size': input_size, 'input_lines': input_lines})
 
+        iife_bc = self._extract_iife_bytecode(source)
+        if iife_bc:
+            trace.append({'stage': 'iife_extractor', 'bytecode_size': len(iife_bc)})
+            dc, err = self._run_unluac(iife_bc)
+            if dc and self._is_valid_lua(dc):
+                return self._beautify(dc), 'iife_unluac', f'IIFE inline table + unluac ({len(dc)} chars)', trace
+            if err:
+                reasons['iife_unluac'] = err
+            return base64.b64encode(iife_bc).decode('ascii'), 'bytecode', f'IIFE bytecode ({len(iife_bc)}B). unluac: {err}', trace
+        else:
+            diags.append("IIFE extractor: no bytecode found")
+
         result = self._try_rapid_string_decode(source, trace)
         if result:
             bc = self._extract_bytecode(result)
@@ -207,6 +219,172 @@ class DeobfEngine:
         else:
             reason = f'All {len(trace)} stages exhausted, no valid output'
         return '', 'unable', reason, trace
+
+    def _extract_iife_bytecode(self, source):
+        m = re.search(r'return\s+', source)
+        if not m:
+            return None
+        pos = m.end()
+        if pos >= len(source):
+            return None
+        call_start = source.find('(', pos)
+        if call_start == -1:
+            return None
+        open_pos = source.find('{', call_start)
+        if open_pos == -1:
+            return None
+        table_body = self._extract_balanced_braces(source, open_pos)
+        if not table_body:
+            return None
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+        if len(strings) < 4:
+            return None
+        decoded_strings = [self._unescape_lua_string(s) for s in strings]
+        if not any(len(s) > 20 for s in decoded_strings):
+            return None
+        b64_maps = self._find_all_b64_maps(source)
+        shuffle_sets = self._find_all_shuffle_sets(source)
+        working = list(decoded_strings)
+        for shuf in shuffle_sets:
+            working = self._apply_shuffle(working, shuf)
+        for b64_map in b64_maps:
+            for s in working:
+                decoded = self._decode_custom_b64(s, b64_map)
+                if decoded and len(decoded) > 4:
+                    bc = self.bytecode_harvester.extract(decoded)
+                    if bc:
+                        return bc
+        return None
+
+    @staticmethod
+    def _extract_balanced_braces(text, start):
+        if start >= len(text) or text[start] != '{':
+            return None
+        depth = 0
+        i = start
+        while i < len(text):
+            c = text[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i+1]
+            i += 1
+        return None
+
+    @staticmethod
+    def _unescape_lua_string(s):
+        result = []
+        i = 0
+        while i < len(s):
+            if s[i] == '\\' and i + 1 < len(s):
+                nc = s[i+1]
+                if nc == 'n': result.append('\n')
+                elif nc == 'r': result.append('\r')
+                elif nc == 't': result.append('\t')
+                elif nc == '\\': result.append('\\')
+                elif nc == '"': result.append('"')
+                elif nc == "'": result.append("'")
+                elif nc == '0': result.append('\0')
+                elif nc.isdigit():
+                    j = i + 1
+                    while j < len(s) and s[j].isdigit() and j - i < 4:
+                        j += 1
+                    try:
+                        code = int(s[i+1:j])
+                        result.append(chr(code % 256))
+                        i = j - 1
+                    except ValueError:
+                        result.append(s[i])
+                else:
+                    result.append(s[i])
+                i += 2
+            else:
+                result.append(s[i])
+                i += 1
+        return ''.join(result)
+
+    def _find_all_b64_maps(self, source):
+        maps = []
+        for m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{60,})\}', source):
+            body = m.group(1)
+            entries = re.findall(r'\[(\d+)\]\s*=\s*"(.+?)"', body)
+            if not entries:
+                entries = re.findall(r'"(.+?)"', body)
+                if entries:
+                    entries = [(str(i), entries[i]) for i in range(len(entries))]
+            if len(entries) >= 62:
+                cmap = {}
+                for idx_str, val in entries:
+                    try:
+                        cmap[int(idx_str)] = val
+                    except ValueError:
+                        continue
+                if len(cmap) >= 62:
+                    maps.append(cmap)
+        return maps
+
+    def _find_all_shuffle_sets(self, source):
+        sets = []
+        for m in re.finditer(r'for\s+\w+\s*=\s*(\d+)\s*,\s*(\d+)\s*do\s+(\w+)\[(\w+)\]\s*=\s*(\w+)\[(\w+)\]', source):
+            try:
+                start = int(m.group(1))
+                end = int(m.group(2))
+                src_var = m.group(5)
+                dst_var = m.group(3)
+                pairs = []
+                for assign in re.finditer(rf'{re.escape(src_var)}\[(\d+)\]\s*=\s*{re.escape(dst_var)}\[(\d+)\]', source):
+                    a = int(assign.group(2))
+                    b = int(assign.group(1))
+                    pairs.append((a, b))
+                if len(pairs) >= 2:
+                    sets.append(pairs)
+            except:
+                pass
+        for m in re.finditer(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', source):
+            nums = re.findall(r'\d+', m.group(1))
+            if len(nums) >= 4 and len(nums) % 2 == 0:
+                pairs = []
+                for i in range(0, len(nums), 2):
+                    pairs.append((int(nums[i]), int(nums[i+1])))
+                sets.append(pairs)
+        return sets
+
+    @staticmethod
+    def _apply_shuffle(arr, pairs):
+        result = list(arr)
+        for a, b in pairs:
+            lo, hi = a-1, b-1
+            if 0 <= lo < len(result) and 0 <= hi < len(result) and lo < hi:
+                result[lo:hi+1] = result[lo:hi+1][::-1]
+        return result
+
+    @staticmethod
+    def _decode_custom_b64(encoded, cmap):
+        if len(cmap) < 64:
+            return None
+        reverse_map = {}
+        for k, v in cmap.items():
+            if isinstance(v, str) and len(v) >= 1:
+                reverse_map[v] = k
+        if not reverse_map:
+            return None
+        bit_buf = 0
+        bits = 0
+        out = bytearray()
+        for c in encoded:
+            if c == '=':
+                break
+            if c not in reverse_map:
+                continue
+            val = reverse_map[c]
+            bit_buf = (bit_buf << 6) | val
+            bits += 6
+            while bits >= 8:
+                bits -= 8
+                out.append((bit_buf >> bits) & 0xFF)
+        return bytes(out)
 
     def _try_rapid_string_decode(self, source, trace):
         patterns = [
