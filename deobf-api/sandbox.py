@@ -124,16 +124,6 @@ def execute_sandbox(source, use_emulator=False, timeout=120):
                     error_log.append(f'memory.txt: {len(caps)} total caps')
             except Exception as e:
                 error_log.append(f'READ_MEM_ERROR: {e}')
-        for fname in ('diag.txt', 'error.txt'):
-            fp = os.path.join(temp_dir, fname)
-            if os.path.exists(fp):
-                try:
-                    with open(fp, encoding='utf-8', errors='replace') as f:
-                        txt = f.read()
-                    if txt:
-                        diag_parts.append(txt)
-                except Exception:
-                    pass
         diag_parts = []
         for fname in ('diag.txt', 'error.txt'):
             fp = os.path.join(temp_dir, fname)
