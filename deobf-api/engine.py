@@ -259,38 +259,28 @@ class DeobfEngine:
             return None
         diags.append(f"WeAreDevs: found {len(strings)} escaped strings")
         print(f"[engine] WeAreDevs: {len(strings)} strings", file=sys.stderr)
-        decoded_strings = []
-        skipped_empty = 0
+        # Build original table with exact indices (1-indexed), preserving empties
+        original_table = []
         for s in strings:
             decoded = self._decode_wearedevs_string(s)
-            if decoded and len(decoded) > 0:
-                decoded_strings.append(decoded)
-            else:
-                skipped_empty += 1
-        if not decoded_strings:
-            diags.append("WeAreDevs: no strings decoded")
-            print("[engine] WeAreDevs: no strings decoded", file=sys.stderr)
-            return None
-        diag_msg = f"WeAreDevs: decoded {len(decoded_strings)} strings"
-        if skipped_empty > 0:
-            diag_msg += f" ({skipped_empty} empty skipped)"
-        diags.append(diag_msg)
-        print(f"[engine] {diag_msg}", file=sys.stderr)
+            original_table.append(decoded if decoded else b'')
+        diags.append(f"WeAreDevs: decoded {len(strings)} strings ({sum(1 for d in original_table if len(d)==0)} empty)")
+        print(f"[engine] WeAreDevs: decoded {len(strings)} strings", file=sys.stderr)
         # Parse shuffle pairs from the for loop
         shuffle_pairs = self._extract_shuffle_pairs(source)
         diags.append(f"WeAreDevs: {len(shuffle_pairs)} shuffle ranges")
         print(f"[engine] WeAreDevs: {len(shuffle_pairs)} shuffle ranges", file=sys.stderr)
-        working = list(decoded_strings)
-        # Apply shuffle exactly as the Lua code does: element-by-element swap from right to left
+        working = list(original_table)
         for lo, hi in shuffle_pairs:
-            # Lua is 1-indexed; our list is 0-indexed
             lo_idx = lo - 1
             hi_idx = hi - 1
             while lo_idx < hi_idx:
                 working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
                 lo_idx += 1
                 hi_idx -= 1
-        combined = b''.join(working)
+        # Filter out empty strings before concatenating
+        non_empty = [d for d in working if len(d) > 0]
+        combined = b''.join(non_empty)
         diags.append(f"WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}")
         print(f"[engine] WeAreDevs: combined {len(combined)} bytes, first 12: {binascii.hexlify(combined[:12]).decode()}", file=sys.stderr)
         bc = self.bytecode_harvester.extract(combined)
