@@ -1,23 +1,22 @@
 import os, sys, re, subprocess, tempfile, shutil, traceback
 
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
-RUNTIME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox_runtime.lua')
+RUNTIME_TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox_runtime_template.lua')
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _lua_str(path):
     return '"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
-def _write_varargs_file(strings, varargs_path):
-    """Write a Lua file that returns a table of the given strings."""
-    with open(varargs_path, 'w', encoding='utf-8') as f:
-        f.write('return {\n')
-        for s in strings:
-            f.write('"' + s + '",\n')
-        f.write('}\n')
+def _lua_table_literal(strings):
+    """Build a Lua table literal from a list of already‑escaped Lua strings."""
+    parts = []
+    for s in strings:
+        parts.append('"' + s + '"')
+    return '{' + ','.join(parts) + '}'
 
 def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
-    if not os.path.isfile(RUNTIME_PATH):
-        return [], [], f'MISSING_RUNTIME: {RUNTIME_PATH}'
+    if not os.path.isfile(RUNTIME_TEMPLATE_PATH):
+        return [], [], f'MISSING_TEMPLATE: {RUNTIME_TEMPLATE_PATH}'
     error_log, layers, caps, diag = [], [], [], ''
     try:
         temp_dir = tempfile.mkdtemp()
@@ -26,7 +25,6 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
     try:
         inp = os.path.join(temp_dir, 'input.lua')
         drv = os.path.join(temp_dir, 'driver.lua')
-        varargs_path = os.path.join(temp_dir, 'varargs.lua')
 
         try:
             raw = source.encode('utf-8', errors='replace') if isinstance(source, str) else source
@@ -35,30 +33,25 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
 
-        if varargs and isinstance(varargs, list):
-            try:
-                _write_varargs_file(varargs, varargs_path)
-                print(f"[sandbox] wrote {len(varargs)} varargs to {varargs_path}", file=sys.stderr)
-            except Exception as e:
-                error_log.append(f'WRITE_VARARGS_ERROR: {e}')
-                varargs_path = None
-        else:
-            varargs_path = None
-            print(f"[sandbox] no varargs provided", file=sys.stderr)
-
         try:
-            with open(RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                runtime = f.read()
+            with open(RUNTIME_TEMPLATE_PATH, 'r', encoding='utf-8') as f:
+                template = f.read()
         except Exception as e:
-            return [], [], f'READ_RUNTIME_ERROR: {e}'
+            return [], [], f'READ_TEMPLATE_ERROR: {e}'
 
+        # Embed varargs table directly
+        if varargs and isinstance(varargs, list):
+            table_literal = _lua_table_literal(varargs)
+            driver = template.replace('{{VARARGS_TABLE}}', table_literal)
+            print(f"[sandbox] embedded {len(varargs)} varargs into driver", file=sys.stderr)
+        else:
+            driver = template.replace('{{VARARGS_TABLE}}', 'nil')
+            print(f"[sandbox] no varargs, set to nil", file=sys.stderr)
+
+        # Replace other placeholders
         out_dir = temp_dir.replace('\\', '/')
         inp_path = inp.replace('\\', '/')
-        driver = runtime.replace('"OUTDIR_PLACEHOLDER"', _lua_str(out_dir)).replace('"INPATH_PLACEHOLDER"', _lua_str(inp_path))
-        if varargs_path:
-            driver = driver.replace('"VARARGS_PATH_PLACEHOLDER"', _lua_str(varargs_path))
-        else:
-            driver = driver.replace('"VARARGS_PATH_PLACEHOLDER"', 'nil')
+        driver = driver.replace('"OUTDIR_PLACEHOLDER"', _lua_str(out_dir)).replace('"INPATH_PLACEHOLDER"', _lua_str(inp_path))
 
         try:
             with open(drv, 'w', encoding='utf-8') as f:
