@@ -4,7 +4,8 @@ LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua')
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _safe_str(s):
-    return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+    # Only escape double quotes and control characters – leave backslashes alone
+    return s.replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
 
 RUNTIME = r'''local outdir = "{outdir}"
 local inpath = "{inpath}"
