@@ -80,7 +80,7 @@ class DeobfEngine:
                 if result:
                     return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-        if string_table and not layers:
+        if string_table:
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
                 if isinstance(result, bytes):
@@ -105,7 +105,7 @@ class DeobfEngine:
                                 dc, err = self._run_unluac(bc)
                                 if dc and self._is_valid_lua(dc):
                                     return self._beautify(dc), 'lifter_unluac', f'Lifter ({len(dc)} chars)', trace
-                        elif isinstance(chunk, str) and len(chunk) > 5 and self._is_likely_lua(chunk):
+                        elif isinstance(chunk, str) and len(chunk) > 5 and self._has_lua_keywords(chunk):
                             return self._beautify(chunk), 'lifter_source', f'Lifter source ({len(chunk)} chars)', trace
             except:
                 pass
@@ -163,7 +163,6 @@ class DeobfEngine:
     def _substitute_strings(self, code, string_table, var_name='R'):
         if not string_table or not code:
             return code
-
         def replacer(m):
             try:
                 idx = int(m.group(1)) - 1
@@ -174,7 +173,6 @@ class DeobfEngine:
             except:
                 pass
             return m.group(0)
-
         code = re.sub(rf'\b{re.escape(var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', replacer, code)
         return code
 
@@ -244,7 +242,7 @@ class DeobfEngine:
             for enc in ('utf-8', 'latin-1'):
                 try:
                     text = combined.decode(enc)
-                    if self._is_likely_lua(text):
+                    if self._has_lua_keywords(text):
                         diags.append(f"source ({len(text)} chars) [{label}]")
                         if string_table and var_name:
                             text = self._substitute_strings(text, string_table, var_name)
@@ -252,7 +250,6 @@ class DeobfEngine:
                 except:
                     pass
 
-            diags.append(f"no bc/source [{label}]")
             return None
 
         result = try_decode(shuffle, "orig")
@@ -264,16 +261,19 @@ class DeobfEngine:
         return None
 
     @staticmethod
-    def _is_likely_lua(text):
+    def _has_lua_keywords(text):
         if not text or len(text) < 5:
             return False
         printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
-        if (printable / len(text)) < 0.70:
+        if (printable / len(text)) < 0.60:
             return False
         lower_text = text.lower()
+        count = 0
         for kw in LUA_SUBSTRINGS:
             if kw in lower_text:
-                return True
+                count += 1
+                if count >= 2:
+                    return True
         return False
 
     def _beautify(self, code):
@@ -349,13 +349,11 @@ class DeobfEngine:
 
             out_lines.append('    ' * indent + line)
 
-            opens = len(re.findall(
-                r'\b(function|if|for|while|repeat|do|then)\b', line))
+            opens = len(re.findall(r'\b(function|if|for|while|repeat|do|then)\b', line))
             closes = len(re.findall(r'\b(end|until)\b', line))
             indent += opens - closes
             if first_word in ('else', 'elseif'):
                 indent += 1
-
             indent = max(0, indent)
 
         return '\n'.join(out_lines)
