@@ -1,598 +1,555 @@
-import os, sys, re, subprocess, tempfile, shutil, traceback
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys
+from transformers import (
+    AdvancedWeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
+    XORStringDecoder, NumberArrayDecoder, StandardBase64Decoder,
+    StringPatternExtractor, BytecodeHarvester
+)
+from sandbox import execute_sandbox
+from lune_executor import execute_and_capture
+from bytecode_analyzer import BytecodeAnalyzer
+from string_decoders import MultiStrategyStringDecoder
+from pattern_matcher import ObfuscationFingerprinter
 
-LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
+UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
-RUNTIME = r'''local outdir = "{outdir}"
-local inpath = "{inpath}"
-local varargs_embedded = {varargs_table}
+LUA_KEYWORDS = {
+    'function', 'local', 'end', 'return', 'if', 'then', 'else', 'elseif',
+    'for', 'while', 'do', 'repeat', 'until', 'not', 'and', 'or',
+    'nil', 'true', 'false', 'in', 'break', 'print', 'require',
+    'pcall', 'xpcall', 'loadstring', 'load', 'pairs', 'ipairs',
+    'setmetatable', 'getmetatable', 'rawset', 'rawget', 'tostring', 'tonumber',
+    'table', 'string', 'math', 'coroutine', 'debug', 'io', 'os',
+    'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
+}
 
-local _real_io_open = io.open
-local _real_tostring = tostring
-local _real_debug_traceback = debug.traceback
-local _real_xpcall = xpcall
-local _real_setfenv = setfenv
-local _real_getfenv = getfenv
-local _real_loadfile = loadfile
-local _real_pairs = pairs
-local _real_ipairs = ipairs
-local _real_type = type
-local _real_select = select
-local _real_unpack = unpack
-local _real_rawget = rawget
-local _real_rawset = rawset
-local _real_setmetatable = setmetatable
-local _real_getmetatable = getmetatable
-local _real_next = next
-local _real_table_concat = table.concat
-local _real_string_byte = string.byte
-local _real_math_floor = math.floor
-local _real_math_random = math.random
-local _real_math_randomseed = math.randomseed
+LUA_SUBSTRINGS = [
+    'function', 'local', 'end', 'print', 'tostring', 'tonumber',
+    'setmetatable', 'getmetatable', 'loadstring', 'pcall', 'unpack',
+    'string.byte', 'math.floor', 'table.concat', 'error', 'pairs',
+    'ipairs', 'require', 'coroutine', 'rawset', 'rawget',
+]
 
-local _real_G = _real_getfenv(0) or _G
-_real_rawset(_real_G, "ipairs", _real_ipairs)
-_real_rawset(_real_G, "pairs", _real_pairs)
-_real_rawset(_real_G, "next", _real_next)
-_real_rawset(_real_G, "tostring", _real_tostring)
-_real_rawset(_real_G, "type", _real_type)
-_real_rawset(_real_G, "unpack", _real_unpack)
-_real_rawset(_real_G, "select", _real_select)
-_real_rawset(_real_G, "setmetatable", _real_setmetatable)
-_real_rawset(_real_G, "getmetatable", _real_getmetatable)
-_real_rawset(_real_G, "rawget", _real_rawget)
-_real_rawset(_real_G, "rawset", _real_rawset)
-_real_rawset(_real_G, "pcall", pcall)
-_real_rawset(_real_G, "xpcall", _real_xpcall)
-_real_rawset(_real_G, "error", error)
-_real_rawset(_real_G, "assert", assert)
+class Token:
+    __slots__ = ('kind', 'value', 'pos')
+    def __init__(self, kind, value, pos):
+        self.kind = kind
+        self.value = value
+        self.pos = pos
 
-local function _pure_bit32()
-    local bit = {{}}
-    function bit.bxor(a, b)
-        local r, p = 0, 1
-        while a > 0 or b > 0 do
-            local abit, bbit = a % 2, b % 2
-            if abit ~= bbit then r = r + p end
-            a, b, p = _real_math_floor(a/2), _real_math_floor(b/2), p * 2
-        end
-        return r
-    end
-    function bit.band(a, b)
-        local r, p = 0, 1
-        while a > 0 and b > 0 do
-            local abit, bbit = a % 2, b % 2
-            if abit == 1 and bbit == 1 then r = r + p end
-            a, b, p = _real_math_floor(a/2), _real_math_floor(b/2), p * 2
-        end
-        return r
-    end
-    function bit.bor(a, b)
-        local r, p = 0, 1
-        while a > 0 or b > 0 do
-            local abit, bbit = a % 2, b % 2
-            if abit == 1 or bbit == 1 then r = r + p end
-            a, b, p = _real_math_floor(a/2), _real_math_floor(b/2), p * 2
-        end
-        return r
-    end
-    function bit.bnot(a, bits)
-        bits = bits or 32
-        local r = 0
-        for i = 0, bits-1 do
-            if a % 2 == 0 then r = r + 2^i end
-            a = _real_math_floor(a/2)
-        end
-        return r
-    end
-    function bit.lshift(a, n)
-        return a * 2^n
-    end
-    function bit.rshift(a, n)
-        return _real_math_floor(a / 2^n)
-    end
-    function bit.arshift(a, n)
-        if a >= 0 then return _real_math_floor(a / 2^n)
-        else return bit.bor(_real_math_floor(a / 2^n), bit.bnot(2^(32-n)-1)) end
-    end
-    function bit.rol(a, n)
-        local bits = 32
-        n = n % bits
-        local left = bit.band(bit.lshift(a, n), 2^bits-1)
-        local right = bit.rshift(a, bits-n)
-        return bit.bor(left, right)
-    end
-    function bit.ror(a, n)
-        local bits = 32
-        n = n % bits
-        local left = bit.lshift(bit.band(a, 2^n-1), bits-n)
-        local right = bit.rshift(a, n)
-        return bit.bor(left, right)
-    end
-    return bit
-end
+class LuaSimpleLexer:
+    def __init__(self, code):
+        self.code = code
+        self.pos = 0
+        self.tokens = []
+        self._tokenize()
 
-local bit32_real = _pure_bit32()
-local bit_real   = bit32_real
+    def _tokenize(self):
+        code = self.code
+        pos = 0
+        length = len(code)
+        while pos < length:
+            c = code[pos]
+            if c.isspace():
+                pos += 1
+                continue
+            if c == '-' and pos+1 < length and code[pos+1] == '-':
+                if pos+2 < length and code[pos+2:pos+4] == '[[':
+                    end = code.find(']]', pos+4)
+                    if end != -1:
+                        self.tokens.append(Token('COMMENT', code[pos:end+2], pos))
+                        pos = end + 2
+                    else:
+                        end = code.find('\n', pos+4)
+                        if end == -1: end = length
+                        self.tokens.append(Token('COMMENT', code[pos:end], pos))
+                        pos = end
+                else:
+                    end = code.find('\n', pos+2)
+                    if end == -1: end = length
+                    self.tokens.append(Token('COMMENT', code[pos:end], pos))
+                    pos = end
+                continue
+            if c in '([{':
+                self.tokens.append(Token('OPEN', c, pos))
+                pos += 1
+                continue
+            if c in ')]}':
+                self.tokens.append(Token('CLOSE', c, pos))
+                pos += 1
+                continue
+            if c in ',;':
+                self.tokens.append(Token('SEP', c, pos))
+                pos += 1
+                continue
+            if c in '+-*/%^#=<>~.':
+                start = pos
+                while pos < length and code[pos] in '+-*/%^#=<>~.':
+                    pos += 1
+                self.tokens.append(Token('OP', code[start:pos], start))
+                continue
+            if c in '\'"':
+                quote = c
+                start = pos
+                pos += 1
+                if pos < length and code[pos] == '[' and pos+1 < length and code[pos+1] == '[':
+                    pos += 2
+                    end = code.find(']]', pos)
+                    if end != -1:
+                        pos = end + 2
+                    else:
+                        pos = length
+                else:
+                    while pos < length:
+                        if code[pos] == '\\' and pos+1 < length:
+                            pos += 2
+                            continue
+                        if code[pos] == quote:
+                            pos += 1
+                            break
+                        pos += 1
+                self.tokens.append(Token('STRING', code[start:pos], start))
+                continue
+            if c.isdigit():
+                start = pos
+                while pos < length and (code[pos].isdigit() or code[pos] == '.' or code[pos] == 'x' or code[pos] == 'X'):
+                    pos += 1
+                self.tokens.append(Token('NUMBER', code[start:pos], start))
+                continue
+            if c.isalpha() or c == '_':
+                start = pos
+                while pos < length and (code[pos].isalnum() or code[pos] == '_'):
+                    pos += 1
+                word = code[start:pos]
+                if word in LUA_KEYWORDS:
+                    self.tokens.append(Token('KEYWORD', word, start))
+                else:
+                    self.tokens.append(Token('IDENT', word, start))
+                continue
+            pos += 1
 
-local _proxy_mt = {{
-    __index = function(t, k)
-        if _real_type(k) == "number" then return 0 end
-        local child = {{}}
-        _real_setmetatable(child, _proxy_mt)
-        _real_rawset(t, k, child)
-        return child
-    end,
-    __newindex = function(t, k, v) _real_rawset(t, k, v) end,
-    __call = function(t, ...)
-        local result = {{}}
-        _real_setmetatable(result, _proxy_mt)
-        return result
-    end,
-    __add = function() return 0 end,
-    __sub = function() return 0 end,
-    __mul = function() return 0 end,
-    __div = function() return 1 end,
-    __mod = function() return 0 end,
-    __pow = function() return 0 end,
-    __unm = function() return 0 end,
-    __concat = function(a, b) return _real_tostring(a) .. _real_tostring(b) end,
-    __eq = function() return false end,
-    __lt = function() return false end,
-    __le = function() return false end,
-    __tostring = function(t) return _real_tostring(_real_rawget(t, "_name") or "proxy") end,
-    __len = function() return 0 end,
-}}
+class DeobfEngine:
+    def __init__(self):
+        self.lifters = [
+            AdvancedWeAreDevsLifter(),
+            MoonSecLifter(),
+            IronBrewLifter(),
+            PSULifter(),
+            XORStringDecoder(),
+            NumberArrayDecoder(),
+            StandardBase64Decoder(),
+        ]
+        self.bytecode_harvester = BytecodeHarvester()
+        self.string_decoder = MultiStrategyStringDecoder()
+        self.fingerprinter = ObfuscationFingerprinter()
+        self.bytecode_analyzer = BytecodeAnalyzer()
+        self.unluac_path = UNLUAC_LOCAL_PATH
+        self.capabilities = {
+            'static_lifting', 'sandbox_execution', 'lune_execution',
+            'bytecode_decompilation', 'xor_decoding', 'number_array_decoding',
+            'base64_decoding', 'multi_pass', 'recursive_unpacking',
+            'control_flow_recovery', 'constant_propagation'
+        }
+        self._java_available = shutil.which('java') is not None
+        if not self._java_available:
+            self.capabilities.discard('bytecode_decompilation')
 
-local function _new_proxy(name)
-    local p = {{ _name = name or "proxy" }}
-    _real_setmetatable(p, _proxy_mt)
-    return p
-end
+    def get_capabilities(self):
+        return list(self.capabilities)
 
-local function newproxy(addmetatable)
-    return _new_proxy("newproxy")
-end
+    def process(self, source):
+        trace = []
+        diags = []
+        reasons = {}
 
-local _players_service = _new_proxy("Players")
-local _local_player = {{
-    UserId = 1,
-    Name = "Player",
-    DisplayName = "Player",
-    Character = _new_proxy("Character"),
-    Backpack = _new_proxy("Backpack"),
-    PlayerGui = _new_proxy("PlayerGui"),
-    PlayerScripts = _new_proxy("PlayerScripts"),
-    Team = nil,
-    AccountAge = 365,
-    MembershipType = _new_proxy("MembershipType"),
-}}
-_players_service.LocalPlayer = _local_player
-_players_service.GetPlayers = function() return {{ _local_player }} end
-_players_service.GetPlayerByUserId = function() return _local_player end
+        fingerprint = self.fingerprinter.analyze(source)
+        trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-local _game = _new_proxy("game")
-_real_rawset(_game, "GetService", function(self, name)
-    local svc = _new_proxy("Service:" .. _real_tostring(name))
-    if name == "Players" then return _players_service end
-    if name == "ReplicatedStorage" then return _new_proxy("ReplicatedStorage") end
-    if name == "ServerStorage" then return _new_proxy("ServerStorage") end
-    if name == "ServerScriptService" then return _new_proxy("ServerScriptService") end
-    if name == "Workspace" then return _new_proxy("Workspace") end
-    if name == "Lighting" then return _new_proxy("Lighting") end
-    if name == "StarterGui" then return _new_proxy("StarterGui") end
-    if name == "StarterPack" then return _new_proxy("StarterPack") end
-    if name == "StarterPlayer" then return _new_proxy("StarterPlayer") end
-    return svc
-end)
-_real_rawset(_game, "Players", _players_service)
-_real_rawset(_game, "Workspace", _new_proxy("Workspace"))
-_real_rawset(_game, "ReplicatedStorage", _new_proxy("ReplicatedStorage"))
-_real_rawset(_game, "ServerStorage", _new_proxy("ServerStorage"))
-_real_rawset(_game, "ServerScriptService", _new_proxy("ServerScriptService"))
-_real_rawset(_game, "Lighting", _new_proxy("Lighting"))
-_real_rawset(_game, "StarterGui", _new_proxy("StarterGui"))
-_real_rawset(_game, "StarterPack", _new_proxy("StarterPack"))
-_real_rawset(_game, "StarterPlayer", _new_proxy("StarterPlayer"))
-_real_rawset(_game, "PlaceId", 1)
-_real_rawset(_game, "JobId", "00000000-0000-0000-0000-000000000000")
-_real_rawset(_game, "CreatorId", 0)
-_real_rawset(_game, "CreatorType", _new_proxy("CreatorType"))
-_real_rawset(_game, "IsLoaded", function() return true end)
+        string_table, var_name = self._decode_string_table(source, diags)
+        if string_table:
+            diags.append(f"R table: {len(string_table)} strings (var={var_name})")
+            layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+            trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+            if diag:
+                reasons['sandbox'] = diag[:2000]
 
-game = _game
-workspace = _new_proxy("Workspace")
-script = _new_proxy("script")
-_G = {{}}
-
-local _safe_globals = {{
-    game = _game,
-    workspace = _new_proxy("Workspace"),
-    script = _new_proxy("script"),
-    shared = {{}},
-    _G = {{}},
-    _VERSION = "Lua 5.1",
-    print = function(...)
-        local args = {{...}}
-        local parts = {{}}
-        for i = 1, _real_select("#", ...) do
-            parts[i] = _real_tostring(args[i])
-        end
-        local capfile = _real_io_open(outdir .. "/cap.txt", "a")
-        if capfile then
-            capfile:write(_real_table_concat(parts, "\t") .. "---SEP---")
-            capfile:close()
-        end
-    end,
-    warn = function(...)
-        local capfile = _real_io_open(outdir .. "/cap.txt", "a")
-        if capfile then
-            capfile:write(_real_tostring(_real_select(1, ...)) .. "---SEP---")
-            capfile:close()
-        end
-    end,
-    error = function(msg, level)
-        local errfile = _real_io_open(outdir .. "/error.txt", "w")
-        if errfile then
-            errfile:write(_real_tostring(msg))
-            errfile:close()
-        end
-        error(msg, level or 0)
-    end,
-    assert = function(v, msg)
-        if not v then
-            local errfile = _real_io_open(outdir .. "/error.txt", "w")
-            if errfile then
-                errfile:write(_real_tostring(msg or "assertion failed"))
-                errfile:close()
-            end
-        end
-        return v, msg
-    end,
-    pcall = function(f, ...)
-        local args = {{...}}
-        local results = {{ pcall(f, _real_unpack(args)) }}
-        return _real_unpack(results)
-    end,
-    xpcall = function(f, errhandler, ...)
-        local args = {{...}}
-        return _real_xpcall(function() return f(_real_unpack(args)) end, errhandler)
-    end,
-    type = _real_type,
-    tostring = _real_tostring,
-    tonumber = tonumber,
-    pairs = _real_pairs,
-    ipairs = _real_ipairs,
-    next = _real_next,
-    rawget = _real_rawget,
-    rawset = _real_rawset,
-    setmetatable = _real_setmetatable,
-    getmetatable = _real_getmetatable,
-    select = _real_select,
-    unpack = _real_unpack,
-    string = string,
-    table = table,
-    math = math,
-    io = {{ open = _real_io_open }},
-    os = {{ time = function() return 0 end, clock = function() return 0 end, date = function() return "01/01/2000" end, difftime = function() return 0 end }},
-    coroutine = coroutine,
-    bit32 = bit32_real,
-    bit = bit_real,
-    tick = function() return 0 end,
-    time = function() return 0 end,
-    wait = function() end,
-    spawn = function(f) pcall(f) end,
-    delay = function(t, f) pcall(f) end,
-    task = {{ wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }},
-    newproxy = newproxy,
-    Instance = _new_proxy("Instance"),
-    Vector3 = _new_proxy("Vector3"),
-    Vector2 = _new_proxy("Vector2"),
-    CFrame = _new_proxy("CFrame"),
-    Color3 = _new_proxy("Color3"),
-    BrickColor = _new_proxy("BrickColor"),
-    UDim2 = _new_proxy("UDim2"),
-    UDim = _new_proxy("UDim"),
-    Ray = _new_proxy("Ray"),
-    Region3 = _new_proxy("Region3"),
-    TweenInfo = _new_proxy("TweenInfo"),
-    NumberRange = _new_proxy("NumberRange"),
-    NumberSequence = _new_proxy("NumberSequence"),
-    NumberSequenceKeypoint = _new_proxy("NumberSequenceKeypoint"),
-    ColorSequence = _new_proxy("ColorSequence"),
-    ColorSequenceKeypoint = _new_proxy("ColorSequenceKeypoint"),
-    Enum = _new_proxy("Enum"),
-    Axes = _new_proxy("Axes"),
-    Faces = _new_proxy("Faces"),
-    Rect = _new_proxy("Rect"),
-    PathWaypoint = _new_proxy("PathWaypoint"),
-    PhysicalProperties = _new_proxy("PhysicalProperties"),
-    Random = _new_proxy("Random"),
-    RaycastParams = _new_proxy("RaycastParams"),
-    CatalogSearchParams = _new_proxy("CatalogSearchParams"),
-    DateTime = _new_proxy("DateTime"),
-    DebuggerManager = _new_proxy("DebuggerManager"),
-    DockWidgetPluginGuiInfo = _new_proxy("DockWidgetPluginGuiInfo"),
-    OverlapParams = _new_proxy("OverlapParams"),
-    plugin = _new_proxy("plugin"),
-    stats = _new_proxy("stats"),
-    settings = _new_proxy("settings"),
-    UserSettings = _new_proxy("UserSettings"),
-    require = function(id)
-        return _new_proxy("require:" .. _real_tostring(id))
-    end,
-}}
-
-local _env_mt = {{
-    __index = function(t, k)
-        local v = _safe_globals[k]
-        if v ~= nil then return v end
-        if _real_type(k) == "string" then
-            return _new_proxy(k)
-        end
-        return nil
-    end,
-    __newindex = function(t, k, v)
-        _real_rawset(t, k, v)
-    end,
-}}
-
-_real_setmetatable(_G, _env_mt)
-_real_rawset(_G, "ipairs", _real_ipairs)
-_real_rawset(_G, "pairs", _real_pairs)
-_real_rawset(_G, "next", _real_next)
-_real_rawset(_G, "tostring", _real_tostring)
-_real_rawset(_G, "type", _real_type)
-_real_rawset(_G, "unpack", _real_unpack)
-_real_rawset(_G, "select", _real_select)
-_real_rawset(_G, "setmetatable", _real_setmetatable)
-_real_rawset(_G, "getmetatable", _real_getmetatable)
-_real_rawset(_G, "rawget", _real_rawget)
-_real_rawset(_G, "rawset", _real_rawset)
-_real_rawset(_G, "pcall", pcall)
-_real_rawset(_G, "xpcall", _real_xpcall)
-_real_rawset(_G, "error", error)
-_real_rawset(_G, "assert", assert)
-_real_rawset(_G, "_G", _G)
-_safe_globals._G = _G
-
-local _capture_count = 0
-local _orig_loadstring = loadstring
-
-loadstring = function(chunk, chunkname)
-    if chunk and _real_type(chunk) == "string" and #chunk > 0 then
-        _capture_count = _capture_count + 1
-        local layer_path = outdir .. "/layer_" .. _real_tostring(_capture_count) .. ".lua"
-        local f = _real_io_open(layer_path, "w")
-        if f then
-            f:write(chunk)
-            f:close()
-        end
-        local dump_path = outdir .. "/dump.bin"
-        local dumpf = _real_io_open(dump_path, "wb")
-        if dumpf then
-            dumpf:write(chunk)
-            dumpf:close()
-        end
-        local fn, compile_err = _orig_loadstring(chunk, chunkname)
-        if fn then
-            _real_setfenv(fn, _G)
-            return fn, nil
-        end
-        return function() end, compile_err
-    end
-    return function() end, nil
-end
-
-load = loadstring
-_real_rawset(_G, "loadstring", loadstring)
-_real_rawset(_G, "load", load)
-
-local _orig_string_dump = string.dump
-string.dump = function(func, strip)
-    local bc = _orig_string_dump(func, strip)
-    local dump_path = outdir .. "/dump.bin"
-    local f = _real_io_open(dump_path, "wb")
-    if f then
-        f:write(bc)
-        f:close()
-    end
-    return bc
-end
-
-local diagfile = _real_io_open(outdir .. "/diag.txt", "w")
-if diagfile then
-    diagfile:write("Sandbox starting...\n")
-    diagfile:close()
-end
-
-_real_setfenv(1, _G)
-
-local function _error_handler(err)
-    local msg = _real_tostring(err)
-    local traceback_str = _real_debug_traceback(msg, 2)
-    local errfile = _real_io_open(outdir .. "/error.txt", "a")
-    if errfile then
-        errfile:write("FULL_TRACEBACK:\n" .. traceback_str .. "\n")
-        errfile:close()
-    end
-    return traceback_str
-end
-
-local function _run_input()
-    local f, err = _real_loadfile(inpath)
-    if not f then
-        local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\n"); errfile:close() end
-        return
-    end
-    _real_setfenv(f, _G)
-
-    if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
-        varargs_embedded = {{}}
-    end
-
-    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf then diagf:write("Varargs: " .. _real_tostring(#varargs_embedded) .. " strings\n"); diagf:close() end
-
-    local chunk_ok, vmFunc = pcall(f, varargs_embedded)
-    if not chunk_ok then
-        local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\n"); errfile:close() end
-        return
-    end
-
-    if _real_type(vmFunc) ~= "function" then
-        local rvf = _real_io_open(outdir .. "/diag.txt", "a")
-        if rvf then rvf:write("Chunk returned non-function (type=" .. _real_type(vmFunc) .. ")\n"); rvf:close() end
-        return
-    end
-
-    local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf2 then diagf2:write("Calling VM with args...\n"); diagf2:close() end
-
-    local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(vmFunc,
-            _real_getfenv(0) or _G,
-            _real_unpack,
-            newproxy,
-            _real_setmetatable,
-            _real_getmetatable,
-            _real_select,
-            varargs_embedded
-        )
-        if not run_ok then
-            local errfile = _real_io_open(outdir .. "/error.txt", "a")
-            if errfile then errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\n"); errfile:close() end
-        end
-        return run_result
-    end, _error_handler)
-
-    if not ok then
-        local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\n"); errfile:close() end
-    end
-    local diagf3 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf3 then diagf3:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n"); diagf3:close() end
-end
-
-_run_input()
-'''
-
-def execute_sandbox(source, timeout=120, varargs=None):
-    error_log, layers, caps, diag = [], [], [], ''
-    try:
-        temp_dir = tempfile.mkdtemp()
-    except Exception as e:
-        return [], [], f'TEMP_DIR_ERROR: {e}'
-    try:
-        inp = os.path.join(temp_dir, 'input.lua')
-        drv = os.path.join(temp_dir, 'driver.lua')
-        out_dir = temp_dir.replace('\\', '/')
-        inp_path = inp.replace('\\', '/')
-
-        with open(inp, 'wb') as f:
-            f.write(source.encode('utf-8', errors='replace'))
-
-        if varargs and isinstance(varargs, list) and len(varargs) > 0:
-            parts = ['"' + s + '"' for s in varargs]
-            table_literal = '{' + ','.join(parts) + '}'
+            if layers:
+                for i, item in enumerate(layers):
+                    result = self._process_layer(item, i, string_table, var_name)
+                    if result:
+                        return result, 'sandbox_source', f'Layer {i} source captured', trace
+            else:
+                result = self._static_wearedevs_extract(source, diags, string_table, var_name)
+                if result:
+                    return self._beautify(result), 'static_source', f'Static source ({len(result)} chars)', trace
         else:
-            table_literal = '{}'
+            layers, caps, diag = execute_sandbox(source, timeout=120)
+            trace.append({'stage': 'sandbox', 'layers': len(layers)})
+            if layers:
+                for i, item in enumerate(layers):
+                    result = self._process_layer(item, i, None, None)
+                    if result:
+                        return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-        driver = RUNTIME.replace('{outdir}', out_dir).replace('{inpath}', inp_path).replace('{varargs_table}', table_literal)
-
-        with open(drv, 'w', encoding='utf-8') as f:
-            f.write(driver)
-
-        env = os.environ.copy()
-        env['LUA_PATH'] = os.path.join(APP_DIR, '?.lua') + ';' + env.get('LUA_PATH', '')
-        env['LUA_CPATH'] = os.path.join(APP_DIR, '?.so') + ';' + env.get('LUA_CPATH', '')
-
-        proc_error = ''
-        stdout_output = ''
-        stderr_output = ''
-        try:
-            result = subprocess.run(
-                [LUA_BIN, drv],
-                capture_output=True, text=True, timeout=timeout, cwd=temp_dir, env=env
-            )
-            stdout_output = result.stdout
-            stderr_output = result.stderr
-            if result.returncode != 0:
-                proc_error = f'LUA_EXIT_{result.returncode}: {stderr_output[:400]}'
-        except subprocess.TimeoutExpired:
-            proc_error = f'TIMEOUT_EXPIRED ({timeout}s)'
-        except FileNotFoundError:
-            proc_error = f'LUA_NOT_FOUND: {LUA_BIN}'
-        except Exception as e:
-            proc_error = f'SUBPROCESS_ERROR: {e}'
-        if proc_error:
-            error_log.append(proc_error)
-        if stdout_output.strip():
-            error_log.append(f'STDOUT: {stdout_output.strip()[:500]}')
-        if stderr_output.strip():
-            error_log.append(f'STDERR: {stderr_output.strip()[:500]}')
-
-        i = 1
-        while True:
-            p = os.path.join(temp_dir, f'layer_{i}.lua')
-            if not os.path.exists(p):
-                break
+        for lifter in self.lifters:
             try:
-                with open(p, encoding='utf-8', errors='replace') as f:
-                    data = f.read()
-                if data:
-                    layers.append(data)
-            except Exception as e:
-                error_log.append(f'READ_LAYER_{i}_ERROR: {e}')
+                chunks = lifter.lift(source)
+                if chunks:
+                    for chunk in chunks:
+                        if isinstance(chunk, bytes):
+                            bc = self.bytecode_harvester.extract(chunk)
+                            if bc:
+                                dc, err = self._run_unluac(bc)
+                                if dc and self._is_valid_lua(dc):
+                                    return self._beautify(dc), 'lifter_unluac', f'Lifter ({len(dc)} chars)', trace
+                        elif isinstance(chunk, str) and len(chunk) > 5 and self._is_likely_lua(chunk):
+                            return self._beautify(chunk), 'lifter_source', f'Lifter source ({len(chunk)} chars)', trace
+            except:
+                pass
+
+        lune_data, _ = self._run_lune(source)
+        if lune_data and isinstance(lune_data, bytes) and len(lune_data) >= 12:
+            bc = self.bytecode_harvester.extract(lune_data)
+            if bc:
+                dc, err = self._run_unluac(bc)
+                if dc and self._is_valid_lua(dc):
+                    return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
+
+        raw_bc = self.bytecode_harvester.deep_scan(source)
+        if raw_bc:
+            dc, err = self._run_unluac(raw_bc)
+            if dc and self._is_valid_lua(dc):
+                return self._beautify(dc), 'deep_scan_unluac', f'Deep scan ({len(dc)} chars)', trace
+
+        parts = [f'Steps: {"; ".join(diags[:3])}']
+        if reasons:
+            parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
+        reason = '\n'.join(parts) if parts else 'All stages exhausted'
+        return '', 'unable', reason, trace
+
+    def _process_layer(self, item, i, string_table, var_name):
+        if isinstance(item, bytes) and len(item) >= 12:
+            text = None
+            try:
+                text = item.decode('utf-8')
+            except:
+                pass
+            if text and self._is_valid_lua(text):
+                beautified = self._beautify(text)
+                if string_table and var_name:
+                    beautified = self._substitute_strings(beautified, string_table, var_name)
+                return beautified
+            bc = self.bytecode_harvester.extract(item)
+            if bc:
+                dc, err = self._run_unluac(bc)
+                if dc and self._is_valid_lua(dc):
+                    beautified = self._beautify(dc)
+                    if string_table and var_name:
+                        beautified = self._substitute_strings(beautified, string_table, var_name)
+                    return beautified
+        if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
+            beautified = self._beautify(item)
+            if string_table and var_name:
+                beautified = self._substitute_strings(beautified, string_table, var_name)
+            return beautified
+        return None
+
+    def _substitute_strings(self, code, string_table, var_name='R'):
+        if not string_table or not code:
+            return code
+        def replacer(m):
+            try:
+                idx = int(m.group(1)) - 1
+                if 0 <= idx < len(string_table):
+                    val = string_table[idx]
+                    val = val.replace('\\', '\\\\').replace('"', '\\"')
+                    return f'"{val}"'
+            except:
+                pass
+            return m.group(0)
+        code = re.sub(rf'\b{re.escape(var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', replacer, code)
+        return code
+
+    def _decode_string_table(self, source, diags):
+        m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}', source)
+        if not m:
+            return None, None
+        var_name = m.group(1)
+        body = m.group(2)
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+        if len(strings) < 10:
+            return None, None
+        return strings, var_name
+
+    def _static_wearedevs_extract(self, source, diags, string_table=None, var_name=None):
+        m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}', source)
+        if not m:
+            diags.append("no R table")
+            return None
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
+        if len(strings) < 10:
+            diags.append(f"R table too small ({len(strings)})")
+            return None
+
+        b64_rev = self._parse_n_table(source)
+        shuffle = self._parse_shuffle_ranges(source)
+        diags.append(f"R={len(strings)} N={len(b64_rev)} shuff={len(shuffle)}")
+
+        def try_decode(pairs, label):
+            working = list(strings)
+            for lo, hi in pairs:
+                lo_idx, hi_idx = lo - 1, hi - 1
+                while lo_idx < hi_idx:
+                    working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
+                    lo_idx += 1
+                    hi_idx -= 1
+            decoded = []
+            for s in working:
+                if not s: continue
+                raw = self._lua_escapes_to_bytes(s)
+                if not raw: continue
+                dec = self._decode_custom_b64(raw, b64_rev)
+                if dec: decoded.append(dec)
+            if not decoded: return None
+            combined = b''.join(decoded)
+            hex_pre = binascii.hexlify(combined[:16]).decode()
+
+            bc = self.bytecode_harvester.extract(combined)
+            if bc:
+                diags.append(f"bc ({len(bc)}B) [{label}]")
+                return bc
+
+            for enc in ('utf-8', 'latin-1'):
+                try:
+                    text = combined.decode(enc)
+                    if self._is_likely_lua(text):
+                        diags.append(f"source ({len(text)} chars) [{label}]")
+                        if string_table and var_name:
+                            text = self._substitute_strings(text, string_table, var_name)
+                        return self._beautify(text)
+                except: pass
+
+            diags.append(f"no bc/source [{label}] hex={hex_pre}")
+            return None
+
+        result = try_decode(shuffle, "orig")
+        if result: return result
+        result = try_decode(list(reversed(shuffle)), "rev")
+        if result: return result
+        return None
+
+    def _beautify(self, code):
+        if not code or len(code) < 5:
+            return code
+
+        stylua = shutil.which('stylua')
+        if stylua:
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.lua', mode='w', encoding='utf-8', delete=False) as tmp:
+                    tmp.write(code)
+                    tmp_path = tmp.name
+                r = subprocess.run(
+                    [stylua, '--indent-type', 'Spaces', '--indent-width', '4', '--line-endings', 'Unix', tmp_path],
+                    capture_output=True, text=True, timeout=10
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout
+            except: pass
+            finally:
+                try: os.unlink(tmp_path)
+                except: pass
+
+        try:
+            from luaparser import ast
+            return ast.to_lua_source(ast.parse(code))
+        except: pass
+
+        code = ''.join(ch for ch in code if ch.isprintable() or ch in '\n\r\t')
+        if len(code) < 5:
+            return code
+
+        lexer = LuaSimpleLexer(code)
+        tokens = lexer.tokens
+
+        new_parts = []
+        depth = 0
+        buffer = ''
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t.kind == 'SEP' and t.value == ';':
+                if buffer.strip():
+                    new_parts.append(buffer.strip())
+                    buffer = ''
+                i += 1
+                continue
+            if t.kind == 'KEYWORD':
+                kw = t.value
+                if kw == 'end' or kw == 'until':
+                    depth = max(0, depth - 1)
+                if kw in ('else', 'elseif'):
+                    depth = max(0, depth - 1)
+
+                if buffer.strip():
+                    new_parts.append(buffer.strip())
+                    buffer = ''
+
+                if kw in ('function', 'if', 'for', 'while', 'repeat', 'do', 'then'):
+                    new_parts.append('    ' * depth + kw)
+                    if kw not in ('then', 'do'):
+                        depth += 1
+                elif kw in ('end', 'until', 'else', 'elseif'):
+                    new_parts.append('    ' * depth + kw)
+                    if kw in ('else', 'elseif'):
+                        depth += 1
+                elif kw in ('local', 'return', 'break'):
+                    new_parts.append('    ' * depth + kw)
+                else:
+                    new_parts.append('    ' * depth + kw)
+                i += 1
+                continue
+
+            buffer += t.value + ' '
             i += 1
 
-        for extra in ('dump.bin', 'return_value.lua'):
-            extra_path = os.path.join(temp_dir, extra)
-            if os.path.exists(extra_path):
-                try:
-                    with open(extra_path, 'rb') as f:
-                        data = f.read()
-                    if data and len(data) >= 12:
-                        layers.append(data)
-                except Exception as e:
-                    error_log.append(f'READ_{extra}_ERROR: {e}')
+        if buffer.strip():
+            new_parts.append(buffer.strip())
 
-        for fname in ('cap.txt', 'memory.txt'):
-            fp = os.path.join(temp_dir, fname)
-            if os.path.exists(fp):
-                try:
-                    with open(fp, encoding='utf-8', errors='replace') as f:
-                        data = f.read()
-                    if data:
-                        parts = data.split('---SEP---') if fname == 'cap.txt' else data.split('---MEMSEP---')
-                        caps.extend([p.strip() for p in parts if len(p.strip()) > 5])
-                except Exception as e:
-                    error_log.append(f'READ_{fname}_ERROR: {e}')
+        result = '\n'.join(new_parts)
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        return result
 
-        diag_parts = []
-        for fname in ('diag.txt', 'error.txt'):
-            fp = os.path.join(temp_dir, fname)
-            if os.path.exists(fp):
+    @staticmethod
+    def _is_likely_lua(text):
+        if not text or len(text) < 5:
+            return False
+        printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
+        if (printable / len(text)) < 0.70:
+            return False
+        lower_text = text.lower()
+        for kw in LUA_SUBSTRINGS:
+            if kw in lower_text:
+                return True
+        return False
+
+    def _parse_n_table(self, source):
+        m = re.search(r'local N=\{([^}]+)\}', source)
+        if not m: return {}
+        body = m.group(1)
+        rev = {}
+        for m2 in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
+            esc = m2.group(1)
+            val = self._safe_eval(m2.group(2).strip())
+            if val is not None and 0 <= val < 64:
+                code = self._lua_escape_to_int(esc)
+                if code is not None: rev[val] = chr(code)
+        for m2 in re.finditer(r'(?<![\["\'])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
+            ch = m2.group(1)
+            val = self._safe_eval(m2.group(2).strip())
+            if val is not None and 0 <= val < 64: rev[val] = ch
+        std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        for i, ch in enumerate(std):
+            if i not in rev: rev[i] = ch
+        return rev
+
+    def _parse_shuffle_ranges(self, source):
+        m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
+        if not m: return []
+        outer = m.group(1)
+        inner = re.findall(r'\{([-\d()+\-*/\s]+)[;,]([-\d()+\-*/\s]+)\}', outer)
+        ranges = []
+        for e1, e2 in inner:
+            lo = self._safe_eval(e1.strip())
+            hi = self._safe_eval(e2.strip())
+            if lo is not None and hi is not None: ranges.append((lo, hi))
+        return ranges
+
+    @staticmethod
+    def _lua_escapes_to_bytes(s):
+        result = bytearray()
+        i = 0
+        while i < len(s):
+            if s[i] == '\\' and i+1 < len(s) and s[i+1].isdigit():
+                j = i+1
+                while j < len(s) and s[j].isdigit() and j-i < 4: j += 1
                 try:
-                    with open(fp, encoding='utf-8', errors='replace') as f:
-                        txt = f.read()
-                    if txt:
-                        diag_parts.append(f"[{fname}]\n{txt.strip()}")
-                except Exception:
-                    pass
-        if diag_parts:
-            diag = '\n'.join(diag_parts)
-        if error_log:
-            prefix = '\n'.join(error_log)
-            diag = prefix + ('\n---\n' + diag if diag else '')
-        if not layers and not caps and not diag:
-            diag = 'NO_OUTPUT'
-        if not proc_error and not layers:
-            diag = (diag or '') + '\nNo layers captured'
-    except Exception as e:
-        diag = f'SANDBOX_FATAL: {e}\n{traceback.format_exc()}'
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    return layers, caps, diag
+                    v = int(s[i+1:j])
+                    if 0 <= v <= 255: result.append(v)
+                except: pass
+                i = j
+            else: i += 1
+        return bytes(result)
+
+    @staticmethod
+    def _lua_escape_to_int(esc):
+        if esc.startswith('\\') and esc[1:].isdigit():
+            return int(esc[1:]) % 256
+        return None
+
+    @staticmethod
+    def _decode_custom_b64(data, rev):
+        if not rev or len(data)==0: return None
+        fwd = {v:k for k,v in rev.items()}
+        buf, bits, out = 0, 0, bytearray()
+        for b in data:
+            ch = chr(b) if b < 256 else ''
+            if ch not in fwd:
+                if b == ord('='): break
+                continue
+            buf = (buf << 6) | fwd[ch]
+            bits += 6
+            while bits >= 8:
+                bits -= 8
+                out.append((buf >> bits) & 0xFF)
+        return bytes(out)
+
+    @staticmethod
+    def _safe_eval(expr):
+        expr = expr.replace(' ','')
+        if not expr or not re.match(r'^[\d+\-*/()]+$', expr): return None
+        try: return eval(expr)
+        except: return None
+
+    def _run_lune(self, source):
+        try:
+            try: loop = asyncio.get_event_loop()
+            except: loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            return loop.run_until_complete(execute_and_capture(source))
+        except: return None, {}
+
+    def _run_unluac(self, bytecode):
+        if not self._java_available: return None, "no java"
+        if not os.path.isfile(self.unluac_path): self._ensure_unluac_jar()
+        if not os.path.isfile(self.unluac_path): return None, "no unluac.jar"
+        with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
+            tmp.write(bytecode)
+            tmp_path = tmp.name
+        try:
+            r = subprocess.run(['java','-jar',self.unluac_path,'--rawstring',tmp_path], capture_output=True, text=True, timeout=30)
+            if r.returncode==0 and r.stdout.strip(): return r.stdout, None
+            if r.stderr and 'version' in r.stderr.lower():
+                r2 = subprocess.run(['java','-jar',self.unluac_path,tmp_path], capture_output=True, text=True, timeout=30)
+                if r2.returncode==0 and r2.stdout.strip(): return r2.stdout, None
+                return None, r2.stderr[:300]
+            return None, r.stderr[:200] if r.stderr else 'no output'
+        except subprocess.TimeoutExpired: return None, "timeout"
+        except Exception as e: return None, str(e)
+        finally:
+            if os.path.exists(tmp_path):
+                try: os.unlink(tmp_path)
+                except: pass
+
+    def _ensure_unluac_jar(self):
+        try:
+            os.makedirs(os.path.dirname(self.unluac_path), exist_ok=True)
+            urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
+        except: pass
+
+    @staticmethod
+    def _is_valid_lua(code):
+        if not code or len(code) < 50: return False
+        words = set(re.findall(r'\b\w+\b', code[:10000]))
+        if len(words & LUA_KEYWORDS) < 5: return False
+        if not ('function' in words and 'end' in words or 'local' in words): return False
+        printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
+        return (printable / max(len(code),1)) >= 0.70
