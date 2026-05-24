@@ -72,7 +72,6 @@ class DeobfEngine:
         if string_table:
             diags.append(f"R table: {len(string_table)} strings (var={var_name})")
 
-            # Try sandbox first
             layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
             trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
             if diag:
@@ -84,7 +83,6 @@ class DeobfEngine:
                     if result:
                         return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-            # Static extraction — always accept whatever it returns
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
                 if isinstance(result, bytes):
@@ -98,15 +96,11 @@ class DeobfEngine:
                         beautified = self._substitute_strings(beautified, string_table, var_name)
                     return beautified, 'static_source', f'Static source ({len(result)} chars)', trace
 
-            # If we get here, the static extraction found *something* but it was
-            # a blob that didn't pass any keyword checks.
-            # Return the raw combined decoded data as a last resort.
             combined = self._static_decode_raw(source, string_table)
             if combined:
                 beautified = self._beautify(combined)
-                return beautified, 'static_raw', f'Raw decoded output ({len(combined)} chars)', trace
+                return beautified, 'static_raw', f'Decoded VM source ({len(combined)} chars)', trace
 
-        # No string table found — try sandbox without varargs
         layers, caps, diag = execute_sandbox(source, timeout=120)
         trace.append({'stage': 'sandbox', 'layers': len(layers)})
         if diag:
@@ -117,7 +111,6 @@ class DeobfEngine:
                 if result:
                     return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-        # Lifters, lune, deep scan as final fallbacks
         for lifter in self.lifters:
             try:
                 chunks = lifter.lift(source)
@@ -181,10 +174,15 @@ class DeobfEngine:
         combined = b''.join(decoded)
         for enc in ('utf-8', 'latin-1'):
             try:
-                return combined.decode(enc)
+                text = combined.decode(enc)
+                if self._has_lua_keywords(text):
+                    return text
             except:
                 pass
-        return None
+        try:
+            return combined.decode('latin-1')
+        except:
+            return None
 
     def _sanitize_diag(self, text):
         return ''.join(c for c in text if c.isprintable() or c in '\n\t')
@@ -350,7 +348,7 @@ class DeobfEngine:
         for kw in LUA_SUBSTRINGS:
             if kw in lower_text:
                 count += 1
-                if count >= 2:
+                if count >= 1:
                     return True
         return False
 
