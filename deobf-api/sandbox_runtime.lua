@@ -451,15 +451,7 @@ local function _run_input()
     end
 
     local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(f,
-            _real_getfenv(0) or _G,
-            _real_unpack,
-            newproxy,
-            _real_setmetatable,
-            _real_getmetatable,
-            _real_select,
-            varargs_embedded
-        )
+        local run_ok, run_result = pcall(f, _real_unpack(varargs_embedded))
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then
