@@ -430,14 +430,21 @@ local function _run_input()
 
     if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
         varargs_embedded = {{}}
-        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf then diagf:write("Varargs invalid, using empty table\\n"); diagf:close() end
-    else
-        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf then diagf:write("Varargs table has " .. _real_tostring(#varargs_embedded) .. " strings\\n"); diagf:close() end
     end
 
-    local chunk_ok, vmFunc = pcall(f, varargs_embedded)
+    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf then diagf:write("Calling chunk with 7 args...\\n"); diagf:close() end
+
+    -- Call the chunk with 7 arguments, exactly like the original loader
+    local chunk_ok, vmFunc = pcall(f,
+        _real_getfenv(0) or _G,
+        _real_unpack,
+        newproxy,
+        _real_setmetatable,
+        _real_getmetatable,
+        _real_select,
+        varargs_embedded
+    )
     if not chunk_ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
@@ -456,6 +463,7 @@ local function _run_input()
     local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
     if diagf2 then diagf2:write("Calling VM with args...\\n"); diagf2:close() end
 
+    -- Call the VM with the same 7 arguments
     local ok, result = _real_xpcall(function()
         local run_ok, run_result = pcall(vmFunc,
             _real_getfenv(0) or _G,
