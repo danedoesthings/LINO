@@ -22,7 +22,6 @@ LUA_KEYWORDS = {
     'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
 }
 
-# Substrings that strongly indicate Lua source even in a continuous blob
 LUA_SUBSTRINGS = [
     'function', 'local', 'end', 'print', 'tostring', 'tonumber',
     'setmetatable', 'getmetatable', 'loadstring', 'pcall', 'unpack',
@@ -149,7 +148,6 @@ class DeobfEngine:
                 return None
             combined = b''.join(decoded)
             hex_pre = binascii.hexlify(combined[:16]).decode()
-            print(f"[engine] {label}: {len(decoded)} chunks, {len(combined)}B, hex={hex_pre}", file=sys.stderr)
 
             bc = self.bytecode_harvester.extract(combined)
             if bc:
@@ -176,19 +174,69 @@ class DeobfEngine:
 
     @staticmethod
     def _is_likely_lua(text):
-        """Return True if text looks like Lua source code (relaxed)."""
         if not text or len(text) < 5:
             return False
         printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
         if (printable / len(text)) < 0.70:
             return False
-        # Check for Lua keywords anywhere in the text (substring match)
         lower_text = text.lower()
         for kw in LUA_SUBSTRINGS:
             if kw in lower_text:
                 return True
         return False
 
+    # --------------- Beautification for minified Lua ---------------
+    def _beautify(self, code):
+        # First, try luaparser
+        try:
+            from luaparser import ast
+            return ast.to_lua_source(ast.parse(code))
+        except:
+            pass
+
+        # Clean non-printable garbage (keep printable ASCII, newline, tab)
+        cleaned = []
+        for ch in code:
+            if ch.isprintable() or ch in '\n\r\t':
+                cleaned.append(ch)
+        code = ''.join(cleaned)
+
+        # If empty or tiny, return as-is
+        if len(code) < 5:
+            return code
+
+        # Token-based formatting for minified Lua
+        # Insert a newline before common keywords
+        keywords = r'\b(function|local|if|for|while|repeat|return|end|else|elseif|until|do|then)\b'
+        # Add newline before each keyword
+        code = re.sub(keywords, r'\n\1', code)
+
+        # Insert space after commas and semicolons
+        code = re.sub(r',([^\s])', r', \1', code)
+        code = re.sub(r';([^\s])', r'; \1', code)
+
+        # Insert space around operators if adjacent to identifiers
+        code = re.sub(r'(\w)([=+\-*/<>])', r'\1 \2', code)
+        code = re.sub(r'([=+\-*/<>])(\w)', r'\1 \2', code)
+
+        # Indent based on keywords
+        lines = code.split('\n')
+        out = []
+        indent = 0
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Decrease indent for closing keywords
+            if any(stripped.startswith(w) for w in ('end', 'else', 'elseif', 'until')):
+                indent = max(0, indent - 1)
+            out.append('    ' * indent + stripped)
+            # Increase indent for opening keywords
+            if any(stripped.startswith(w) for w in ('function', 'local function', 'if', 'for', 'while', 'repeat', 'do')):
+                indent += 1
+        return '\n'.join(out)
+
+    # --------------- Parsing helpers (unchanged) ---------------
     def _parse_n_table(self, source):
         m = re.search(r'local N=\{([^}]+)\}', source)
         if not m: return {}
@@ -310,16 +358,3 @@ class DeobfEngine:
         if not ('function' in words and 'end' in words or 'local' in words): return False
         printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
         return (printable / max(len(code),1)) >= 0.70
-
-    def _beautify(self, code):
-        try:
-            from luaparser import ast; return ast.to_lua_source(ast.parse(code))
-        except:
-            out, ind = [], 0
-            for raw in code.split('\n'):
-                line = raw.strip()
-                if not line: out.append(''); continue
-                if any(line.startswith(w) for w in ('end','else','elseif','until')): ind = max(0, ind-1)
-                out.append('    '*ind + line)
-                if any(line.startswith(w) for w in ('if ','for ','while ','function ','local function ','do','repeat')) and not line.rstrip().endswith('end'): ind += 1
-            return '\n'.join(out)
