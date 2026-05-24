@@ -30,6 +30,7 @@ local _real_next = next
 local _real_table_concat = table.concat
 local _real_string_byte = string.byte
 local _real_math_floor = math.floor
+local _real_newproxy = newproxy
 
 math.randomseed(0)
 
@@ -104,15 +105,13 @@ local bit_real   = bit32_real
 local _proxy_mt = {{
     __index = function(t, k)
         if _real_type(k) == "number" then return 0 end
-        local child = {{}}
-        _real_setmetatable(child, _proxy_mt)
+        local child = _new_userdata(k)
         _real_rawset(t, k, child)
         return child
     end,
     __newindex = function(t, k, v) _real_rawset(t, k, v) end,
     __call = function(t, ...)
-        local result = {{}}
-        _real_setmetatable(result, _proxy_mt)
+        local result = _new_userdata("call_result")
         return result
     end,
     __add = function() return 0 end,
@@ -130,70 +129,59 @@ local _proxy_mt = {{
     __len = function() return 0 end,
 }}
 
-local function _new_proxy(name)
-    local p = {{ _name = name or "proxy" }}
-    _real_setmetatable(p, _proxy_mt)
-    return p
+function _new_userdata(name)
+    local ud = _real_newproxy(true)
+    _real_rawset(ud, "_name", name or "ud")
+    _real_setmetatable(ud, _proxy_mt)
+    return ud
 end
 
-local function newproxy(addmetatable)
-    return _new_proxy("newproxy")
-end
-
-local _players_service = _new_proxy("Players")
+local _players_service = _new_userdata("Players")
 local _local_player = {{
     UserId = 1,
     Name = "Player",
     DisplayName = "Player",
-    Character = _new_proxy("Character"),
-    Backpack = _new_proxy("Backpack"),
-    PlayerGui = _new_proxy("PlayerGui"),
-    PlayerScripts = _new_proxy("PlayerScripts"),
+    Character = _new_userdata("Character"),
+    Backpack = _new_userdata("Backpack"),
+    PlayerGui = _new_userdata("PlayerGui"),
+    PlayerScripts = _new_userdata("PlayerScripts"),
     Team = nil,
     AccountAge = 365,
-    MembershipType = _new_proxy("MembershipType"),
+    MembershipType = _new_userdata("MembershipType"),
 }}
 _players_service.LocalPlayer = _local_player
 _players_service.GetPlayers = function() return {{ _local_player }} end
 _players_service.GetPlayerByUserId = function() return _local_player end
 
-local _game = _new_proxy("game")
+local _game = _new_userdata("game")
 _real_rawset(_game, "GetService", function(self, name)
-    local svc = _new_proxy("Service:" .. _real_tostring(name))
+    local svc = _new_userdata("Service:" .. _real_tostring(name))
     if name == "Players" then return _players_service end
-    if name == "ReplicatedStorage" then return _new_proxy("ReplicatedStorage") end
-    if name == "ServerStorage" then return _new_proxy("ServerStorage") end
-    if name == "ServerScriptService" then return _new_proxy("ServerScriptService") end
-    if name == "Workspace" then return _new_proxy("Workspace") end
-    if name == "Lighting" then return _new_proxy("Lighting") end
-    if name == "StarterGui" then return _new_proxy("StarterGui") end
-    if name == "StarterPack" then return _new_proxy("StarterPack") end
-    if name == "StarterPlayer" then return _new_proxy("StarterPlayer") end
     return svc
 end)
 _real_rawset(_game, "Players", _players_service)
-_real_rawset(_game, "Workspace", _new_proxy("Workspace"))
-_real_rawset(_game, "ReplicatedStorage", _new_proxy("ReplicatedStorage"))
-_real_rawset(_game, "ServerStorage", _new_proxy("ServerStorage"))
-_real_rawset(_game, "ServerScriptService", _new_proxy("ServerScriptService"))
-_real_rawset(_game, "Lighting", _new_proxy("Lighting"))
-_real_rawset(_game, "StarterGui", _new_proxy("StarterGui"))
-_real_rawset(_game, "StarterPack", _new_proxy("StarterPack"))
-_real_rawset(_game, "StarterPlayer", _new_proxy("StarterPlayer"))
+_real_rawset(_game, "Workspace", _new_userdata("Workspace"))
+_real_rawset(_game, "ReplicatedStorage", _new_userdata("ReplicatedStorage"))
+_real_rawset(_game, "ServerStorage", _new_userdata("ServerStorage"))
+_real_rawset(_game, "ServerScriptService", _new_userdata("ServerScriptService"))
+_real_rawset(_game, "Lighting", _new_userdata("Lighting"))
+_real_rawset(_game, "StarterGui", _new_userdata("StarterGui"))
+_real_rawset(_game, "StarterPack", _new_userdata("StarterPack"))
+_real_rawset(_game, "StarterPlayer", _new_userdata("StarterPlayer"))
 _real_rawset(_game, "PlaceId", 1)
 _real_rawset(_game, "JobId", "00000000-0000-0000-0000-000000000000")
 _real_rawset(_game, "CreatorId", 0)
-_real_rawset(_game, "CreatorType", _new_proxy("CreatorType"))
+_real_rawset(_game, "CreatorType", _new_userdata("CreatorType"))
 _real_rawset(_game, "IsLoaded", function() return true end)
 
 game = _game
-workspace = _new_proxy("Workspace")
-script = _new_proxy("script")
+workspace = _new_userdata("Workspace")
+script = _new_userdata("script")
 
 local sandbox_env = {{
     game = _game,
-    workspace = _new_proxy("Workspace"),
-    script = _new_proxy("script"),
+    workspace = workspace,
+    script = script,
     shared = {{}},
     _G = nil,
     _VERSION = "Lua 5.1",
@@ -249,48 +237,48 @@ local sandbox_env = {{
     spawn = function(f) pcall(f) end,
     delay = function(t, f) pcall(f) end,
     task = {{ wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }},
-    newproxy = newproxy,
+    newproxy = _real_newproxy,
     getfenv = function()
         return sandbox_env
     end,
     setfenv = function(fn, env)
         return fn
     end,
-    Instance = _new_proxy("Instance"),
-    Vector3 = _new_proxy("Vector3"),
-    Vector2 = _new_proxy("Vector2"),
-    CFrame = _new_proxy("CFrame"),
-    Color3 = _new_proxy("Color3"),
-    BrickColor = _new_proxy("BrickColor"),
-    UDim2 = _new_proxy("UDim2"),
-    UDim = _new_proxy("UDim"),
-    Ray = _new_proxy("Ray"),
-    Region3 = _new_proxy("Region3"),
-    TweenInfo = _new_proxy("TweenInfo"),
-    NumberRange = _new_proxy("NumberRange"),
-    NumberSequence = _new_proxy("NumberSequence"),
-    NumberSequenceKeypoint = _new_proxy("NumberSequenceKeypoint"),
-    ColorSequence = _new_proxy("ColorSequence"),
-    ColorSequenceKeypoint = _new_proxy("ColorSequenceKeypoint"),
-    Enum = _new_proxy("Enum"),
-    Axes = _new_proxy("Axes"),
-    Faces = _new_proxy("Faces"),
-    Rect = _new_proxy("Rect"),
-    PathWaypoint = _new_proxy("PathWaypoint"),
-    PhysicalProperties = _new_proxy("PhysicalProperties"),
-    Random = _new_proxy("Random"),
-    RaycastParams = _new_proxy("RaycastParams"),
-    CatalogSearchParams = _new_proxy("CatalogSearchParams"),
-    DateTime = _new_proxy("DateTime"),
-    DebuggerManager = _new_proxy("DebuggerManager"),
-    DockWidgetPluginGuiInfo = _new_proxy("DockWidgetPluginGuiInfo"),
-    OverlapParams = _new_proxy("OverlapParams"),
-    plugin = _new_proxy("plugin"),
-    stats = _new_proxy("stats"),
-    settings = _new_proxy("settings"),
-    UserSettings = _new_proxy("UserSettings"),
+    Instance = _new_userdata("Instance"),
+    Vector3 = _new_userdata("Vector3"),
+    Vector2 = _new_userdata("Vector2"),
+    CFrame = _new_userdata("CFrame"),
+    Color3 = _new_userdata("Color3"),
+    BrickColor = _new_userdata("BrickColor"),
+    UDim2 = _new_userdata("UDim2"),
+    UDim = _new_userdata("UDim"),
+    Ray = _new_userdata("Ray"),
+    Region3 = _new_userdata("Region3"),
+    TweenInfo = _new_userdata("TweenInfo"),
+    NumberRange = _new_userdata("NumberRange"),
+    NumberSequence = _new_userdata("NumberSequence"),
+    NumberSequenceKeypoint = _new_userdata("NumberSequenceKeypoint"),
+    ColorSequence = _new_userdata("ColorSequence"),
+    ColorSequenceKeypoint = _new_userdata("ColorSequenceKeypoint"),
+    Enum = _new_userdata("Enum"),
+    Axes = _new_userdata("Axes"),
+    Faces = _new_userdata("Faces"),
+    Rect = _new_userdata("Rect"),
+    PathWaypoint = _new_userdata("PathWaypoint"),
+    PhysicalProperties = _new_userdata("PhysicalProperties"),
+    Random = _new_userdata("Random"),
+    RaycastParams = _new_userdata("RaycastParams"),
+    CatalogSearchParams = _new_userdata("CatalogSearchParams"),
+    DateTime = _new_userdata("DateTime"),
+    DebuggerManager = _new_userdata("DebuggerManager"),
+    DockWidgetPluginGuiInfo = _new_userdata("DockWidgetPluginGuiInfo"),
+    OverlapParams = _new_userdata("OverlapParams"),
+    plugin = _new_userdata("plugin"),
+    stats = _new_userdata("stats"),
+    settings = _new_userdata("settings"),
+    UserSettings = _new_userdata("UserSettings"),
     require = function(id)
-        return _new_proxy("require:" .. _real_tostring(id))
+        return _new_userdata("require:" .. _real_tostring(id))
     end,
 }}
 
@@ -397,7 +385,7 @@ local function _run_input()
         local run_ok, run_result = pcall(vmFunc,
             sandbox_env,
             _real_unpack,
-            newproxy,
+            _real_newproxy,
             _real_setmetatable,
             _real_getmetatable,
             _real_select,
