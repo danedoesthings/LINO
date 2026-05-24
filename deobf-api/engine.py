@@ -72,7 +72,7 @@ class DeobfEngine:
         if string_table:
             diags.append(f"R table: {len(string_table)} strings (var={var_name})")
 
-            # Try sandbox first with raw escaped strings
+            # Try sandbox first
             layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
             trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
             if diag:
@@ -84,7 +84,7 @@ class DeobfEngine:
                     if result:
                         return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-            # Sandbox failed — fall back to static extraction
+            # Static extraction — always accept whatever it returns
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
                 if isinstance(result, bytes):
@@ -97,17 +97,27 @@ class DeobfEngine:
                     if string_table and var_name:
                         beautified = self._substitute_strings(beautified, string_table, var_name)
                     return beautified, 'static_source', f'Static source ({len(result)} chars)', trace
-        else:
-            layers, caps, diag = execute_sandbox(source, timeout=120)
-            trace.append({'stage': 'sandbox', 'layers': len(layers)})
-            if diag:
-                reasons['sandbox'] = self._sanitize_diag(diag[:2000])
-            if layers:
-                for i, item in enumerate(layers):
-                    result = self._process_layer(item, i, None, None)
-                    if result:
-                        return result, 'sandbox_source', f'Layer {i} source captured', trace
 
+            # If we get here, the static extraction found *something* but it was
+            # a blob that didn't pass any keyword checks.
+            # Return the raw combined decoded data as a last resort.
+            combined = self._static_decode_raw(source, string_table)
+            if combined:
+                beautified = self._beautify(combined)
+                return beautified, 'static_raw', f'Raw decoded output ({len(combined)} chars)', trace
+
+        # No string table found — try sandbox without varargs
+        layers, caps, diag = execute_sandbox(source, timeout=120)
+        trace.append({'stage': 'sandbox', 'layers': len(layers)})
+        if diag:
+            reasons['sandbox'] = self._sanitize_diag(diag[:2000])
+        if layers:
+            for i, item in enumerate(layers):
+                result = self._process_layer(item, i, None, None)
+                if result:
+                    return result, 'sandbox_source', f'Layer {i} source captured', trace
+
+        # Lifters, lune, deep scan as final fallbacks
         for lifter in self.lifters:
             try:
                 chunks = lifter.lift(source)
@@ -143,6 +153,38 @@ class DeobfEngine:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
+
+    def _static_decode_raw(self, source, string_table):
+        b64_rev = self._parse_n_table(source)
+        shuffle = self._parse_shuffle_ranges(source)
+        if not b64_rev or not shuffle:
+            return None
+        working = list(string_table)
+        for lo, hi in shuffle:
+            lo_idx, hi_idx = lo - 1, hi - 1
+            while lo_idx < hi_idx:
+                working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
+                lo_idx += 1
+                hi_idx -= 1
+        decoded = []
+        for s in working:
+            if not s:
+                continue
+            raw = self._lua_escapes_to_bytes(s)
+            if not raw:
+                continue
+            dec = self._decode_custom_b64(raw, b64_rev)
+            if dec:
+                decoded.append(dec)
+        if not decoded:
+            return None
+        combined = b''.join(decoded)
+        for enc in ('utf-8', 'latin-1'):
+            try:
+                return combined.decode(enc)
+            except:
+                pass
+        return None
 
     def _sanitize_diag(self, text):
         return ''.join(c for c in text if c.isprintable() or c in '\n\t')
