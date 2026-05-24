@@ -4,12 +4,11 @@ LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua')
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _write_driver(drv_path, out_dir, inp_path, varargs_table_literal):
-    """Write the Lua driver file directly, line by line, without any placeholder replacement."""
+    """Write the Lua driver file directly, line by line."""
     with open(drv_path, 'w', encoding='utf-8') as f:
         f.write(f'local outdir = "{out_dir}"\n')
         f.write(f'local inpath = "{inp_path}"\n')
         f.write(f'local varargs_table = {varargs_table_literal}\n')
-        # Remainder of the runtime is a fixed, known-good Lua script
         f.write(r'''
 local _real_io_open = io.open
 local _real_tostring = tostring
@@ -155,13 +154,6 @@ local function _new_proxy(name)
 end
 
 local function newproxy(addmetatable)
-    local ud = io.tmpfile and io.tmpfile()
-    if ud then
-        if addmetatable then
-            _real_setmetatable(ud, {})
-        end
-        return ud
-    end
     return _new_proxy("newproxy")
 end
 
@@ -527,8 +519,11 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
 
-        # Always use an empty table – the script has its own string table
-        table_literal = '{}'
+        if varargs and isinstance(varargs, list) and len(varargs) > 0:
+            parts = ['"' + s + '"' for s in varargs]
+            table_literal = '{' + ','.join(parts) + '}'
+        else:
+            table_literal = '{}'
 
         _write_driver(drv, out_dir, inp_path, table_literal)
 
