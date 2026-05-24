@@ -406,16 +406,16 @@ _real_setfenv(1, _G)
 local function _error_handler(err)
     local msg = _real_tostring(err)
     local traceback_str = _real_debug_traceback(msg, 2)
-    local errfile = _real_io_open(outdir .. "/error.txt", "w")
+    local errfile = _real_io_open(outdir .. "/error.txt", "a")
     if errfile then
-        errfile:write(traceback_str)
+        errfile:write("FULL_TRACEBACK:\n" .. traceback_str .. "\n")
         errfile:close()
     end
     return traceback_str
 end
 
 local function _write_return_value(value)
-    local f = _real_io_open(outdir .. "/return_value.lua", "w")
+    local f = _real_io_open(outdir .. "/return_value.lua", "wb")
     if not f then return end
     if _real_type(value) == "string" then
         f:write(value)
@@ -431,9 +431,9 @@ end
 local function _run_input()
     local f, err = _real_loadfile(inpath)
     if not f then
-        local errfile = _real_io_open(outdir .. "/error.txt", "w")
+        local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
-            errfile:write("LOADFILE_ERROR: " .. _real_tostring(err))
+            errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\n")
             errfile:close()
         end
         return
@@ -463,11 +463,17 @@ local function _run_input()
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then
-                errfile:write("\nVM_CRASH: " .. _real_tostring(run_result))
+                errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\n")
+                errfile:write("VM_TRACEBACK:\n" .. _real_debug_traceback(run_result, 2) .. "\n")
                 errfile:close()
             end
         else
             _write_return_value(run_result)
+            local rvf = _real_io_open(outdir .. "/diag.txt", "a")
+            if rvf then
+                rvf:write("Return value written to return_value.lua\n")
+                rvf:close()
+            end
         end
         return run_result
     end, _error_handler)
@@ -475,7 +481,7 @@ local function _run_input()
     if not ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
-            errfile:write("\nEXECUTION_ERROR: " .. _real_tostring(result))
+            errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\n")
             errfile:close()
         end
     end
