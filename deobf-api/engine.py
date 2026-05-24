@@ -4,6 +4,7 @@ from transformers import (
     XORStringDecoder, NumberArrayDecoder, StandardBase64Decoder,
     StringPatternExtractor, BytecodeHarvester
 )
+from sandbox import execute_sandbox
 from lune_executor import execute_and_capture
 from bytecode_analyzer import BytecodeAnalyzer
 from string_decoders import MultiStrategyStringDecoder
@@ -66,18 +67,64 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        result = self._static_wearedevs_extract(source, diags)
-        if result:
-            if isinstance(result, bytes):
-                trace.append({'stage': 'static_extract', 'bytecode_size': len(result)})
-                dc, err = self._run_unluac(result)
-                if dc and self._is_valid_lua(dc):
-                    return self._beautify(dc), 'static_unluac', f'Decompiled ({len(dc)} chars)', trace
-                if err:
-                    reasons['unluac'] = err
-                return base64.b64encode(result).decode('ascii'), 'bytecode', f'Bytecode ({len(result)}B)', trace
-            else:
-                return self._beautify(result), 'static_source', f'Source recovered ({len(result)} chars)', trace
+        string_table = self._decode_string_table(source, diags)
+        if string_table:
+            diags.append(f"R table: {len(string_table)} strings")
+            layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+            trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+            if diag:
+                reasons['sandbox'] = diag[:2000]
+
+            if layers:
+                for i, item in enumerate(layers):
+                    if isinstance(item, bytes) and len(item) >= 12:
+                        text = None
+                        try:
+                            text = item.decode('utf-8')
+                        except:
+                            pass
+                        if text and self._is_valid_lua(text):
+                            return self._beautify(text), 'sandbox_source', f'Layer {i} source captured', trace
+                        bc = self.bytecode_harvester.extract(item)
+                        if bc:
+                            dc, err = self._run_unluac(bc)
+                            if dc and self._is_valid_lua(dc):
+                                return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
+                    if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
+                        return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
+
+            if not layers:
+                result = self._static_wearedevs_extract(source, diags, string_table)
+                if result:
+                    if isinstance(result, bytes):
+                        dc, err = self._run_unluac(result)
+                        if dc and self._is_valid_lua(dc):
+                            return self._beautify(dc), 'static_unluac', f'Static decompile ({len(dc)} chars)', trace
+                        return base64.b64encode(result).decode('ascii'), 'bytecode', f'Bytecode ({len(result)}B)', trace
+                    else:
+                        return self._beautify(result), 'static_source', f'Static source ({len(result)} chars)', trace
+        else:
+            layers, caps, diag = execute_sandbox(source, timeout=120)
+            trace.append({'stage': 'sandbox', 'layers': len(layers)})
+            if diag:
+                reasons['sandbox'] = diag[:2000]
+            if layers:
+                for i, item in enumerate(layers):
+                    if isinstance(item, bytes) and len(item) >= 12:
+                        text = None
+                        try:
+                            text = item.decode('utf-8')
+                        except:
+                            pass
+                        if text and self._is_valid_lua(text):
+                            return self._beautify(text), 'sandbox_source', f'Layer {i} source captured', trace
+                        bc = self.bytecode_harvester.extract(item)
+                        if bc:
+                            dc, err = self._run_unluac(bc)
+                            if dc and self._is_valid_lua(dc):
+                                return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
+                    if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
+                        return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
 
         for lifter in self.lifters:
             try:
@@ -115,7 +162,17 @@ class DeobfEngine:
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
-    def _static_wearedevs_extract(self, source, diags):
+    def _decode_string_table(self, source, diags):
+        m = re.search(r'local R=\{([^}]+)\}', source)
+        if not m:
+            return None
+        body = m.group(1)
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+        if len(strings) < 10:
+            return None
+        return strings
+
+    def _static_wearedevs_extract(self, source, diags, string_table=None):
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("no R table")
@@ -139,11 +196,14 @@ class DeobfEngine:
                     hi_idx -= 1
             decoded = []
             for s in working:
-                if not s: continue
+                if not s:
+                    continue
                 raw = self._lua_escapes_to_bytes(s)
-                if not raw: continue
+                if not raw:
+                    continue
                 dec = self._decode_custom_b64(raw, b64_rev)
-                if dec: decoded.append(dec)
+                if dec:
+                    decoded.append(dec)
             if not decoded:
                 return None
             combined = b''.join(decoded)
@@ -167,9 +227,11 @@ class DeobfEngine:
             return None
 
         result = try_decode(shuffle, "orig")
-        if result: return result
+        if result:
+            return result
         result = try_decode(list(reversed(shuffle)), "rev")
-        if result: return result
+        if result:
+            return result
         return None
 
     @staticmethod
@@ -185,41 +247,25 @@ class DeobfEngine:
                 return True
         return False
 
-    # --------------- Beautification for minified Lua ---------------
     def _beautify(self, code):
-        # First, try luaparser
         try:
             from luaparser import ast
             return ast.to_lua_source(ast.parse(code))
         except:
             pass
-
-        # Clean non-printable garbage (keep printable ASCII, newline, tab)
         cleaned = []
         for ch in code:
             if ch.isprintable() or ch in '\n\r\t':
                 cleaned.append(ch)
         code = ''.join(cleaned)
-
-        # If empty or tiny, return as-is
         if len(code) < 5:
             return code
-
-        # Token-based formatting for minified Lua
-        # Insert a newline before common keywords
         keywords = r'\b(function|local|if|for|while|repeat|return|end|else|elseif|until|do|then)\b'
-        # Add newline before each keyword
         code = re.sub(keywords, r'\n\1', code)
-
-        # Insert space after commas and semicolons
         code = re.sub(r',([^\s])', r', \1', code)
         code = re.sub(r';([^\s])', r'; \1', code)
-
-        # Insert space around operators if adjacent to identifiers
         code = re.sub(r'(\w)([=+\-*/<>])', r'\1 \2', code)
         code = re.sub(r'([=+\-*/<>])(\w)', r'\1 \2', code)
-
-        # Indent based on keywords
         lines = code.split('\n')
         out = []
         indent = 0
@@ -227,19 +273,17 @@ class DeobfEngine:
             stripped = line.strip()
             if not stripped:
                 continue
-            # Decrease indent for closing keywords
             if any(stripped.startswith(w) for w in ('end', 'else', 'elseif', 'until')):
                 indent = max(0, indent - 1)
             out.append('    ' * indent + stripped)
-            # Increase indent for opening keywords
             if any(stripped.startswith(w) for w in ('function', 'local function', 'if', 'for', 'while', 'repeat', 'do')):
                 indent += 1
         return '\n'.join(out)
 
-    # --------------- Parsing helpers (unchanged) ---------------
     def _parse_n_table(self, source):
         m = re.search(r'local N=\{([^}]+)\}', source)
-        if not m: return {}
+        if not m:
+            return {}
         body = m.group(1)
         rev = {}
         for m2 in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
@@ -247,26 +291,31 @@ class DeobfEngine:
             val = self._safe_eval(m2.group(2).strip())
             if val is not None and 0 <= val < 64:
                 code = self._lua_escape_to_int(esc)
-                if code is not None: rev[val] = chr(code)
+                if code is not None:
+                    rev[val] = chr(code)
         for m2 in re.finditer(r'(?<![\["\'])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
             ch = m2.group(1)
             val = self._safe_eval(m2.group(2).strip())
-            if val is not None and 0 <= val < 64: rev[val] = ch
+            if val is not None and 0 <= val < 64:
+                rev[val] = ch
         std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         for i, ch in enumerate(std):
-            if i not in rev: rev[i] = ch
+            if i not in rev:
+                rev[i] = ch
         return rev
 
     def _parse_shuffle_ranges(self, source):
         m = re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\s*(\{.+?\})\s*\)', source)
-        if not m: return []
+        if not m:
+            return []
         outer = m.group(1)
         inner = re.findall(r'\{([-\d()+\-*/\s]+)[;,]([-\d()+\-*/\s]+)\}', outer)
         ranges = []
         for e1, e2 in inner:
             lo = self._safe_eval(e1.strip())
             hi = self._safe_eval(e2.strip())
-            if lo is not None and hi is not None: ranges.append((lo, hi))
+            if lo is not None and hi is not None:
+                ranges.append((lo, hi))
         return ranges
 
     @staticmethod
@@ -274,15 +323,19 @@ class DeobfEngine:
         result = bytearray()
         i = 0
         while i < len(s):
-            if s[i] == '\\' and i+1 < len(s) and s[i+1].isdigit():
-                j = i+1
-                while j < len(s) and s[j].isdigit() and j-i < 4: j += 1
+            if s[i] == '\\' and i + 1 < len(s) and s[i + 1].isdigit():
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - i < 4:
+                    j += 1
                 try:
-                    v = int(s[i+1:j])
-                    if 0 <= v <= 255: result.append(v)
-                except: pass
+                    v = int(s[i + 1:j])
+                    if 0 <= v <= 255:
+                        result.append(v)
+                except:
+                    pass
                 i = j
-            else: i += 1
+            else:
+                i += 1
         return bytes(result)
 
     @staticmethod
@@ -293,13 +346,15 @@ class DeobfEngine:
 
     @staticmethod
     def _decode_custom_b64(data, rev):
-        if not rev or len(data)==0: return None
-        fwd = {v:k for k,v in rev.items()}
+        if not rev or len(data) == 0:
+            return None
+        fwd = {v: k for k, v in rev.items()}
         buf, bits, out = 0, 0, bytearray()
         for b in data:
             ch = chr(b) if b < 256 else ''
             if ch not in fwd:
-                if b == ord('='): break
+                if b == ord('='):
+                    break
                 continue
             buf = (buf << 6) | fwd[ch]
             bits += 6
@@ -310,51 +365,71 @@ class DeobfEngine:
 
     @staticmethod
     def _safe_eval(expr):
-        expr = expr.replace(' ','')
-        if not expr or not re.match(r'^[\d+\-*/()]+$', expr): return None
-        try: return eval(expr)
-        except: return None
+        expr = expr.replace(' ', '')
+        if not expr or not re.match(r'^[\d+\-*/()]+$', expr):
+            return None
+        try:
+            return eval(expr)
+        except:
+            return None
 
     def _run_lune(self, source):
         try:
-            try: loop = asyncio.get_event_loop()
-            except: loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            try:
+                loop = asyncio.get_event_loop()
+            except:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             return loop.run_until_complete(execute_and_capture(source))
-        except: return None, {}
+        except:
+            return None, {}
 
     def _run_unluac(self, bytecode):
-        if not self._java_available: return None, "no java"
-        if not os.path.isfile(self.unluac_path): self._ensure_unluac_jar()
-        if not os.path.isfile(self.unluac_path): return None, "no unluac.jar"
+        if not self._java_available:
+            return None, "no java"
+        if not os.path.isfile(self.unluac_path):
+            self._ensure_unluac_jar()
+        if not os.path.isfile(self.unluac_path):
+            return None, "no unluac.jar"
         with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
             tmp.write(bytecode)
             tmp_path = tmp.name
         try:
-            r = subprocess.run(['java','-jar',self.unluac_path,'--rawstring',tmp_path], capture_output=True, text=True, timeout=30)
-            if r.returncode==0 and r.stdout.strip(): return r.stdout, None
+            r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout, None
             if r.stderr and 'version' in r.stderr.lower():
-                r2 = subprocess.run(['java','-jar',self.unluac_path,tmp_path], capture_output=True, text=True, timeout=30)
-                if r2.returncode==0 and r2.stdout.strip(): return r2.stdout, None
+                r2 = subprocess.run(['java', '-jar', self.unluac_path, tmp_path], capture_output=True, text=True, timeout=30)
+                if r2.returncode == 0 and r2.stdout.strip():
+                    return r2.stdout, None
                 return None, r2.stderr[:300]
             return None, r.stderr[:200] if r.stderr else 'no output'
-        except subprocess.TimeoutExpired: return None, "timeout"
-        except Exception as e: return None, str(e)
+        except subprocess.TimeoutExpired:
+            return None, "timeout"
+        except Exception as e:
+            return None, str(e)
         finally:
             if os.path.exists(tmp_path):
-                try: os.unlink(tmp_path)
-                except: pass
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
 
     def _ensure_unluac_jar(self):
         try:
             os.makedirs(os.path.dirname(self.unluac_path), exist_ok=True)
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
-        except: pass
+        except:
+            pass
 
     @staticmethod
     def _is_valid_lua(code):
-        if not code or len(code) < 50: return False
+        if not code or len(code) < 50:
+            return False
         words = set(re.findall(r'\b\w+\b', code[:10000]))
-        if len(words & LUA_KEYWORDS) < 5: return False
-        if not ('function' in words and 'end' in words or 'local' in words): return False
+        if len(words & LUA_KEYWORDS) < 5:
+            return False
+        if not ('function' in words and 'end' in words or 'local' in words):
+            return False
         printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
-        return (printable / max(len(code),1)) >= 0.70
+        return (printable / max(len(code), 1)) >= 0.70
