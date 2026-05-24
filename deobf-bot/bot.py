@@ -50,6 +50,9 @@ def _truncate(text, max_len):
         return text
     return text[:max_len-3] + '...'
 
+def _sanitize_diag(text):
+    return ''.join(c for c in text if c.isprintable() or c in '\n\t')
+
 async def run_deobf(raw_bytes, filename):
     if len(raw_bytes) > MAX_BYTES:
         return {
@@ -88,7 +91,7 @@ async def run_deobf(raw_bytes, filename):
         return {
             'embed': discord.Embed(title='Deobfuscation Failed', description=desc, color=0xe74c3c),
             'files': [],
-            'full_diag': data.get('diagnostic', '')
+            'full_diag': _sanitize_diag(data.get('diagnostic', ''))
         }
 
     result = data.get('result', '')
@@ -109,7 +112,8 @@ async def run_deobf(raw_bytes, filename):
     em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
 
     if diagnostic:
-        short_diag = diagnostic[:900] + ('...' if len(diagnostic) > 900 else '')
+        clean = _sanitize_diag(diagnostic)
+        short_diag = clean[:900] + ('...' if len(clean) > 900 else '')
         em.add_field(name='Diagnostic', value=f'```\n{short_diag}\n```', inline=False)
 
     if trace:
@@ -130,7 +134,6 @@ async def run_deobf(raw_bytes, filename):
 
     return {'embed': em, 'files': files, 'full_diag': full_diag}
 
-# Store last result per channel for !fulldiag
 last_results = {}
 
 @bot.command(name='deobf')
@@ -158,7 +161,6 @@ async def prefix_deobf(ctx):
     msg = await ctx.send(embed=discord.Embed(title='Deobfuscating...', description=f'Processing {filename} ({len(raw)} bytes)', color=0x3498db))
     res = await run_deobf(raw, filename)
 
-    # Store for !fulldiag
     last_results[ctx.channel.id] = res
 
     try:
