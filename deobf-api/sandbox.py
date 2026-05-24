@@ -402,7 +402,7 @@ end
 
 local diagfile = _real_io_open(outdir .. "/diag.txt", "w")
 if diagfile then
-    diagfile:write("Sandbox starting...\\n")
+    diagfile:write("Sandbox starting...\n")
     diagfile:close()
 end
 
@@ -413,7 +413,7 @@ local function _error_handler(err)
     local traceback_str = _real_debug_traceback(msg, 2)
     local errfile = _real_io_open(outdir .. "/error.txt", "a")
     if errfile then
-        errfile:write("FULL_TRACEBACK:\\n" .. traceback_str .. "\\n")
+        errfile:write("FULL_TRACEBACK:\n" .. traceback_str .. "\n")
         errfile:close()
     end
     return traceback_str
@@ -423,7 +423,7 @@ local function _run_input()
     local f, err = _real_loadfile(inpath)
     if not f then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\\n"); errfile:close() end
+        if errfile then errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\n"); errfile:close() end
         return
     end
     _real_setfenv(f, _G)
@@ -433,9 +433,8 @@ local function _run_input()
     end
 
     local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf then diagf:write("Calling chunk with 7 args...\\n"); diagf:close() end
+    if diagf then diagf:write("Calling chunk with 7 args...\n"); diagf:close() end
 
-    -- Call the chunk with 7 arguments, exactly like the original loader
     local chunk_ok, vmFunc = pcall(f,
         _real_getfenv(0) or _G,
         _real_unpack,
@@ -448,7 +447,7 @@ local function _run_input()
     if not chunk_ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
-            errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\\n")
+            errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\n")
             errfile:close()
         end
         return
@@ -456,14 +455,13 @@ local function _run_input()
 
     if _real_type(vmFunc) ~= "function" then
         local rvf = _real_io_open(outdir .. "/diag.txt", "a")
-        if rvf then rvf:write("Chunk returned non-function (type=" .. _real_type(vmFunc) .. ")\\n"); rvf:close() end
+        if rvf then rvf:write("Chunk returned non-function (type=" .. _real_type(vmFunc) .. ")\n"); rvf:close() end
         return
     end
 
     local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf2 then diagf2:write("Calling VM with args...\\n"); diagf2:close() end
+    if diagf2 then diagf2:write("Calling VM with args...\n"); diagf2:close() end
 
-    -- Call the VM with the same 7 arguments
     local ok, result = _real_xpcall(function()
         local run_ok, run_result = pcall(vmFunc,
             _real_getfenv(0) or _G,
@@ -477,23 +475,23 @@ local function _run_input()
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then
-                errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\\n")
-                errfile:write("VM_TRACEBACK:\\n" .. _real_debug_traceback(run_result, 2) .. "\\n")
+                errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\n")
+                errfile:write("VM_TRACEBACK:\n" .. _real_debug_traceback(run_result, 2) .. "\n")
                 errfile:close()
             end
         else
             local rvf = _real_io_open(outdir .. "/diag.txt", "a")
-            if rvf then rvf:write("VM completed successfully\\n"); rvf:close() end
+            if rvf then rvf:write("VM completed successfully\n"); rvf:close() end
         end
         return run_result
     end, _error_handler)
 
     if not ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\\n"); errfile:close() end
+        if errfile then errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\n"); errfile:close() end
     end
     local diagf3 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf3 then diagf3:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\\n"); diagf3:close() end
+    if diagf3 then diagf3:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n"); diagf3:close() end
 end
 
 _run_input()
@@ -524,7 +522,9 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         else:
             table_literal = '{}'
 
-        driver = RUNTIME_TEMPLATE.format(outdir=out_dir, inpath=inp_path, varargs_table=table_literal)
+        table_literal_escaped = table_literal.replace('{', '{{').replace('}', '}}')
+
+        driver = RUNTIME_TEMPLATE.format(outdir=out_dir, inpath=inp_path, varargs_table=table_literal_escaped)
 
         try:
             with open(drv, 'w', encoding='utf-8') as f:
