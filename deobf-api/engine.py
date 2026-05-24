@@ -22,6 +22,14 @@ LUA_KEYWORDS = {
     'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
 }
 
+# Substrings that strongly indicate Lua source even in a continuous blob
+LUA_SUBSTRINGS = [
+    'function', 'local', 'end', 'print', 'tostring', 'tonumber',
+    'setmetatable', 'getmetatable', 'loadstring', 'pcall', 'unpack',
+    'string.byte', 'math.floor', 'table.concat', 'error', 'pairs',
+    'ipairs', 'require', 'coroutine', 'rawset', 'rawget',
+]
+
 class DeobfEngine:
     def __init__(self):
         self.lifters = [
@@ -168,16 +176,18 @@ class DeobfEngine:
 
     @staticmethod
     def _is_likely_lua(text):
-        """Return True if text looks like Lua source code (very relaxed)."""
+        """Return True if text looks like Lua source code (relaxed)."""
         if not text or len(text) < 5:
             return False
         printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
         if (printable / len(text)) < 0.70:
             return False
-        words = set(re.findall(r'\b\w+\b', text[:5000]))
-        if len(words & LUA_KEYWORDS) < 1:
-            return False
-        return True
+        # Check for Lua keywords anywhere in the text (substring match)
+        lower_text = text.lower()
+        for kw in LUA_SUBSTRINGS:
+            if kw in lower_text:
+                return True
+        return False
 
     def _parse_n_table(self, source):
         m = re.search(r'local N=\{([^}]+)\}', source)
