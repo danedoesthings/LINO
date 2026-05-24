@@ -71,6 +71,20 @@ class DeobfEngine:
 
         if string_table:
             diags.append(f"R table: {len(string_table)} strings (var={var_name})")
+
+            # Try sandbox first with raw escaped strings
+            layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+            trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+            if diag:
+                reasons['sandbox'] = self._sanitize_diag(diag[:2000])
+
+            if layers:
+                for i, item in enumerate(layers):
+                    result = self._process_layer(item, i, string_table, var_name)
+                    if result:
+                        return result, 'sandbox_source', f'Layer {i} source captured', trace
+
+            # Sandbox failed — fall back to static extraction
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
                 if isinstance(result, bytes):
@@ -83,24 +97,11 @@ class DeobfEngine:
                     if string_table and var_name:
                         beautified = self._substitute_strings(beautified, string_table, var_name)
                     return beautified, 'static_source', f'Static source ({len(result)} chars)', trace
-
-            safe_for_sandbox = all(
-                all(c.isprintable() or c in '\n\r\t\\' for c in s)
-                for s in string_table
-            )
-            if safe_for_sandbox:
-                layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
-                trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-                if diag:
-                    reasons['sandbox'] = self._sanitize_diag(diag[:2000])
-                if layers:
-                    for i, item in enumerate(layers):
-                        result = self._process_layer(item, i, string_table, var_name)
-                        if result:
-                            return result, 'sandbox_source', f'Layer {i} source captured', trace
         else:
             layers, caps, diag = execute_sandbox(source, timeout=120)
             trace.append({'stage': 'sandbox', 'layers': len(layers)})
+            if diag:
+                reasons['sandbox'] = self._sanitize_diag(diag[:2000])
             if layers:
                 for i, item in enumerate(layers):
                     result = self._process_layer(item, i, None, None)
