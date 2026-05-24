@@ -68,8 +68,19 @@ class DeobfEngine:
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
         string_table, var_name = self._decode_string_table(source, diags)
-        if string_table:
-            diags.append(f"R table: {len(string_table)} strings (var={var_name})")
+
+        layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table if string_table else None)
+        trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+        if diag:
+            reasons['sandbox'] = self._sanitize_diag(diag[:2000])
+
+        if layers:
+            for i, item in enumerate(layers):
+                result = self._process_layer(item, i, string_table, var_name)
+                if result:
+                    return result, 'sandbox_source', f'Layer {i} source captured', trace
+
+        if string_table and not layers:
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
                 if isinstance(result, bytes):
@@ -82,17 +93,6 @@ class DeobfEngine:
                     if string_table and var_name:
                         beautified = self._substitute_strings(beautified, string_table, var_name)
                     return beautified, 'static_source', f'Static source ({len(result)} chars)', trace
-
-        layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table if string_table else None)
-        trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag:
-            reasons['sandbox'] = self._sanitize_diag(diag[:2000])
-
-        if layers:
-            for i, item in enumerate(layers):
-                result = self._process_layer(item, i, string_table, var_name)
-                if result:
-                    return result, 'sandbox_source', f'Layer {i} source captured', trace
 
         for lifter in self.lifters:
             try:
