@@ -1,6 +1,5 @@
 local outdir = "OUTDIR_PLACEHOLDER"
 local inpath = "INPATH_PLACEHOLDER"
-local varargs_embedded = {{VARARGS_TABLE}}
 
 local _real_io_open = io.open
 local _real_tostring = tostring
@@ -414,49 +413,28 @@ local function _error_handler(err)
     return traceback_str
 end
 
-local function _write_return_value(value)
-    local f = _real_io_open(outdir .. "/return_value.lua", "wb")
-    if not f then return end
-    if _real_type(value) == "string" then
-        f:write(value)
-    elseif _real_type(value) == "function" then
-        local bc = _orig_string_dump(value, true)
-        if bc then
-            f:write(bc)
-        end
-    end
-    f:close()
-end
-
 local function _run_input()
     local f, err = _real_loadfile(inpath)
     if not f then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then
-            errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\n")
-            errfile:close()
-        end
+        if errfile then errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\n"); errfile:close() end
         return
     end
     _real_setfenv(f, _G)
 
-    if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
-        varargs_embedded = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
-        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf then
-            diagf:write("Varargs invalid, using proxy\n")
-            diagf:close()
-        end
-    else
-        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf then
-            diagf:write("Varargs embedded: " .. _real_tostring(#varargs_embedded) .. " strings\n")
-            diagf:close()
-        end
-    end
+    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf then diagf:write("Calling chunk with 7 args...\n"); diagf:close() end
 
     local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(f, varargs_embedded)
+        local run_ok, run_result = pcall(f,
+            _real_getfenv(0) or _G,
+            _real_unpack,
+            newproxy,
+            _real_setmetatable,
+            _real_getmetatable,
+            _real_select,
+            {}
+        )
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then
@@ -465,29 +443,18 @@ local function _run_input()
                 errfile:close()
             end
         else
-            _write_return_value(run_result)
             local rvf = _real_io_open(outdir .. "/diag.txt", "a")
-            if rvf then
-                rvf:write("Script returned, return_value.lua written\n")
-                rvf:close()
-            end
+            if rvf then rvf:write("Script completed successfully\n"); rvf:close() end
         end
         return run_result
     end, _error_handler)
 
     if not ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then
-            errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\n")
-            errfile:close()
-        end
+        if errfile then errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\n"); errfile:close() end
     end
-
-    local diagf4 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf4 then
-        diagf4:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
-        diagf4:close()
-    end
+    local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf2 then diagf2:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n"); diagf2:close() end
 end
 
 _run_input()
