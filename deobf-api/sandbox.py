@@ -102,89 +102,36 @@ end
 local bit32_real = _pure_bit32()
 local bit_real   = bit32_real
 
-local _proxy_mt = {{
-    __index = function(t, k)
-        if _real_type(k) == "number" then return 0 end
-        local child = _new_userdata(k)
-        _real_rawset(t, k, child)
-        return child
-    end,
-    __newindex = function(t, k, v) _real_rawset(t, k, v) end,
-    __call = function(t, ...)
-        local result = _new_userdata("call_result")
-        return result
-    end,
-    __add = function() return 0 end,
-    __sub = function() return 0 end,
-    __mul = function() return 0 end,
-    __div = function() return 1 end,
-    __mod = function() return 0 end,
-    __pow = function() return 0 end,
-    __unm = function() return 0 end,
-    __concat = function(a, b) return _real_tostring(a) .. _real_tostring(b) end,
-    __eq = function() return false end,
-    __lt = function() return false end,
-    __le = function() return false end,
-    __tostring = function(t) return _real_tostring(_real_rawget(t, "_name") or "proxy") end,
-    __len = function() return 0 end,
-}}
-
-function _new_userdata(name)
+local function _new_userdata()
     local ud = _real_newproxy(true)
-    _real_rawset(ud, "_name", name or "ud")
-    _real_setmetatable(ud, _proxy_mt)
+    local mt = {{
+        __index = function(t, k)
+            if _real_type(k) == "number" then return 0 end
+            return _new_userdata()
+        end,
+        __newindex = function() end,
+        __call = function(t, ...)
+            return _new_userdata()
+        end,
+        __add = function() return 0 end,
+        __sub = function() return 0 end,
+        __mul = function() return 0 end,
+        __div = function() return 1 end,
+        __mod = function() return 0 end,
+        __pow = function() return 0 end,
+        __unm = function() return 0 end,
+        __concat = function(a, b) return _real_tostring(a) .. _real_tostring(b) end,
+        __eq = function() return false end,
+        __lt = function() return false end,
+        __le = function() return false end,
+        __tostring = function() return "userdata" end,
+        __len = function() return 0 end,
+    }}
+    _real_setmetatable(ud, mt)
     return ud
 end
 
-local _players_service = _new_userdata("Players")
-local _local_player = {{
-    UserId = 1,
-    Name = "Player",
-    DisplayName = "Player",
-    Character = _new_userdata("Character"),
-    Backpack = _new_userdata("Backpack"),
-    PlayerGui = _new_userdata("PlayerGui"),
-    PlayerScripts = _new_userdata("PlayerScripts"),
-    Team = nil,
-    AccountAge = 365,
-    MembershipType = _new_userdata("MembershipType"),
-}}
-_players_service.LocalPlayer = _local_player
-_players_service.GetPlayers = function() return {{ _local_player }} end
-_players_service.GetPlayerByUserId = function() return _local_player end
-
-local _game = _new_userdata("game")
-_real_rawset(_game, "GetService", function(self, name)
-    local svc = _new_userdata("Service:" .. _real_tostring(name))
-    if name == "Players" then return _players_service end
-    return svc
-end)
-_real_rawset(_game, "Players", _players_service)
-_real_rawset(_game, "Workspace", _new_userdata("Workspace"))
-_real_rawset(_game, "ReplicatedStorage", _new_userdata("ReplicatedStorage"))
-_real_rawset(_game, "ServerStorage", _new_userdata("ServerStorage"))
-_real_rawset(_game, "ServerScriptService", _new_userdata("ServerScriptService"))
-_real_rawset(_game, "Lighting", _new_userdata("Lighting"))
-_real_rawset(_game, "StarterGui", _new_userdata("StarterGui"))
-_real_rawset(_game, "StarterPack", _new_userdata("StarterPack"))
-_real_rawset(_game, "StarterPlayer", _new_userdata("StarterPlayer"))
-_real_rawset(_game, "PlaceId", 1)
-_real_rawset(_game, "JobId", "00000000-0000-0000-0000-000000000000")
-_real_rawset(_game, "CreatorId", 0)
-_real_rawset(_game, "CreatorType", _new_userdata("CreatorType"))
-_real_rawset(_game, "IsLoaded", function() return true end)
-
-game = _game
-workspace = _new_userdata("Workspace")
-script = _new_userdata("script")
-
-local sandbox_env = {{
-    game = _game,
-    workspace = workspace,
-    script = script,
-    shared = {{}},
-    _G = nil,
-    _VERSION = "Lua 5.1",
+local _core_funcs = {{
     print = function(...)
         local args = {{...}}
         local parts = {{}}
@@ -218,8 +165,7 @@ local sandbox_env = {{
     rawset = _real_rawset,
     setmetatable = _real_setmetatable,
     getmetatable = function(t)
-        if t == sandbox_env or t == _G then return nil end
-        return _real_getmetatable(t)
+        return nil
     end,
     select = _real_select,
     unpack = _real_unpack,
@@ -244,45 +190,37 @@ local sandbox_env = {{
     setfenv = function(fn, env)
         return fn
     end,
-    Instance = _new_userdata("Instance"),
-    Vector3 = _new_userdata("Vector3"),
-    Vector2 = _new_userdata("Vector2"),
-    CFrame = _new_userdata("CFrame"),
-    Color3 = _new_userdata("Color3"),
-    BrickColor = _new_userdata("BrickColor"),
-    UDim2 = _new_userdata("UDim2"),
-    UDim = _new_userdata("UDim"),
-    Ray = _new_userdata("Ray"),
-    Region3 = _new_userdata("Region3"),
-    TweenInfo = _new_userdata("TweenInfo"),
-    NumberRange = _new_userdata("NumberRange"),
-    NumberSequence = _new_userdata("NumberSequence"),
-    NumberSequenceKeypoint = _new_userdata("NumberSequenceKeypoint"),
-    ColorSequence = _new_userdata("ColorSequence"),
-    ColorSequenceKeypoint = _new_userdata("ColorSequenceKeypoint"),
-    Enum = _new_userdata("Enum"),
-    Axes = _new_userdata("Axes"),
-    Faces = _new_userdata("Faces"),
-    Rect = _new_userdata("Rect"),
-    PathWaypoint = _new_userdata("PathWaypoint"),
-    PhysicalProperties = _new_userdata("PhysicalProperties"),
-    Random = _new_userdata("Random"),
-    RaycastParams = _new_userdata("RaycastParams"),
-    CatalogSearchParams = _new_userdata("CatalogSearchParams"),
-    DateTime = _new_userdata("DateTime"),
-    DebuggerManager = _new_userdata("DebuggerManager"),
-    DockWidgetPluginGuiInfo = _new_userdata("DockWidgetPluginGuiInfo"),
-    OverlapParams = _new_userdata("OverlapParams"),
-    plugin = _new_userdata("plugin"),
-    stats = _new_userdata("stats"),
-    settings = _new_userdata("settings"),
-    UserSettings = _new_userdata("UserSettings"),
     require = function(id)
-        return _new_userdata("require:" .. _real_tostring(id))
+        return _new_userdata()
     end,
 }}
 
+local sandbox_env = {{}}
+local _env_mt = {{
+    __index = function(t, k)
+        local v = _core_funcs[k]
+        if v ~= nil then return v end
+        if _real_type(k) == "string" then
+            return _new_userdata()
+        end
+        return nil
+    end,
+    __newindex = function(t, k, v)
+        _real_rawset(t, k, v)
+    end,
+}}
+_real_setmetatable(sandbox_env, _env_mt)
+
 sandbox_env._G = sandbox_env
+sandbox_env.game = _new_userdata()
+sandbox_env.workspace = _new_userdata()
+sandbox_env.script = _new_userdata()
+sandbox_env.shared = {{}}
+sandbox_env._VERSION = "Lua 5.1"
+
+game = sandbox_env.game
+workspace = sandbox_env.workspace
+script = sandbox_env.script
 
 debug = nil
 
