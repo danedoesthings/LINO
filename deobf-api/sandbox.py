@@ -3,6 +3,9 @@ import os, sys, re, subprocess, tempfile, shutil, traceback
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+def _lua_escape(s):
+    return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\0', '\\0')
+
 RUNTIME = r'''local outdir = "{outdir}"
 local inpath = "{inpath}"
 local varargs_embedded = {varargs_table}
@@ -27,25 +30,8 @@ local _real_next = next
 local _real_table_concat = table.concat
 local _real_string_byte = string.byte
 local _real_math_floor = math.floor
-local _real_math_random = math.random
-local _real_math_randomseed = math.randomseed
 
-local _real_G = _real_getfenv(0) or _G
-_real_rawset(_real_G, "ipairs", _real_ipairs)
-_real_rawset(_real_G, "pairs", _real_pairs)
-_real_rawset(_real_G, "next", _real_next)
-_real_rawset(_real_G, "tostring", _real_tostring)
-_real_rawset(_real_G, "type", _real_type)
-_real_rawset(_real_G, "unpack", _real_unpack)
-_real_rawset(_real_G, "select", _real_select)
-_real_rawset(_real_G, "setmetatable", _real_setmetatable)
-_real_rawset(_real_G, "getmetatable", _real_getmetatable)
-_real_rawset(_real_G, "rawget", _real_rawget)
-_real_rawset(_real_G, "rawset", _real_rawset)
-_real_rawset(_real_G, "pcall", pcall)
-_real_rawset(_real_G, "xpcall", _real_xpcall)
-_real_rawset(_real_G, "error", error)
-_real_rawset(_real_G, "assert", assert)
+math.randomseed(0)
 
 local function _pure_bit32()
     local bit = {{}}
@@ -203,14 +189,13 @@ _real_rawset(_game, "IsLoaded", function() return true end)
 game = _game
 workspace = _new_proxy("Workspace")
 script = _new_proxy("script")
-_G = {{}}
 
-local _safe_globals = {{
+local sandbox_env = {{
     game = _game,
     workspace = _new_proxy("Workspace"),
     script = _new_proxy("script"),
     shared = {{}},
-    _G = {{}},
+    _G = nil,
     _VERSION = "Lua 5.1",
     print = function(...)
         local args = {{...}}
@@ -231,33 +216,10 @@ local _safe_globals = {{
             capfile:close()
         end
     end,
-    error = function(msg, level)
-        local errfile = _real_io_open(outdir .. "/error.txt", "w")
-        if errfile then
-            errfile:write(_real_tostring(msg))
-            errfile:close()
-        end
-        error(msg, level or 0)
-    end,
-    assert = function(v, msg)
-        if not v then
-            local errfile = _real_io_open(outdir .. "/error.txt", "w")
-            if errfile then
-                errfile:write(_real_tostring(msg or "assertion failed"))
-                errfile:close()
-            end
-        end
-        return v, msg
-    end,
-    pcall = function(f, ...)
-        local args = {{...}}
-        local results = {{ pcall(f, _real_unpack(args)) }}
-        return _real_unpack(results)
-    end,
-    xpcall = function(f, errhandler, ...)
-        local args = {{...}}
-        return _real_xpcall(function() return f(_real_unpack(args)) end, errhandler)
-    end,
+    error = error,
+    assert = assert,
+    pcall = pcall,
+    xpcall = _real_xpcall,
     type = _real_type,
     tostring = _real_tostring,
     tonumber = tonumber,
@@ -267,7 +229,10 @@ local _safe_globals = {{
     rawget = _real_rawget,
     rawset = _real_rawset,
     setmetatable = _real_setmetatable,
-    getmetatable = _real_getmetatable,
+    getmetatable = function(t)
+        if t == sandbox_env or t == _G then return nil end
+        return _real_getmetatable(t)
+    end,
     select = _real_select,
     unpack = _real_unpack,
     string = string,
@@ -285,6 +250,7 @@ local _safe_globals = {{
     delay = function(t, f) pcall(f) end,
     task = {{ wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }},
     newproxy = newproxy,
+    getfenv = function() return sandbox_env end,
     Instance = _new_proxy("Instance"),
     Vector3 = _new_proxy("Vector3"),
     Vector2 = _new_proxy("Vector2"),
@@ -323,38 +289,9 @@ local _safe_globals = {{
     end,
 }}
 
-local _env_mt = {{
-    __index = function(t, k)
-        local v = _safe_globals[k]
-        if v ~= nil then return v end
-        if _real_type(k) == "string" then
-            return _new_proxy(k)
-        end
-        return nil
-    end,
-    __newindex = function(t, k, v)
-        _real_rawset(t, k, v)
-    end,
-}}
+sandbox_env._G = sandbox_env
 
-_real_setmetatable(_G, _env_mt)
-_real_rawset(_G, "ipairs", _real_ipairs)
-_real_rawset(_G, "pairs", _real_pairs)
-_real_rawset(_G, "next", _real_next)
-_real_rawset(_G, "tostring", _real_tostring)
-_real_rawset(_G, "type", _real_type)
-_real_rawset(_G, "unpack", _real_unpack)
-_real_rawset(_G, "select", _real_select)
-_real_rawset(_G, "setmetatable", _real_setmetatable)
-_real_rawset(_G, "getmetatable", _real_getmetatable)
-_real_rawset(_G, "rawget", _real_rawget)
-_real_rawset(_G, "rawset", _real_rawset)
-_real_rawset(_G, "pcall", pcall)
-_real_rawset(_G, "xpcall", _real_xpcall)
-_real_rawset(_G, "error", error)
-_real_rawset(_G, "assert", assert)
-_real_rawset(_G, "_G", _G)
-_safe_globals._G = _G
+debug = nil
 
 local _capture_count = 0
 local _orig_loadstring = loadstring
@@ -376,7 +313,7 @@ loadstring = function(chunk, chunkname)
         end
         local fn, compile_err = _orig_loadstring(chunk, chunkname)
         if fn then
-            _real_setfenv(fn, _G)
+            _real_setfenv(fn, sandbox_env)
             return fn, nil
         end
         return function() end, compile_err
@@ -385,8 +322,8 @@ loadstring = function(chunk, chunkname)
 end
 
 load = loadstring
-_real_rawset(_G, "loadstring", loadstring)
-_real_rawset(_G, "load", load)
+sandbox_env.loadstring = loadstring
+sandbox_env.load = load
 
 local _orig_string_dump = string.dump
 string.dump = function(func, strip)
@@ -406,7 +343,7 @@ if diagfile then
     diagfile:close()
 end
 
-_real_setfenv(1, _G)
+_real_setfenv(1, sandbox_env)
 
 local function _error_handler(err)
     local msg = _real_tostring(err)
@@ -426,7 +363,7 @@ local function _run_input()
         if errfile then errfile:write("LOADFILE_ERROR: " .. _real_tostring(err) .. "\n"); errfile:close() end
         return
     end
-    _real_setfenv(f, _G)
+    _real_setfenv(f, sandbox_env)
 
     if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
         varargs_embedded = {{}}
@@ -453,7 +390,7 @@ local function _run_input()
 
     local ok, result = _real_xpcall(function()
         local run_ok, run_result = pcall(vmFunc,
-            _real_getfenv(0) or _G,
+            sandbox_env,
             _real_unpack,
             newproxy,
             _real_setmetatable,
@@ -495,7 +432,7 @@ def execute_sandbox(source, timeout=120, varargs=None):
             f.write(source.encode('utf-8', errors='replace'))
 
         if varargs and isinstance(varargs, list) and len(varargs) > 0:
-            parts = ['"' + s + '"' for s in varargs]
+            parts = ['"' + _lua_escape(s) + '"' for s in varargs]
             table_literal = '{' + ','.join(parts) + '}'
         else:
             table_literal = '{}'
