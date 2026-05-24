@@ -60,7 +60,14 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        layers, caps, diag = execute_sandbox(source, timeout=120)
+        string_table = self._decode_string_table(source, diags)
+        if string_table:
+            diags.append(f"found {len(string_table)} raw strings for sandbox")
+            layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+        else:
+            diags.append("no string table found, using empty varargs")
+            layers, caps, diag = execute_sandbox(source, timeout=120)
+
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
         if diag:
             reasons['sandbox'] = diag[:2000]
@@ -69,10 +76,8 @@ class DeobfEngine:
             for i, item in enumerate(layers):
                 if isinstance(item, bytes) and len(item) >= 12:
                     text = None
-                    try:
-                        text = item.decode('utf-8')
-                    except:
-                        pass
+                    try: text = item.decode('utf-8')
+                    except: pass
                     if text and self._is_valid_lua(text):
                         return self._beautify(text), 'sandbox_source', f'Layer {i} source captured', trace
                     bc = self.bytecode_harvester.extract(item)
@@ -101,8 +106,7 @@ class DeobfEngine:
                 text = lune_data.decode('utf-8', errors='replace')
                 if self._is_valid_lua(text):
                     return self._beautify(text), 'lune_capture', 'Lune source', trace
-            except:
-                pass
+            except: pass
 
         raw_bytecode = self.bytecode_harvester.deep_scan(source)
         if raw_bytecode:
@@ -111,109 +115,86 @@ class DeobfEngine:
                 return self._beautify(dc), 'deep_scan_unluac', 'Deep scan bytecode decompiled', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
-        if reasons:
-            parts.append('Info: ' + '; '.join(f"{k}: {v[:500]}" for k, v in reasons.items()))
+        if reasons: parts.append('Info: ' + '; '.join(f"{k}: {v[:500]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
+    def _decode_string_table(self, source, diags):
+        """Return the raw escaped strings from the obfuscated R table."""
+        m = re.search(r'local R=\{([^}]+)\}', source)
+        if not m:
+            return None
+        table_body = m.group(1)
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+        if len(strings) < 10:
+            return None
+        return strings
+
     def _extract_bytecode(self, data):
-        if isinstance(data, bytes):
-            return self.bytecode_harvester.extract(data)
+        if isinstance(data, bytes): return self.bytecode_harvester.extract(data)
         if isinstance(data, str):
-            if len(data) >= 12 and data[:4] == '\x1bLua':
-                return data.encode('latin-1')
+            if len(data) >= 12 and data[:4] == '\x1bLua': return data.encode('latin-1')
             return self.bytecode_harvester.extract(data.encode('latin-1'))
         return None
 
     def _run_lune(self, source):
         try:
-            try:
-                loop = asyncio.get_event_loop()
-            except:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            try: loop = asyncio.get_event_loop()
+            except: loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
             return loop.run_until_complete(execute_and_capture(source))
-        except:
-            return None, {}
+        except: return None, {}
 
     def _run_unluac(self, bytecode):
-        if not self._java_available:
-            return None, "java not installed"
-        if not os.path.isfile(self.unluac_path):
-            self._ensure_unluac_jar()
-        if not os.path.isfile(self.unluac_path):
-            return None, "unluac.jar missing"
+        if not self._java_available: return None, "java not installed"
+        if not os.path.isfile(self.unluac_path): self._ensure_unluac_jar()
+        if not os.path.isfile(self.unluac_path): return None, "unluac.jar missing"
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
-                tmp.write(bytecode)
-                tmp_path = tmp.name
-            result = subprocess.run(
-                ['java', '-jar', self.unluac_path, '--rawstring', tmp_path],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout, None
+                tmp.write(bytecode); tmp_path = tmp.name
+            result = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip(): return result.stdout, None
             if result.stderr and 'version' in result.stderr.lower():
-                result2 = subprocess.run(
-                    ['java', '-jar', self.unluac_path, tmp_path],
-                    capture_output=True, text=True, timeout=30
-                )
-                if result2.returncode == 0 and result2.stdout.strip():
-                    return result2.stdout, None
+                result2 = subprocess.run(['java', '-jar', self.unluac_path, tmp_path], capture_output=True, text=True, timeout=30)
+                if result2.returncode == 0 and result2.stdout.strip(): return result2.stdout, None
                 return None, f"unluac error: {result2.stderr[:300]}"
             return None, f"unluac exit {result.returncode}: {result.stderr[:200]}" if result.stderr else f'unluac exit {result.returncode}'
-        except subprocess.TimeoutExpired:
-            return None, "unluac timeout"
-        except Exception as e:
-            return None, str(e)
+        except subprocess.TimeoutExpired: return None, "unluac timeout"
+        except Exception as e: return None, str(e)
         finally:
             if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
+                try: os.unlink(tmp_path)
+                except: pass
 
     def _ensure_unluac_jar(self):
         try:
             jar_dir = os.path.dirname(self.unluac_path)
-            if jar_dir:
-                os.makedirs(jar_dir, exist_ok=True)
+            if jar_dir: os.makedirs(jar_dir, exist_ok=True)
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
-        except:
-            pass
+        except: pass
 
     @staticmethod
     def _is_valid_lua(code):
-        if not code or len(code) < 50:
-            return False
+        if not code or len(code) < 50: return False
         lines = code.split('\n')
         if len(lines) > 5:
             proxy_pattern = re.compile(r'^\s*[\w.]+ = [A-Z]\w+$')
-            if sum(1 for l in lines if proxy_pattern.match(l.strip())) > len(lines) * 0.4:
-                return False
+            if sum(1 for l in lines if proxy_pattern.match(l.strip())) > len(lines)*0.4: return False
         words = set(re.findall(r'\b\w+\b', code[:10000]))
-        if len(words & LUA_KEYWORDS) < 5:
-            return False
-        if not ('function' in words and 'end' in words or 'local' in words):
-            return False
+        if len(words & LUA_KEYWORDS) < 5: return False
+        if not ('function' in words and 'end' in words or 'local' in words): return False
         printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
-        return (printable / max(len(code), 1)) >= 0.70
+        return (printable / max(len(code),1)) >= 0.70
 
     def _beautify(self, code):
         try:
-            from luaparser import ast
-            return ast.to_lua_source(ast.parse(code))
+            from luaparser import ast; return ast.to_lua_source(ast.parse(code))
         except:
             out, ind = [], 0
             for raw in code.split('\n'):
                 line = raw.strip()
-                if not line:
-                    out.append('')
-                    continue
-                if any(line.startswith(w) for w in ('end', 'else', 'elseif', 'until')):
-                    ind = max(0, ind - 1)
-                out.append('    ' * ind + line)
-                if any(line.startswith(w) for w in ('if ', 'for ', 'while ', 'function ', 'local function ', 'do', 'repeat')) and not line.rstrip().endswith('end'):
-                    ind += 1
+                if not line: out.append(''); continue
+                if any(line.startswith(w) for w in ('end', 'else', 'elseif', 'until')): ind = max(0, ind-1)
+                out.append('    '*ind + line)
+                if any(line.startswith(w) for w in ('if ', 'for ', 'while ', 'function ', 'local function ', 'do', 'repeat')) and not line.rstrip().endswith('end'): ind += 1
             return '\n'.join(out)
