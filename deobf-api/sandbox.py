@@ -4,7 +4,7 @@ LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua')
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _safe_str(s):
-    return s.replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+    return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
 
 RUNTIME = r'''local outdir = "{outdir}"
 local inpath = "{inpath}"
@@ -318,7 +318,7 @@ local function _run_input()
     local diagf = _real_io_open(outdir .. "/diag.txt", "a")
     if diagf then diagf:write("Varargs: " .. _real_tostring(#varargs_embedded) .. " strings\n"); diagf:close() end
 
-    local chunk_ok, vmFunc = pcall(f, varargs_embedded)
+    local chunk_ok, vmFunc = pcall(f, _real_unpack(varargs_embedded))
     if not chunk_ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\n"); errfile:close() end
@@ -335,15 +335,7 @@ local function _run_input()
     if diagf2 then diagf2:write("Calling VM with args...\n"); diagf2:close() end
 
     local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(vmFunc,
-            sandbox_env,
-            _real_unpack,
-            _real_newproxy,
-            _real_setmetatable,
-            _real_getmetatable,
-            _real_select,
-            varargs_embedded
-        )
+        local run_ok, run_result = pcall(vmFunc)
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\n"); errfile:close() end
@@ -383,7 +375,7 @@ def execute_sandbox(source, timeout=120, varargs=None):
         else:
             table_literal = '{}'
 
-        driver = RUNTIME.replace('{outdir}', out_dir).replace('{inpath}', inp_path).replace('{varargs_table}', table_literal)
+        driver = RUNTIME.replace('{outdir}', out_dir).replace('{inpath}', inp_path).replace('{varargs_table}', table_literal).replace('{{', '{').replace('}}', '}')
 
         with open(drv, 'w', encoding='utf-8') as f:
             f.write(driver)
