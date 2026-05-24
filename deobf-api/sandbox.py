@@ -3,11 +3,14 @@ import os, sys, re, subprocess, tempfile, shutil, traceback
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Template uses simple placeholder {varargs_table} and no format()
-RUNTIME_TEMPLATE = '''local outdir = "{outdir}"
-local inpath = "{inpath}"
-local varargs_table = {varargs_table}
-
+def _write_driver(drv_path, out_dir, inp_path, varargs_table_literal):
+    """Write the Lua driver file directly, line by line, without any placeholder replacement."""
+    with open(drv_path, 'w', encoding='utf-8') as f:
+        f.write(f'local outdir = "{out_dir}"\n')
+        f.write(f'local inpath = "{inp_path}"\n')
+        f.write(f'local varargs_table = {varargs_table_literal}\n')
+        # Remainder of the runtime is a fixed, known-good Lua script
+        f.write(r'''
 local _real_io_open = io.open
 local _real_tostring = tostring
 local _real_debug_traceback = debug.traceback
@@ -503,7 +506,7 @@ local function _run_input()
 end
 
 _run_input()
-'''
+''')
 
 def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
     error_log, layers, caps, diag = [], [], [], ''
@@ -524,16 +527,10 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
 
-        # Build varargs table literal – always an empty table for this obfuscator
+        # Always use an empty table – the script has its own string table
         table_literal = '{}'
 
-        driver = RUNTIME_TEMPLATE.replace('{outdir}', out_dir).replace('{inpath}', inp_path).replace('{varargs_table}', table_literal)
-
-        try:
-            with open(drv, 'w', encoding='utf-8') as f:
-                f.write(driver)
-        except Exception as e:
-            return [], [], f'WRITE_DRIVER_ERROR: {e}'
+        _write_driver(drv, out_dir, inp_path, table_literal)
 
         env = os.environ.copy()
         env['LUA_PATH'] = os.path.join(APP_DIR, '?.lua') + ';' + env.get('LUA_PATH', '')
