@@ -70,6 +70,7 @@ class DeobfEngine:
         string_table, var_name = self._decode_string_table(source, diags)
 
         if string_table:
+            diags.append(f"R table: {len(string_table)} strings (var={var_name})")
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
                 if isinstance(result, bytes):
@@ -122,6 +123,20 @@ class DeobfEngine:
             except:
                 pass
 
+        lune_data, _ = self._run_lune(source)
+        if lune_data and isinstance(lune_data, bytes) and len(lune_data) >= 12:
+            bc = self.bytecode_harvester.extract(lune_data)
+            if bc:
+                dc, err = self._run_unluac(bc)
+                if dc and self._is_valid_lua(dc):
+                    return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
+
+        raw_bc = self.bytecode_harvester.deep_scan(source)
+        if raw_bc:
+            dc, err = self._run_unluac(raw_bc)
+            if dc and self._is_valid_lua(dc):
+                return self._beautify(dc), 'deep_scan_unluac', f'Deep scan ({len(dc)} chars)', trace
+
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
@@ -161,6 +176,7 @@ class DeobfEngine:
     def _substitute_strings(self, code, string_table, var_name='R'):
         if not string_table or not code:
             return code
+
         def replacer(m):
             try:
                 idx = int(m.group(1)) - 1
@@ -171,43 +187,11 @@ class DeobfEngine:
             except:
                 pass
             return m.group(0)
+
         code = re.sub(rf'\b{re.escape(var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', replacer, code)
         return code
 
-    # FIX 1: Use a balanced-brace extractor instead of [^}]+ regex,
-    # which failed entirely on string tables containing nested table values.
-    @staticmethod
-    def _extract_balanced_table(source, start):
-        """Extract the body of a Lua table starting at the '{' at position start."""
-        if start >= len(source) or source[start] != '{':
-            return None
-        depth = 0
-        in_str = False
-        str_char = None
-        i = start
-        while i < len(source):
-            c = source[i]
-            if in_str:
-                if c == '\\':
-                    i += 2
-                    continue
-                if c == str_char:
-                    in_str = False
-            else:
-                if c in ('"', "'"):
-                    in_str = True
-                    str_char = c
-                elif c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return source[start + 1:i]
-            i += 1
-        return None
-
     def _decode_string_table(self, source, diags):
-        # FIX 1 (continued): Use _extract_balanced_table instead of [^}]+
         m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source, re.DOTALL)
         if not m:
             return None, None
@@ -222,7 +206,6 @@ class DeobfEngine:
         return strings, var_name
 
     def _static_wearedevs_extract(self, source, diags, string_table=None, var_name=None):
-        # FIX 1 (continued): Same balanced-table fix here
         m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source, re.DOTALL)
         if not m:
             return None
@@ -284,6 +267,35 @@ class DeobfEngine:
         return None
 
     @staticmethod
+    def _extract_balanced_table(source, start):
+        if start >= len(source) or source[start] != '{':
+            return None
+        depth = 0
+        in_str = False
+        str_char = None
+        i = start
+        while i < len(source):
+            c = source[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == str_char:
+                    in_str = False
+            else:
+                if c in ('"', "'"):
+                    in_str = True
+                    str_char = c
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return source[start + 1:i]
+            i += 1
+        return None
+
+    @staticmethod
     def _has_lua_keywords(text):
         if not text or len(text) < 5:
             return False
@@ -291,9 +303,6 @@ class DeobfEngine:
         if (printable / len(text)) < 0.50:
             return False
         lower_text = text.lower()
-        # FIX 2: Threshold raised from 1 to 2 — a single keyword match
-        # caused binary garbage to pass as valid Lua. Require at least 2
-        # distinct keyword matches before treating the content as Lua source.
         count = 0
         for kw in LUA_SUBSTRINGS:
             if kw in lower_text:
@@ -305,6 +314,7 @@ class DeobfEngine:
     def _beautify(self, code):
         if not code or len(code) < 5:
             return code
+
         stylua = shutil.which('stylua')
         if stylua:
             try:
@@ -321,9 +331,8 @@ class DeobfEngine:
         if len(code) < 5:
             return code
 
-        # Protect string literals so keyword regex doesn't mangle their contents
         string_pattern = re.compile(
-            r"""(?:'[^']*')|(?:"[^"]*")|(?:\[=*\[.*?\]=*\])""",
+            r""" (?:'[^']*') | (?:"[^"]*") | (?:\[=*\[.*?\]=*\]) """,
             re.DOTALL | re.VERBOSE
         )
         placeholders = {}
@@ -338,18 +347,12 @@ class DeobfEngine:
 
         code = string_pattern.sub(replace_string, code)
 
-        # FIX 3: 'then' and 'do' are NOT given their own lines.
-        # The original code naively newlined ALL keywords including 'then' and
-        # 'do', which tore control-structure headers apart (e.g. "if x\nthen").
-        # Only true statement-starters and block-enders go on their own lines.
-        # 'then' and 'do' must remain on the same line as their opener so the
-        # indentation counter can correctly associate them with the opener.
+        code = re.sub(r'(?<![A-Za-z0-9_])local\s+function(?![A-Za-z0-9_])', '__LOCALFUNC__', code)
+
         stmt_keywords = [
             'function', 'local', 'if', 'for', 'while',
             'repeat', 'return', 'end', 'else', 'elseif', 'until',
         ]
-        # Protect 'local function' so the 'local' split doesn't orphan 'function'
-        code = re.sub(r'(?<![A-Za-z0-9_])local\s+function(?![A-Za-z0-9_])', '__LOCALFUNC__', code)
         for kw in stmt_keywords:
             code = re.sub(
                 rf'(?<![A-Za-z0-9_]){re.escape(kw)}(?![A-Za-z0-9_])',
@@ -358,26 +361,11 @@ class DeobfEngine:
             )
         code = code.replace('__LOCALFUNC__', '\nlocal function')
 
-        # Restore string literals before indentation pass
         for placeholder, original in placeholders.items():
             code = code.replace(placeholder, original)
 
         code = re.sub(r'\n\s*\n', '\n\n', code)
 
-        # FIX 4: Correct indentation counting.
-        # The original code counted every occurrence of 'function', 'if', 'for',
-        # 'while', 'repeat', 'do', 'then' as block openers — so "if x then"
-        # counted as +2 when it should be +1. The correct rule:
-        #
-        #   Block openers (indent increases AFTER the line):
-        #     'then', 'do', 'function', 'repeat'
-        #   Block closers (indent decreases BEFORE the line):
-        #     'end', 'until'
-        #   Mid-block markers (decrease before, increase after):
-        #     'else', 'elseif'
-        #
-        # 'if', 'for', 'while' are NOT openers by themselves — their companion
-        # 'then'/'do' on the same line is what opens the block.
         OPENER_PAT = re.compile(r'\b(then|do|repeat)\b|\bfunction\b')
         CLOSER_PAT = re.compile(r'\b(end|until)\b')
 
@@ -409,12 +397,6 @@ class DeobfEngine:
 
         return '\n'.join(out_lines)
 
-    # FIX 5: _parse_n_table no longer requires the variable to be named exactly
-    # 'N'. The original hardcoded `local N=` regex silently returned an empty
-    # map for any obfuscator that used a different variable name, causing every
-    # subsequent base64 decode to use the standard alphabet (almost always wrong).
-    # Now all short-named local tables are scanned and the one that contains
-    # base64-map-like entries (>= 30 mapped values) is used.
     def _parse_n_table(self, source):
         best_rev = {}
         for m in re.finditer(r'local\s+\w{1,4}\s*=\s*\{([^}]{10,})\}', source):
@@ -434,23 +416,14 @@ class DeobfEngine:
                     rev[val] = ch
             if len(rev) > len(best_rev):
                 best_rev = rev
-        # Fill any missing positions with standard base64 alphabet
         std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         for i, ch in enumerate(std):
             if i not in best_rev:
                 best_rev[i] = ch
         return best_rev
 
-    # FIX 6: _parse_shuffle_ranges had two problems:
-    #   (a) The outer regex used non-greedy .+? inside braces, stopping too early
-    #       on any obfuscated code with nested constructs.
-    #   (b) It required two loop variables (\w+,\w+) but many loops use a
-    #       single variable or underscore (_,v style).
-    # The fix uses a simpler, more targeted pattern that reliably captures the
-    # numeric pair arrays regardless of loop variable naming.
     def _parse_shuffle_ranges(self, source):
         ranges = []
-        # Pattern: ipairs({...}) where the table contains numeric pair sub-tables
         for m in re.finditer(r'ipairs\s*\(\s*\{', source):
             brace_pos = m.end() - 1
             body = self._extract_balanced_table(source, brace_pos)
@@ -466,11 +439,6 @@ class DeobfEngine:
                 return ranges
         return ranges
 
-    # FIX 7: _lua_escapes_to_bytes previously only handled \NNN decimal escapes
-    # and silently discarded all other escape sequences (\n, \t, \\, \", \x, etc.).
-    # Any string containing those escapes would produce truncated or wrong bytes,
-    # causing the base64 decode to fail or produce garbage. All standard Lua
-    # escape sequences are now handled correctly.
     @staticmethod
     def _lua_escapes_to_bytes(s):
         result = bytearray()
