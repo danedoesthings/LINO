@@ -62,13 +62,14 @@ class DeobfEngine:
 
         string_table = self._decode_string_table(source, diags)
         if string_table:
-            diags.append(f"decoded {len(string_table)} strings for sandbox")
+            diags.append(f"found {len(string_table)} raw strings for sandbox")
             layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
         else:
             layers, caps, diag = execute_sandbox(source, timeout=120)
 
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag: reasons['sandbox'] = diag[:2000]
+        if diag:
+            reasons['sandbox'] = diag[:2000]
 
         if layers:
             for i, item in enumerate(layers):
@@ -118,45 +119,15 @@ class DeobfEngine:
         return '', 'unable', reason, trace
 
     def _decode_string_table(self, source, diags):
+        """Return the raw escaped strings from the obfuscated R table, exactly as they appear."""
         m = re.search(r'local R=\{([^}]+)\}', source)
-        if not m: return None
+        if not m:
+            return None
         table_body = m.group(1)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
-        if len(strings) < 10: return None
-        result = []
-        for raw in strings:
-            decoded_bytes = self._decode_wearedevs_escapes(raw)
-            lua_literal = self._bytes_to_lua_literal(decoded_bytes)
-            result.append(lua_literal)
-        return result
-
-    @staticmethod
-    def _decode_wearedevs_escapes(s):
-        """Decode Lua backslash-NNN escape sequences into raw bytes."""
-        result = bytearray()
-        i = 0
-        while i < len(s):
-            if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
-                j = i + 1
-                while j < len(s) and s[j].isdigit() and j - i < 4:
-                    j += 1
-                try:
-                    val = int(s[i+1:j])
-                    if 0 <= val <= 255:
-                        result.append(val)
-                except ValueError:
-                    pass
-                i = j
-            else:
-                i += 1
-        return bytes(result)
-
-    @staticmethod
-    def _bytes_to_lua_literal(b):
-        parts = []
-        for byte in b:
-            parts.append(f'\\{byte:03d}')
-        return ''.join(parts)
+        if len(strings) < 10:
+            return None
+        return strings   # raw, unchanged
 
     def _extract_bytecode(self, data):
         if isinstance(data, bytes): return self.bytecode_harvester.extract(data)
