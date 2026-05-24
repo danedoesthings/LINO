@@ -60,8 +60,6 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        # Decode the string table, producing actual Lua string literals that will
-        # become the correct byte sequences when Lua parses them.
         string_table = self._decode_string_table(source, diags)
         if string_table:
             diags.append(f"decoded {len(string_table)} strings for sandbox")
@@ -70,8 +68,7 @@ class DeobfEngine:
             layers, caps, diag = execute_sandbox(source, timeout=120)
 
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag:
-            reasons['sandbox'] = diag[:2000]
+        if diag: reasons['sandbox'] = diag[:2000]
 
         if layers:
             for i, item in enumerate(layers):
@@ -121,28 +118,21 @@ class DeobfEngine:
         return '', 'unable', reason, trace
 
     def _decode_string_table(self, source, diags):
-        """Return a list of proper Lua string literals that, when parsed by Lua,
-        produce the exact byte sequences from the obfuscated R table."""
         m = re.search(r'local R=\{([^}]+)\}', source)
-        if not m:
-            return None
+        if not m: return None
         table_body = m.group(1)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
-        if len(strings) < 10:
-            return None
-
+        if len(strings) < 10: return None
         result = []
         for raw in strings:
-            # Decode the Lua escape sequences in Python
             decoded_bytes = self._decode_wearedevs_escapes(raw)
-            # Re-encode as a Lua string literal that will produce the same bytes
             lua_literal = self._bytes_to_lua_literal(decoded_bytes)
             result.append(lua_literal)
         return result
 
     @staticmethod
     def _decode_wearedevs_escapes(s):
-        """Decode Lua \NNN escape sequences into raw bytes."""
+        """Decode Lua backslash-NNN escape sequences into raw bytes."""
         result = bytearray()
         i = 0
         while i < len(s):
@@ -163,7 +153,6 @@ class DeobfEngine:
 
     @staticmethod
     def _bytes_to_lua_literal(b):
-        """Convert raw bytes to a Lua string literal using \ddd escapes."""
         parts = []
         for byte in b:
             parts.append(f'\\{byte:03d}')
