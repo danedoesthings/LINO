@@ -199,6 +199,63 @@ class DeobfEngine:
             return None, None
         return strings, var_name
 
+    def _static_wearedevs_extract(self, source, diags, string_table=None, var_name=None):
+        m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}', source, re.DOTALL)
+        if not m:
+            diags.append("no R table")
+            return None
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
+        if len(strings) < 10:
+            diags.append(f"R table too small ({len(strings)})")
+            return None
+
+        b64_rev = self._parse_n_table(source)
+        shuffle = self._parse_shuffle_ranges(source)
+        diags.append(f"R={len(strings)} N={len(b64_rev)} shuff={len(shuffle)}")
+
+        def try_decode(pairs, label):
+            working = list(strings)
+            for lo, hi in pairs:
+                lo_idx, hi_idx = lo - 1, hi - 1
+                while lo_idx < hi_idx:
+                    working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
+                    lo_idx += 1
+                    hi_idx -= 1
+            decoded = []
+            for s in working:
+                if not s: continue
+                raw = self._lua_escapes_to_bytes(s)
+                if not raw: continue
+                dec = self._decode_custom_b64(raw, b64_rev)
+                if dec: decoded.append(dec)
+            if not decoded: return None
+            combined = b''.join(decoded)
+            hex_pre = binascii.hexlify(combined[:16]).decode()
+
+            bc = self.bytecode_harvester.extract(combined)
+            if bc:
+                diags.append(f"bc ({len(bc)}B) [{label}]")
+                return bc
+
+            for enc in ('utf-8', 'latin-1'):
+                try:
+                    text = combined.decode(enc)
+                    if self._is_likely_lua(text):
+                        diags.append(f"source ({len(text)} chars) [{label}]")
+                        if string_table and var_name:
+                            text = self._substitute_strings(text, string_table, var_name)
+                        return self._beautify(text)
+                except: pass
+
+            diags.append(f"no bc/source [{label}] hex={hex_pre}")
+            return None
+
+        result = try_decode(shuffle, "orig")
+        if result: return result
+        result = try_decode(list(reversed(shuffle)), "rev")
+        if result: return result
+        return None
+
     @staticmethod
     def _is_likely_lua(text):
         if not text or len(text) < 5:
