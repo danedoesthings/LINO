@@ -1,6 +1,6 @@
 local outdir = "OUTDIR_PLACEHOLDER"
 local inpath = "INPATH_PLACEHOLDER"
-local varargs_embedded = VARARGS_PLACEHOLDER
+local varargs_path = "VARARGS_PATH_PLACEHOLDER"
 
 local _real_io_open = io.open
 local _real_tostring = tostring
@@ -440,18 +440,48 @@ local function _run_input()
     end
     _real_setfenv(f, _G)
 
-    if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
-        varargs_embedded = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
+    -- Load the varargs table from file
+    local varargs_table = nil
+    if varargs_path ~= nil and varargs_path ~= "VARARGS_PATH_PLACEHOLDER" and varargs_path ~= "nil" then
+        local chunk, load_err = _real_loadfile(varargs_path)
+        if chunk then
+            _real_setfenv(chunk, _G)
+            local ok, tbl = pcall(chunk)
+            if ok and _real_type(tbl) == "table" then
+                varargs_table = tbl
+            else
+                local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+                if diagf then
+                    diagf:write("Failed to load varargs: " .. _real_tostring(tbl) .. "\n")
+                    diagf:close()
+                end
+            end
+        else
+            local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+            if diagf then
+                diagf:write("Varargs file not loadable: " .. _real_tostring(load_err) .. "\n")
+                diagf:close()
+            end
+        end
     end
 
-    local diagf = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf then
-        diagf:write("Args loaded: " .. _real_tostring(#varargs_embedded) .. " strings\n")
-        diagf:close()
+    if varargs_table == nil then
+        varargs_table = _real_setmetatable({}, { __index = function(t,k) if _real_type(k) == "number" then return "" else return _real_rawget(t,k) or "" end end })
+        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+        if diagf then
+            diagf:write("Varargs not loaded, using proxy\n")
+            diagf:close()
+        end
+    else
+        local diagf = _real_io_open(outdir .. "/diag.txt", "a")
+        if diagf then
+            diagf:write("Varargs loaded: " .. _real_tostring(#varargs_table) .. " strings\n")
+            diagf:close()
+        end
     end
 
-    -- Step 1: Call the chunk with unpacked strings, get the VM function back
-    local chunk_ok, vmFunc = pcall(f, _real_unpack(varargs_embedded))
+    -- Step 1: Call the chunk with unpacked strings
+    local chunk_ok, vmFunc = pcall(f, _real_unpack(varargs_table))
     if not chunk_ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then
@@ -462,12 +492,12 @@ local function _run_input()
     end
 
     if _real_type(vmFunc) ~= "function" then
+        _write_return_value(vmFunc)
         local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
         if diagf2 then
-            diagf2:write("Chunk did not return a function (type=" .. _real_type(vmFunc) .. ")\n")
+            diagf2:write("Chunk returned non-function (type=" .. _real_type(vmFunc) .. ")\n")
             diagf2:close()
         end
-        _write_return_value(vmFunc)
         return
     end
 
@@ -477,16 +507,16 @@ local function _run_input()
         diagf3:close()
     end
 
-    -- Step 2: Call the VM function with the 7 required arguments
+    -- Step 2: Call VM function with 7 args
     local ok, result = _real_xpcall(function()
         local run_ok, run_result = pcall(vmFunc,
-            _real_getfenv(0) or _G,   -- environment
-            _real_unpack,              -- unpack
-            newproxy,                  -- newproxy
-            _real_setmetatable,        -- setmetatable
-            _real_getmetatable,        -- getmetatable
-            _real_select,              -- select
-            varargs_embedded           -- string table (already processed)
+            _real_getfenv(0) or _G,
+            _real_unpack,
+            newproxy,
+            _real_setmetatable,
+            _real_getmetatable,
+            _real_select,
+            varargs_table
         )
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
@@ -497,11 +527,6 @@ local function _run_input()
             end
         else
             _write_return_value(run_result)
-            local rvf = _real_io_open(outdir .. "/diag.txt", "a")
-            if rvf then
-                rvf:write("VM returned, return_value.lua written\n")
-                rvf:close()
-            end
         end
         return run_result
     end, _error_handler)
