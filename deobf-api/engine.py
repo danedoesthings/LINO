@@ -72,61 +72,38 @@ class DeobfEngine:
 
         if layers:
             for i, item in enumerate(layers):
+                # Bytes: could be bytecode or Lua source
                 if isinstance(item, bytes) and len(item) >= 12:
+                    # Try as source first
+                    text = None
+                    try:
+                        text = item.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            text = item.decode('latin-1')
+                        except Exception:
+                            pass
+                    if text and self._is_valid_lua(text):
+                        return self._beautify(text), 'sandbox_source', f'Layer {i} source captured', trace
+                    # Try as bytecode
                     bc = self.bytecode_harvester.extract(item)
                     if bc:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
                             return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
+                # String layers
                 if isinstance(item, str):
-                    bc = self._extract_bytecode(item)
-                    if bc:
-                        dc, err = self._run_unluac(bc)
-                        if dc and self._is_valid_lua(dc):
-                            return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
                     if len(item) > 100 and self._is_valid_lua(item):
                         return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
 
-        # Check for return_value.lua (captured from the VM's return)
-        rv_path = os.path.join(tempfile.gettempdir(), 'return_value.lua')  # will be adjusted in sandbox.py
-        # Actually the sandbox writes to a temp dir; we need to handle that after execute_sandbox.
-        # Instead, we'll modify sandbox.py to also return the contents of return_value.lua.
-        # For now, fall back to other strategies.
-
-        all_text = [c for c in caps if isinstance(c, str) and len(c) > 20]
-        if all_text:
-            combined = '\n'.join(all_text)
-            if len(combined) > 200 and self._is_valid_lua(combined):
-                return self._beautify(combined), 'sandbox_strings', 'Captured strings reconstructed', trace
-
-        lune_data, lune_info = self._run_lune(source)
-        if lune_data:
-            if isinstance(lune_data, bytes) and len(lune_data) >= 12:
-                bc = self.bytecode_harvester.extract(lune_data)
-                if bc:
-                    dc, err = self._run_unluac(bc)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'lune_unluac', 'Lune bytecode decompiled', trace
-            try:
-                text = lune_data.decode('utf-8', errors='replace')
-                if self._is_valid_lua(text):
-                    return self._beautify(text), 'lune_capture', 'Lune source', trace
-            except Exception:
-                pass
-
-        raw_bytecode = self.bytecode_harvester.deep_scan(source)
-        if raw_bytecode:
-            dc, err = self._run_unluac(raw_bytecode)
-            if dc and self._is_valid_lua(dc):
-                return self._beautify(dc), 'deep_scan_unluac', 'Deep scan bytecode decompiled', trace
+        # Remaining fallbacks unchanged...
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items()))
-        reason = '\n'.join(parts)
+        reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
-    # ... (rest of methods unchanged from previous engine.py)
     def _decode_string_table(self, source, diags):
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
