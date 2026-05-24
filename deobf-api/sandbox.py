@@ -3,8 +3,8 @@ import os, sys, re, subprocess, tempfile, shutil, traceback
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def _lua_escape(s):
-    return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\0', '\\0')
+def _safe_str(s):
+    return s.replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
 
 RUNTIME = r'''local outdir = "{outdir}"
 local inpath = "{inpath}"
@@ -33,7 +33,7 @@ local _real_math_floor = math.floor
 local _real_newproxy = newproxy
 
 local _env_registry = {{}}
-_local _env_registry_mt = {{ __mode = "k" }}
+local _env_registry_mt = {{ __mode = "k" }}
 _real_setmetatable(_env_registry, _env_registry_mt)
 
 math.randomseed(0)
@@ -169,7 +169,8 @@ local _core_funcs = {{
     rawset = _real_rawset,
     setmetatable = _real_setmetatable,
     getmetatable = function(t)
-        return nil
+        if t == sandbox_env then return nil end
+        return _real_getmetatable(t)
     end,
     select = _real_select,
     unpack = _real_unpack,
@@ -377,7 +378,7 @@ def execute_sandbox(source, timeout=120, varargs=None):
             f.write(source.encode('utf-8', errors='replace'))
 
         if varargs and isinstance(varargs, list) and len(varargs) > 0:
-            parts = ['"' + _lua_escape(s) + '"' for s in varargs]
+            parts = ['"' + _safe_str(s) + '"' for s in varargs]
             table_literal = '{' + ','.join(parts) + '}'
         else:
             table_literal = '{}'
