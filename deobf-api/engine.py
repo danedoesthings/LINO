@@ -83,7 +83,7 @@ class DeobfEngine:
                                 dc, err = self._run_unluac(bc)
                                 if dc and self._is_valid_lua(dc):
                                     return self._beautify(dc), 'lifter_unluac', f'Lifter ({len(dc)} chars)', trace
-                        elif isinstance(chunk, str) and self._is_valid_lua(chunk) and len(chunk) > 200:
+                        elif isinstance(chunk, str) and len(chunk) > 100 and self._is_likely_lua(chunk):
                             return self._beautify(chunk), 'lifter_source', f'Lifter source ({len(chunk)} chars)', trace
             except:
                 pass
@@ -143,18 +143,16 @@ class DeobfEngine:
             hex_pre = binascii.hexlify(combined[:16]).decode()
             print(f"[engine] {label}: {len(decoded)} chunks, {len(combined)}B, hex={hex_pre}", file=sys.stderr)
 
-            # Check for bytecode first
             bc = self.bytecode_harvester.extract(combined)
             if bc:
-                diags.append(f"bc found ({len(bc)}B) [{label}]")
+                diags.append(f"bc ({len(bc)}B) [{label}]")
                 return bc
 
-            # Check for valid Lua source
             for enc in ('utf-8', 'latin-1'):
                 try:
                     text = combined.decode(enc)
-                    if self._is_valid_lua(text):
-                        diags.append(f"source found ({len(text)} chars) [{label}]")
+                    if self._is_likely_lua(text):
+                        diags.append(f"source ({len(text)} chars) [{label}]")
                         return text
                 except:
                     pass
@@ -164,11 +162,22 @@ class DeobfEngine:
 
         result = try_decode(shuffle, "orig")
         if result: return result
-
         result = try_decode(list(reversed(shuffle)), "rev")
         if result: return result
-
         return None
+
+    @staticmethod
+    def _is_likely_lua(text):
+        """Return True if text looks like Lua source code (relaxed check)."""
+        if not text or len(text) < 100:
+            return False
+        printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
+        if (printable / len(text)) < 0.70:
+            return False
+        words = set(re.findall(r'\b\w+\b', text[:5000]))
+        if len(words & LUA_KEYWORDS) < 1:
+            return False
+        return True
 
     def _parse_n_table(self, source):
         m = re.search(r'local N=\{([^}]+)\}', source)
