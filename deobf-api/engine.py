@@ -59,17 +59,19 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        bc = self._static_wearedevs_extract(source, diags)
-        if bc:
-            trace.append({'stage': 'static_extract', 'bytecode_size': len(bc)})
-            dc, err = self._run_unluac(bc)
-            if dc and self._is_valid_lua(dc):
-                return self._beautify(dc), 'static_unluac', f'Decompiled ({len(dc)} chars)', trace
-            if err:
-                reasons['unluac'] = err
-            return base64.b64encode(bc).decode('ascii'), 'bytecode', f'Bytecode ({len(bc)}B)', trace
+        result = self._static_wearedevs_extract(source, diags)
+        if result:
+            if isinstance(result, bytes):
+                trace.append({'stage': 'static_extract', 'bytecode_size': len(result)})
+                dc, err = self._run_unluac(result)
+                if dc and self._is_valid_lua(dc):
+                    return self._beautify(dc), 'static_unluac', f'Decompiled ({len(dc)} chars)', trace
+                if err:
+                    reasons['unluac'] = err
+                return base64.b64encode(result).decode('ascii'), 'bytecode', f'Bytecode ({len(result)}B)', trace
+            else:
+                return self._beautify(result), 'static_source', f'Source recovered ({len(result)} chars)', trace
 
-        # Fallbacks...
         for lifter in self.lifters:
             try:
                 chunks = lifter.lift(source)
@@ -106,11 +108,7 @@ class DeobfEngine:
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
-    # ------------------------------------------------------------------------
-    #  Static WeAreDevs extractor
-    # ------------------------------------------------------------------------
     def _static_wearedevs_extract(self, source, diags):
-        # 1. R table
         m = re.search(r'local R=\{([^}]+)\}', source)
         if not m:
             diags.append("no R table")
@@ -120,14 +118,11 @@ class DeobfEngine:
             diags.append(f"R table too small ({len(strings)})")
             return None
 
-        # 2. N table
         b64_rev = self._parse_n_table(source)
-
-        # 3. Shuffle ranges
         shuffle = self._parse_shuffle_ranges(source)
         diags.append(f"R={len(strings)} N={len(b64_rev)} shuff={len(shuffle)}")
 
-        def try_shuffle(pairs, label):
+        def try_decode(pairs, label):
             working = list(strings)
             for lo, hi in pairs:
                 lo_idx, hi_idx = lo - 1, hi - 1
@@ -147,20 +142,30 @@ class DeobfEngine:
             combined = b''.join(decoded)
             hex_pre = binascii.hexlify(combined[:16]).decode()
             print(f"[engine] {label}: {len(decoded)} chunks, {len(combined)}B, hex={hex_pre}", file=sys.stderr)
+
+            # Check for bytecode first
             bc = self.bytecode_harvester.extract(combined)
             if bc:
                 diags.append(f"bc found ({len(bc)}B) [{label}]")
                 return bc
-            diags.append(f"no bc [{label}] hex={hex_pre}")
+
+            # Check for valid Lua source
+            for enc in ('utf-8', 'latin-1'):
+                try:
+                    text = combined.decode(enc)
+                    if self._is_valid_lua(text):
+                        diags.append(f"source found ({len(text)} chars) [{label}]")
+                        return text
+                except:
+                    pass
+
+            diags.append(f"no bc/source [{label}] hex={hex_pre}")
             return None
 
-        # Try original order
-        result = try_shuffle(shuffle, "orig")
+        result = try_decode(shuffle, "orig")
         if result: return result
 
-        # Try reversed order
-        rev_shuffle = list(reversed(shuffle))
-        result = try_shuffle(rev_shuffle, "rev")
+        result = try_decode(list(reversed(shuffle)), "rev")
         if result: return result
 
         return None
@@ -243,7 +248,6 @@ class DeobfEngine:
         try: return eval(expr)
         except: return None
 
-    # Fallback methods
     def _run_lune(self, source):
         try:
             try: loop = asyncio.get_event_loop()
