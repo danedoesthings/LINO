@@ -435,14 +435,35 @@ local function _run_input()
     local diagf = _real_io_open(outdir .. "/diag.txt", "a")
     if diagf then diagf:write("Varargs: " .. _real_tostring(#varargs_embedded) .. " strings\n"); diagf:close() end
 
+    local chunk_ok, vmFunc = pcall(f, varargs_embedded)
+    if not chunk_ok then
+        local errfile = _real_io_open(outdir .. "/error.txt", "a")
+        if errfile then errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\n"); errfile:close() end
+        return
+    end
+
+    if _real_type(vmFunc) ~= "function" then
+        local rvf = _real_io_open(outdir .. "/diag.txt", "a")
+        if rvf then rvf:write("Chunk returned non-function (type=" .. _real_type(vmFunc) .. ")\n"); rvf:close() end
+        return
+    end
+
+    local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf2 then diagf2:write("Calling VM with args...\n"); diagf2:close() end
+
     local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(f, _real_unpack(varargs_embedded))
+        local run_ok, run_result = pcall(vmFunc,
+            _real_getfenv(0) or _G,
+            _real_unpack,
+            newproxy,
+            _real_setmetatable,
+            _real_getmetatable,
+            _real_select,
+            varargs_embedded
+        )
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
-            if errfile then
-                errfile:write("SCRIPT_CRASH: " .. _real_tostring(run_result) .. "\n")
-                errfile:close()
-            end
+            if errfile then errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\n"); errfile:close() end
         end
         return run_result
     end, _error_handler)
@@ -451,9 +472,8 @@ local function _run_input()
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
         if errfile then errfile:write("EXECUTION_ERROR: " .. _real_tostring(result) .. "\n"); errfile:close() end
     end
-
-    local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf2 then diagf2:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n"); diagf2:close() end
+    local diagf3 = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf3 then diagf3:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n"); diagf3:close() end
 end
 
 _run_input()
