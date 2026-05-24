@@ -1,39 +1,20 @@
-import urllib.request, os, shutil
+FROM python:3.10-slim
 
-URLS = [
-    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/main/Sandbox.luau",
-    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/main/VM.luau",
-    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/refs/heads/main/Sandbox.luau",
-]
+RUN apt-get update && apt-get install -y default-jre-headless curl unzip && \
+    rm -rf /var/lib/apt/lists/*
 
-DEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renbex_vm.luau")
+RUN curl -L https://github.com/lune-org/lune/releases/download/v0.8.0/lune-0.8.0-linux-x86_64.zip \
+    -o /tmp/lune.zip && \
+    unzip /tmp/lune.zip -d /usr/local/bin/ && \
+    chmod +x /usr/local/bin/lune && \
+    rm /tmp/lune.zip
 
-def download():
-    for url in URLS:
-        try:
-            print(f"Trying {url}")
-            with urllib.request.urlopen(url, timeout=30) as resp:
-                if resp.status == 200:
-                    with open(DEST, 'wb') as f:
-                        shutil.copyfileobj(resp, f)
-                    print(f"Downloaded successfully from {url}")
-                    return
-        except Exception as e:
-            print(f"Failed: {e}")
-            continue
+WORKDIR /app
+COPY . /app/
+RUN pip install -r requirements.txt
+RUN python download_renbex.py
 
-    print("All downloads failed — writing minimal stub")
-    with open(DEST, 'w', encoding='utf-8') as f:
-        f.write("""\
-local game = game or {}
-local workspace = workspace or {}
-game:GetService = game.GetService or function(name)
-    local svc = {}
-    setmetatable(svc, { __index = function() return function() end end })
-    return svc
-end
-print("Renbex0 VM stub loaded")
-""")
+ADD https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar /opt/unluac.jar
+ENV UNLUAC_PATH=/opt/unluac.jar
 
-if __name__ == "__main__":
-    download()
+CMD ["sh", "-c", "gunicorn -w 4 -b 0.0.0.0:${PORT} api:app"]
