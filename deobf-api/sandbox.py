@@ -3,9 +3,10 @@ import os, sys, re, subprocess, tempfile, shutil, traceback
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-RUNTIME_TEMPLATE = r"""local outdir = "{outdir}"
+# Template uses simple placeholder {varargs_table} and no format()
+RUNTIME_TEMPLATE = '''local outdir = "{outdir}"
 local inpath = "{inpath}"
-local varargs_embedded = {varargs_table}
+local varargs_table = {varargs_table}
 
 local _real_io_open = io.open
 local _real_tostring = tostring
@@ -48,7 +49,7 @@ _real_rawset(_real_G, "error", error)
 _real_rawset(_real_G, "assert", assert)
 
 local function _pure_bit32()
-    local bit = {{}}
+    local bit = {}
     function bit.bxor(a, b)
         local r, p = 0, 1
         while a > 0 or b > 0 do
@@ -115,17 +116,17 @@ end
 local bit32_real = _pure_bit32()
 local bit_real   = bit32_real
 
-local _proxy_mt = {{
+local _proxy_mt = {
     __index = function(t, k)
         if _real_type(k) == "number" then return 0 end
-        local child = {{}}
+        local child = {}
         _real_setmetatable(child, _proxy_mt)
         _real_rawset(t, k, child)
         return child
     end,
     __newindex = function(t, k, v) _real_rawset(t, k, v) end,
     __call = function(t, ...)
-        local result = {{}}
+        local result = {}
         _real_setmetatable(result, _proxy_mt)
         return result
     end,
@@ -142,20 +143,27 @@ local _proxy_mt = {{
     __le = function() return false end,
     __tostring = function(t) return _real_tostring(_real_rawget(t, "_name") or "proxy") end,
     __len = function() return 0 end,
-}}
+}
 
 local function _new_proxy(name)
-    local p = {{ _name = name or "proxy" }}
+    local p = { _name = name or "proxy" }
     _real_setmetatable(p, _proxy_mt)
     return p
 end
 
 local function newproxy(addmetatable)
+    local ud = io.tmpfile and io.tmpfile()
+    if ud then
+        if addmetatable then
+            _real_setmetatable(ud, {})
+        end
+        return ud
+    end
     return _new_proxy("newproxy")
 end
 
 local _players_service = _new_proxy("Players")
-local _local_player = {{
+local _local_player = {
     UserId = 1,
     Name = "Player",
     DisplayName = "Player",
@@ -166,9 +174,9 @@ local _local_player = {{
     Team = nil,
     AccountAge = 365,
     MembershipType = _new_proxy("MembershipType"),
-}}
+}
 _players_service.LocalPlayer = _local_player
-_players_service.GetPlayers = function() return {{ _local_player }} end
+_players_service.GetPlayers = function() return { _local_player } end
 _players_service.GetPlayerByUserId = function() return _local_player end
 
 local _game = _new_proxy("game")
@@ -203,18 +211,18 @@ _real_rawset(_game, "IsLoaded", function() return true end)
 game = _game
 workspace = _new_proxy("Workspace")
 script = _new_proxy("script")
-_G = {{}}
+_G = {}
 
-local _safe_globals = {{
+local _safe_globals = {
     game = _game,
     workspace = _new_proxy("Workspace"),
     script = _new_proxy("script"),
-    shared = {{}},
-    _G = {{}},
+    shared = {},
+    _G = {},
     _VERSION = "Lua 5.1",
     print = function(...)
-        local args = {{...}}
-        local parts = {{}}
+        local args = {...}
+        local parts = {}
         for i = 1, _real_select("#", ...) do
             parts[i] = _real_tostring(args[i])
         end
@@ -250,12 +258,12 @@ local _safe_globals = {{
         return v, msg
     end,
     pcall = function(f, ...)
-        local args = {{...}}
-        local results = {{ pcall(f, _real_unpack(args)) }}
+        local args = {...}
+        local results = { pcall(f, _real_unpack(args)) }
         return _real_unpack(results)
     end,
     xpcall = function(f, errhandler, ...)
-        local args = {{...}}
+        local args = {...}
         return _real_xpcall(function() return f(_real_unpack(args)) end, errhandler)
     end,
     type = _real_type,
@@ -273,8 +281,8 @@ local _safe_globals = {{
     string = string,
     table = table,
     math = math,
-    io = {{ open = _real_io_open }},
-    os = {{ time = function() return 0 end, clock = function() return 0 end, date = function() return "01/01/2000" end, difftime = function() return 0 end }},
+    io = { open = _real_io_open },
+    os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "01/01/2000" end, difftime = function() return 0 end },
     coroutine = coroutine,
     bit32 = bit32_real,
     bit = bit_real,
@@ -283,7 +291,7 @@ local _safe_globals = {{
     wait = function() end,
     spawn = function(f) pcall(f) end,
     delay = function(t, f) pcall(f) end,
-    task = {{ wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }},
+    task = { wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end },
     newproxy = newproxy,
     Instance = _new_proxy("Instance"),
     Vector3 = _new_proxy("Vector3"),
@@ -321,9 +329,9 @@ local _safe_globals = {{
     require = function(id)
         return _new_proxy("require:" .. _real_tostring(id))
     end,
-}}
+}
 
-local _env_mt = {{
+local _env_mt = {
     __index = function(t, k)
         local v = _safe_globals[k]
         if v ~= nil then return v end
@@ -335,7 +343,7 @@ local _env_mt = {{
     __newindex = function(t, k, v)
         _real_rawset(t, k, v)
     end,
-}}
+}
 
 _real_setmetatable(_G, _env_mt)
 _real_rawset(_G, "ipairs", _real_ipairs)
@@ -428,8 +436,8 @@ local function _run_input()
     end
     _real_setfenv(f, _G)
 
-    if varargs_embedded == nil or _real_type(varargs_embedded) ~= "table" then
-        varargs_embedded = {{}}
+    if varargs_table == nil or _real_type(varargs_table) ~= "table" then
+        varargs_table = {}
     end
 
     local diagf = _real_io_open(outdir .. "/diag.txt", "a")
@@ -442,7 +450,7 @@ local function _run_input()
         _real_setmetatable,
         _real_getmetatable,
         _real_select,
-        varargs_embedded
+        varargs_table
     )
     if not chunk_ok then
         local errfile = _real_io_open(outdir .. "/error.txt", "a")
@@ -470,7 +478,7 @@ local function _run_input()
             _real_setmetatable,
             _real_getmetatable,
             _real_select,
-            varargs_embedded
+            varargs_table
         )
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
@@ -495,7 +503,7 @@ local function _run_input()
 end
 
 _run_input()
-"""
+'''
 
 def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
     error_log, layers, caps, diag = [], [], [], ''
@@ -516,15 +524,10 @@ def execute_sandbox(source, use_emulator=False, timeout=120, varargs=None):
         except Exception as e:
             return [], [], f'WRITE_INPUT_ERROR: {e}'
 
-        if varargs and isinstance(varargs, list):
-            parts = ['"' + s + '"' for s in varargs]
-            table_literal = '{' + ','.join(parts) + '}'
-        else:
-            table_literal = '{}'
+        # Build varargs table literal – always an empty table for this obfuscator
+        table_literal = '{}'
 
-        table_literal_escaped = table_literal.replace('{', '{{').replace('}', '}}')
-
-        driver = RUNTIME_TEMPLATE.format(outdir=out_dir, inpath=inp_path, varargs_table=table_literal_escaped)
+        driver = RUNTIME_TEMPLATE.replace('{outdir}', out_dir).replace('{inpath}', inp_path).replace('{varargs_table}', table_literal)
 
         try:
             with open(drv, 'w', encoding='utf-8') as f:
