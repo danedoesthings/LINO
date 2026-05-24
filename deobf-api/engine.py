@@ -83,7 +83,7 @@ class DeobfEngine:
                                 dc, err = self._run_unluac(bc)
                                 if dc and self._is_valid_lua(dc):
                                     return self._beautify(dc), 'lifter_unluac', f'Lifter ({len(dc)} chars)', trace
-                        elif isinstance(chunk, str) and len(chunk) > 100 and self._is_likely_lua(chunk):
+                        elif isinstance(chunk, str) and len(chunk) > 5 and self._is_likely_lua(chunk):
                             return self._beautify(chunk), 'lifter_source', f'Lifter source ({len(chunk)} chars)', trace
             except:
                 pass
@@ -168,8 +168,8 @@ class DeobfEngine:
 
     @staticmethod
     def _is_likely_lua(text):
-        """Return True if text looks like Lua source code (relaxed check)."""
-        if not text or len(text) < 100:
+        """Return True if text looks like Lua source code (very relaxed)."""
+        if not text or len(text) < 5:
             return False
         printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
         if (printable / len(text)) < 0.70:
