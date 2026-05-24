@@ -60,9 +60,18 @@ class DeobfEngine:
         fingerprint = self.fingerprinter.analyze(source)
         trace.append({'stage': 'fingerprint', 'details': fingerprint})
 
-        layers, caps, diag = execute_sandbox(source, timeout=120)
+        # Decode the string table, producing actual Lua string literals that will
+        # become the correct byte sequences when Lua parses them.
+        string_table = self._decode_string_table(source, diags)
+        if string_table:
+            diags.append(f"decoded {len(string_table)} strings for sandbox")
+            layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+        else:
+            layers, caps, diag = execute_sandbox(source, timeout=120)
+
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag: reasons['sandbox'] = diag[:2000]
+        if diag:
+            reasons['sandbox'] = diag[:2000]
 
         if layers:
             for i, item in enumerate(layers):
@@ -111,7 +120,55 @@ class DeobfEngine:
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
-    # ... (rest of methods unchanged from previous engine.py)
+    def _decode_string_table(self, source, diags):
+        """Return a list of proper Lua string literals that, when parsed by Lua,
+        produce the exact byte sequences from the obfuscated R table."""
+        m = re.search(r'local R=\{([^}]+)\}', source)
+        if not m:
+            return None
+        table_body = m.group(1)
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
+        if len(strings) < 10:
+            return None
+
+        result = []
+        for raw in strings:
+            # Decode the Lua escape sequences in Python
+            decoded_bytes = self._decode_wearedevs_escapes(raw)
+            # Re-encode as a Lua string literal that will produce the same bytes
+            lua_literal = self._bytes_to_lua_literal(decoded_bytes)
+            result.append(lua_literal)
+        return result
+
+    @staticmethod
+    def _decode_wearedevs_escapes(s):
+        """Decode Lua \NNN escape sequences into raw bytes."""
+        result = bytearray()
+        i = 0
+        while i < len(s):
+            if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - i < 4:
+                    j += 1
+                try:
+                    val = int(s[i+1:j])
+                    if 0 <= val <= 255:
+                        result.append(val)
+                except ValueError:
+                    pass
+                i = j
+            else:
+                i += 1
+        return bytes(result)
+
+    @staticmethod
+    def _bytes_to_lua_literal(b):
+        """Convert raw bytes to a Lua string literal using \ddd escapes."""
+        parts = []
+        for byte in b:
+            parts.append(f'\\{byte:03d}')
+        return ''.join(parts)
+
     def _extract_bytecode(self, data):
         if isinstance(data, bytes): return self.bytecode_harvester.extract(data)
         if isinstance(data, str):
