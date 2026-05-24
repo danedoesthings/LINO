@@ -32,6 +32,10 @@ local _real_string_byte = string.byte
 local _real_math_floor = math.floor
 local _real_newproxy = newproxy
 
+local _env_registry = {{}}
+_local _env_registry_mt = {{ __mode = "k" }}
+_real_setmetatable(_env_registry, _env_registry_mt)
+
 math.randomseed(0)
 
 local function _pure_bit32()
@@ -184,10 +188,20 @@ local _core_funcs = {{
     delay = function(t, f) pcall(f) end,
     task = {{ wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }},
     newproxy = _real_newproxy,
-    getfenv = function()
+    getfenv = function(fn)
+        if fn == nil then
+            return sandbox_env
+        end
+        local env = _env_registry[fn]
+        if env ~= nil then
+            return env
+        end
         return sandbox_env
     end,
     setfenv = function(fn, env)
+        if _real_type(fn) == "function" then
+            _env_registry[fn] = env
+        end
         return fn
     end,
     require = function(id)
