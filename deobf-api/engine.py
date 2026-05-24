@@ -69,17 +69,6 @@ class DeobfEngine:
 
         string_table, var_name = self._decode_string_table(source, diags)
 
-        layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table if string_table else None)
-        trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag:
-            reasons['sandbox'] = self._sanitize_diag(diag[:2000])
-
-        if layers:
-            for i, item in enumerate(layers):
-                result = self._process_layer(item, i, string_table, var_name)
-                if result:
-                    return result, 'sandbox_source', f'Layer {i} source captured', trace
-
         if string_table:
             result = self._static_wearedevs_extract(source, diags, string_table, var_name)
             if result:
@@ -93,6 +82,29 @@ class DeobfEngine:
                     if string_table and var_name:
                         beautified = self._substitute_strings(beautified, string_table, var_name)
                     return beautified, 'static_source', f'Static source ({len(result)} chars)', trace
+
+            safe_for_sandbox = all(
+                all(c.isprintable() or c in '\n\r\t\\' for c in s)
+                for s in string_table
+            )
+            if safe_for_sandbox:
+                layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
+                trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
+                if diag:
+                    reasons['sandbox'] = self._sanitize_diag(diag[:2000])
+                if layers:
+                    for i, item in enumerate(layers):
+                        result = self._process_layer(item, i, string_table, var_name)
+                        if result:
+                            return result, 'sandbox_source', f'Layer {i} source captured', trace
+        else:
+            layers, caps, diag = execute_sandbox(source, timeout=120)
+            trace.append({'stage': 'sandbox', 'layers': len(layers)})
+            if layers:
+                for i, item in enumerate(layers):
+                    result = self._process_layer(item, i, None, None)
+                    if result:
+                        return result, 'sandbox_source', f'Layer {i} source captured', trace
 
         for lifter in self.lifters:
             try:
@@ -109,20 +121,6 @@ class DeobfEngine:
                             return self._beautify(chunk), 'lifter_source', f'Lifter source ({len(chunk)} chars)', trace
             except:
                 pass
-
-        lune_data, _ = self._run_lune(source)
-        if lune_data and isinstance(lune_data, bytes) and len(lune_data) >= 12:
-            bc = self.bytecode_harvester.extract(lune_data)
-            if bc:
-                dc, err = self._run_unluac(bc)
-                if dc and self._is_valid_lua(dc):
-                    return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
-
-        raw_bc = self.bytecode_harvester.deep_scan(source)
-        if raw_bc:
-            dc, err = self._run_unluac(raw_bc)
-            if dc and self._is_valid_lua(dc):
-                return self._beautify(dc), 'deep_scan_unluac', f'Deep scan ({len(dc)} chars)', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
@@ -179,17 +177,6 @@ class DeobfEngine:
     def _decode_string_table(self, source, diags):
         m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}', source, re.DOTALL)
         if not m:
-            assignments = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]\s*=\s*"((?:[^"\\]|\\.)*)"', source)
-            if len(assignments) >= 10:
-                var_names = set(a[0] for a in assignments)
-                if len(var_names) == 1:
-                    var_name = var_names.pop()
-                    max_idx = max(int(a[1]) for a in assignments)
-                    strings = [''] * (max_idx + 1)
-                    for vn, idx_str, val in assignments:
-                        if vn == var_name:
-                            strings[int(idx_str)] = val
-                    return strings, var_name
             return None, None
         var_name = m.group(1)
         body = m.group(2)
@@ -201,11 +188,9 @@ class DeobfEngine:
     def _static_wearedevs_extract(self, source, diags, string_table=None, var_name=None):
         m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}', source, re.DOTALL)
         if not m:
-            diags.append("no R table")
             return None
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
         if len(strings) < 10:
-            diags.append(f"R table too small ({len(strings)})")
             return None
 
         b64_rev = self._parse_n_table(source)
@@ -236,20 +221,17 @@ class DeobfEngine:
 
             bc = self.bytecode_harvester.extract(combined)
             if bc:
-                diags.append(f"bc ({len(bc)}B) [{label}]")
                 return bc
 
             for enc in ('utf-8', 'latin-1'):
                 try:
                     text = combined.decode(enc)
                     if self._has_lua_keywords(text):
-                        diags.append(f"source ({len(text)} chars) [{label}]")
                         if string_table and var_name:
                             text = self._substitute_strings(text, string_table, var_name)
                         return text
                 except:
                     pass
-
             return None
 
         result = try_decode(shuffle, "orig")
@@ -265,21 +247,20 @@ class DeobfEngine:
         if not text or len(text) < 5:
             return False
         printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
-        if (printable / len(text)) < 0.60:
+        if (printable / len(text)) < 0.50:
             return False
         lower_text = text.lower()
         count = 0
         for kw in LUA_SUBSTRINGS:
             if kw in lower_text:
                 count += 1
-                if count >= 2:
+                if count >= 1:
                     return True
         return False
 
     def _beautify(self, code):
         if not code or len(code) < 5:
             return code
-
         stylua = shutil.which('stylua')
         if stylua:
             try:
@@ -291,71 +272,47 @@ class DeobfEngine:
                     return r.stdout
             except:
                 pass
-
-        try:
-            from luaparser import ast
-            return ast.to_lua_source(ast.parse(code))
-        except:
-            pass
-
         code = ''.join(ch for ch in code if ch.isprintable() or ch in '\n\r\t')
         if len(code) < 5:
             return code
-
-        string_pattern = re.compile(
-            r""" (?:'[^']*') | (?:"[^"]*") | (?:\[=*\[.*?\]=*\]) """,
-            re.DOTALL | re.VERBOSE
-        )
+        string_pattern = re.compile(r""" (?:'[^']*') | (?:"[^"]*") | (?:\[=*\[.*?\]=*\]) """, re.DOTALL | re.VERBOSE)
         placeholders = {}
         counter = 0
-
         def replace_string(m):
             nonlocal counter
             placeholder = f"__STR_{counter}__"
             placeholders[placeholder] = m.group(0)
             counter += 1
             return placeholder
-
         code = string_pattern.sub(replace_string, code)
-
         code = re.sub(r'(?<!\blocal )\bfunction\b', '\nfunction', code)
-        for kw in ['local', 'if', 'for', 'while', 'repeat', 'return', 'do', 'end',
-                    'else', 'elseif', 'until', 'then']:
+        for kw in ['local', 'if', 'for', 'while', 'repeat', 'return', 'do', 'end', 'else', 'elseif', 'until', 'then']:
             if kw == 'function':
                 continue
             code = re.sub(rf'\b{kw}\b', f'\n{kw}', code)
-
         for placeholder, original in placeholders.items():
             code = code.replace(placeholder, original)
-
         code = re.sub(r'\n\s*\n', '\n\n', code)
-
         lines = code.split('\n')
         out_lines = []
         indent = 0
-
         open_kw = {'function', 'if', 'for', 'while', 'repeat', 'do', 'then'}
         close_kw = {'end', 'until', 'else', 'elseif'}
-
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
                 out_lines.append('')
                 continue
-
             first_word = line.split()[0] if line.split() else ''
             if first_word in close_kw:
                 indent = max(0, indent - 1)
-
             out_lines.append('    ' * indent + line)
-
             opens = len(re.findall(r'\b(function|if|for|while|repeat|do|then)\b', line))
             closes = len(re.findall(r'\b(end|until)\b', line))
             indent += opens - closes
             if first_word in ('else', 'elseif'):
                 indent += 1
             indent = max(0, indent)
-
         return '\n'.join(out_lines)
 
     def _parse_n_table(self, source):
