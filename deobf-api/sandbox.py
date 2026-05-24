@@ -250,7 +250,12 @@ local sandbox_env = {{
     delay = function(t, f) pcall(f) end,
     task = {{ wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }},
     newproxy = newproxy,
-    getfenv = function() return sandbox_env end,
+    getfenv = function()
+        return sandbox_env
+    end,
+    setfenv = function(fn, env)
+        return fn
+    end,
     Instance = _new_proxy("Instance"),
     Vector3 = _new_proxy("Vector3"),
     Vector2 = _new_proxy("Vector2"),
