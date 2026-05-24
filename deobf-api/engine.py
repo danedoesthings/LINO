@@ -68,13 +68,12 @@ class DeobfEngine:
             layers, caps, diag = execute_sandbox(source, timeout=120)
 
         trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-        if diag: reasons['sandbox'] = diag[:300]
+        if diag:
+            reasons['sandbox'] = diag[:2000]
 
         if layers:
             for i, item in enumerate(layers):
-                # Bytes: could be bytecode or Lua source
                 if isinstance(item, bytes) and len(item) >= 12:
-                    # Try as source first
                     text = None
                     try:
                         text = item.decode('utf-8')
@@ -85,22 +84,45 @@ class DeobfEngine:
                             pass
                     if text and self._is_valid_lua(text):
                         return self._beautify(text), 'sandbox_source', f'Layer {i} source captured', trace
-                    # Try as bytecode
                     bc = self.bytecode_harvester.extract(item)
                     if bc:
                         dc, err = self._run_unluac(bc)
                         if dc and self._is_valid_lua(dc):
                             return self._beautify(dc), 'sandbox_unluac', f'Layer {i} bytecode decompiled', trace
-                # String layers
                 if isinstance(item, str):
                     if len(item) > 100 and self._is_valid_lua(item):
                         return self._beautify(item), 'sandbox_capture', f'Layer {i} source captured', trace
 
-        # Remaining fallbacks unchanged...
+        all_text = [c for c in caps if isinstance(c, str) and len(c) > 20]
+        if all_text:
+            combined = '\n'.join(all_text)
+            if len(combined) > 200 and self._is_valid_lua(combined):
+                return self._beautify(combined), 'sandbox_strings', 'Captured strings reconstructed', trace
+
+        lune_data, lune_info = self._run_lune(source)
+        if lune_data:
+            if isinstance(lune_data, bytes) and len(lune_data) >= 12:
+                bc = self.bytecode_harvester.extract(lune_data)
+                if bc:
+                    dc, err = self._run_unluac(bc)
+                    if dc and self._is_valid_lua(dc):
+                        return self._beautify(dc), 'lune_unluac', 'Lune bytecode decompiled', trace
+            try:
+                text = lune_data.decode('utf-8', errors='replace')
+                if self._is_valid_lua(text):
+                    return self._beautify(text), 'lune_capture', 'Lune source', trace
+            except Exception:
+                pass
+
+        raw_bytecode = self.bytecode_harvester.deep_scan(source)
+        if raw_bytecode:
+            dc, err = self._run_unluac(raw_bytecode)
+            if dc and self._is_valid_lua(dc):
+                return self._beautify(dc), 'deep_scan_unluac', 'Deep scan bytecode decompiled', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
-            parts.append('Info: ' + '; '.join(f"{k}: {v[:100]}" for k, v in reasons.items()))
+            parts.append('Info: ' + '; '.join(f"{k}: {v[:500]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
