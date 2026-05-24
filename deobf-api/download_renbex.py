@@ -1,23 +1,12 @@
-import urllib.request, os, shutil, sys
+import urllib.request, os, shutil
 
 URLS = [
-    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/main/VirtualMachine.luau",
-    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/master/VirtualMachine.luau",
-    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/refs/heads/main/VirtualMachine.luau",
+    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/main/Sandbox.luau",
+    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/main/VM.luau",
+    "https://raw.githubusercontent.com/Renbex0/Virtual-Machine/refs/heads/main/Sandbox.luau",
 ]
 
 DEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renbex_vm.luau")
-
-FALLBACK_VM = """\
-local game = game or {}
-local workspace = workspace or {}
-game:GetService = game.GetService or function(name)
-    local svc = {}
-    setmetatable(svc, { __index = function() return function() end end })
-    return svc
-end
-print("Renbex0 VM not available - using minimal stub")
-"""
 
 def download():
     for url in URLS:
@@ -33,9 +22,18 @@ def download():
             print(f"Failed: {e}")
             continue
 
-    print("All downloads failed – writing minimal Roblox stub")
+    print("All downloads failed — writing minimal stub")
     with open(DEST, 'w', encoding='utf-8') as f:
-        f.write(FALLBACK_VM)
+        f.write("""\
+local game = game or {}
+local workspace = workspace or {}
+game:GetService = game.GetService or function(name)
+    local svc = {}
+    setmetatable(svc, { __index = function() return function() end end })
+    return svc
+end
+print("Renbex0 VM stub loaded")
+""")
 
 if __name__ == "__main__":
     download()
