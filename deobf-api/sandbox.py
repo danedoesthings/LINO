@@ -4,7 +4,6 @@ LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua')
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _safe_str(s):
-    # Escape backslash FIRST, then quote/newline
     return (s.replace('\\', '\\\\')
              .replace('"', '\\"')
              .replace('\n', '\\n')
@@ -322,13 +321,12 @@ local function _run_input()
     local diagf = _real_io_open(outdir .. "/diag.txt", "a")
     if diagf then diagf:write("Varargs: " .. _real_tostring(#varargs_embedded) .. " strings\n"); diagf:close() end
 
-    -- Step 1: call the outer chunk with exactly the 7 args the obfuscator expects
     local chunk_ok, vmFunc = pcall(f,
         sandbox_env,
         _real_unpack,
         _real_newproxy,
         _real_setmetatable,
-        _real_getmetatable,      -- wrapped version that hides sandbox_env's metatable
+        _real_getmetatable,
         _real_select,
         varargs_embedded
     )
@@ -347,14 +345,13 @@ local function _run_input()
     local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
     if diagf2 then diagf2:write("Calling VM with args...\n"); diagf2:close() end
 
-    -- Step 2: call the VM with the same 7 arguments
     local ok, result = _real_xpcall(function()
         local run_ok, run_result = pcall(vmFunc,
             sandbox_env,
             _real_unpack,
             _real_newproxy,
             _real_setmetatable,
-            _real_getmetatable,   -- wrapped again
+            _real_getmetatable,
             _real_select,
             varargs_embedded
         )
