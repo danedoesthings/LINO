@@ -19,16 +19,15 @@ ALLOWED_EXTENSIONS = ('.lua', '.txt', '.luau')
 MAX_BYTES = 5 * 1024 * 1024
 
 SUCCESS_METHODS = (
-    'unluac', 'sandbox_capture', 'sandbox_unluac', 'sandbox_scan',
-    'sandbox_string', 'lune_capture', 'lune_unluac', 'rapid_decode_unluac',
-    'string_decode', 'string_decode_unluac', 'deep_scan_unluac',
-    'WeAreDevsLifter_unluac', 'MoonSecLifter_unluac', 'IronBrewLifter_unluac',
-    'PSULifter_unluac', 'XORStringDecoder_unluac', 'NumberArrayDecoder_unluac',
-    'StandardBase64Decoder_unluac', 'WeAreDevsLifter_source', 'MoonSecLifter_source',
-    'IronBrewLifter_source', 'recursive_unluac', 'recursive_sandbox_capture',
-    'recursive_lune_capture', 'recursive_sandbox_unluac',
-    'AdvancedWeAreDevsLifter_unluac', 'AdvancedWeAreDevsLifter_nested_unluac',
-    'AdvancedWeAreDevsLifter_source',
+    'wearedevs_unluac', 'wearedevs_source', 'sandbox_unluac', 'sandbox_source',
+    'sandbox_capture', 'sandbox_strings', 'lune_unluac', 'lune_capture',
+    'deep_scan_unluac', 'rapid_decode_unluac', 'string_decode',
+    'string_decode_unluac', 'AdvancedWeAreDevsLifter_unluac',
+    'AdvancedWeAreDevsLifter_source', 'IronBrewLifter_unluac',
+    'IronBrewLifter_source', 'MoonSecLifter_unluac', 'PSULifter_unluac',
+    'XORStringDecoder_unluac', 'NumberArrayDecoder_unluac',
+    'StandardBase64Decoder_unluac', 'recursive_unluac',
+    'recursive_sandbox_capture', 'recursive_lune_capture',
 )
 
 async def call_api(source_b64):
@@ -83,7 +82,7 @@ async def run_deobf(raw_bytes, filename):
     em.add_field(name='Input', value=filename, inline=True)
     em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
     if diagnostic:
-        diag_text = _truncate(diagnostic, 1020)
+        diag_text = _truncate(diagnostic, 4000)
         em.add_field(name='Diagnostic', value=f'```\n{diag_text}\n```', inline=False)
     if trace:
         stages = [t.get('stage', '?') for t in trace[:10]]
@@ -123,9 +122,7 @@ async def prefix_deobf(ctx):
     res = await run_deobf(raw, filename)
     try:
         await msg.delete()
-    except discord.NotFound:
-        pass
-    except discord.Forbidden:
+    except (discord.NotFound, discord.Forbidden):
         pass
     await ctx.send(embed=res['embed'], files=res.get('files', []))
 
