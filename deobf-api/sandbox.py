@@ -5,9 +5,9 @@ RENBEX_VM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'renbe
 
 def execute_sandbox(source, timeout=120, varargs=None):
     if not LUNE_BIN:
-        return [], [], "Lune not installed – falling back to static extraction"
+        return [], [], "Lune not installed"
     if not os.path.isfile(RENBEX_VM_PATH):
-        return [], [], "Renbex0 VM not found – falling back to static extraction"
+        return [], [], "Renbex0 VM not found"
 
     error_log, layers, caps, diag = [], [], [], ''
     try:
@@ -19,16 +19,10 @@ def execute_sandbox(source, timeout=120, varargs=None):
         driver_script = os.path.join(temp_dir, 'driver.luau')
         output_dir   = temp_dir.replace('\\', '/')
 
-        # Write the obfuscated script
         with open(input_script, 'wb') as f:
             f.write(source.encode('utf-8', errors='replace'))
 
-        # Build a driver that:
-        #   1. Loads Renbex0 VM (sets up Roblox globals)
-        #   2. Hooks loadstring / load to capture decrypted source
-        #   3. Runs the obfuscated script
         driver_code = f'''
--- Load the full Roblox simulation
 local renbex = loadfile("{RENBEX_VM_PATH}")
 if renbex then
     local ok, err = pcall(renbex)
@@ -37,21 +31,17 @@ if renbex then
     end
 end
 
--- Capture directory
 local cap_dir = "{output_dir}"
 local cap_count = 0
 
--- Hook loadstring to capture and also execute
 local orig_load = loadstring or load
 loadstring = function(chunk, name)
     cap_count = cap_count + 1
-    -- Save captured source
     local f = io.open(cap_dir .. "/layer_" .. cap_count .. ".luau", "w")
     if f then
         f:write(chunk)
         f:close()
     end
-    -- Still compile and return the function so the VM continues normally
     if orig_load then
         return orig_load(chunk, name)
     end
@@ -59,7 +49,6 @@ loadstring = function(chunk, name)
 end
 load = loadstring
 
--- Run the target script
 local target = loadfile("{input_script}")
 if target then
     local ok, err = pcall(target)
@@ -70,7 +59,6 @@ else
     io.stderr:write("COULD_NOT_LOAD_INPUT\\n")
 end
 
--- Write diagnostics
 local diag = io.open(cap_dir .. "/diag.txt", "w")
 if diag then
     diag:write("Captures: " .. cap_count .. "\\n")
@@ -102,7 +90,6 @@ end
         if stderr_output.strip():
             error_log.append(f'STDERR: {stderr_output.strip()[:500]}')
 
-        # Collect layers
         i = 1
         while True:
             p = os.path.join(temp_dir, f'layer_{i}.luau')
@@ -117,7 +104,6 @@ end
                 error_log.append(f'READ_LAYER_{i}_ERROR: {e}')
             i += 1
 
-        # Collect diag.txt / error.txt
         diag_parts = []
         for fname in ('diag.txt', 'error.txt'):
             fp = os.path.join(temp_dir, fname)
