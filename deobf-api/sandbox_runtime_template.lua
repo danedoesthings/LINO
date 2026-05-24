@@ -455,53 +455,22 @@ local function _run_input()
         end
     end
 
-    -- Step 1: Call the chunk with unpacked strings
-    local chunk_ok, vmFunc = pcall(f, _real_unpack(varargs_embedded))
-    if not chunk_ok then
-        local errfile = _real_io_open(outdir .. "/error.txt", "a")
-        if errfile then
-            errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\n")
-            errfile:close()
-        end
-        return
-    end
-
-    if _real_type(vmFunc) ~= "function" then
-        _write_return_value(vmFunc)
-        local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
-        if diagf2 then
-            diagf2:write("Chunk returned non-function (type=" .. _real_type(vmFunc) .. ")\n")
-            diagf2:close()
-        end
-        return
-    end
-
-    local diagf3 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf3 then
-        diagf3:write("VM function obtained, invoking...\n")
-        diagf3:close()
-    end
-
-    -- Step 2: Call VM function with 7 args
     local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(vmFunc,
-            _real_getfenv(0) or _G,
-            _real_unpack,
-            newproxy,
-            _real_setmetatable,
-            _real_getmetatable,
-            _real_select,
-            varargs_embedded
-        )
+        local run_ok, run_result = pcall(f, varargs_embedded)
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then
-                errfile:write("VM_CRASH: " .. _real_tostring(run_result) .. "\n")
-                errfile:write("VM_TRACEBACK:\n" .. _real_debug_traceback(run_result, 2) .. "\n")
+                errfile:write("SCRIPT_CRASH: " .. _real_tostring(run_result) .. "\n")
+                errfile:write("SCRIPT_TRACEBACK:\n" .. _real_debug_traceback(run_result, 2) .. "\n")
                 errfile:close()
             end
         else
             _write_return_value(run_result)
+            local rvf = _real_io_open(outdir .. "/diag.txt", "a")
+            if rvf then
+                rvf:write("Script returned, return_value.lua written\n")
+                rvf:close()
+            end
         end
         return run_result
     end, _error_handler)
