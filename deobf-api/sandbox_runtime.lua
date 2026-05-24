@@ -450,8 +450,44 @@ local function _run_input()
         diagf:close()
     end
 
+    -- Step 1: Call the chunk with unpacked strings, get the VM function back
+    local chunk_ok, vmFunc = pcall(f, _real_unpack(varargs_embedded))
+    if not chunk_ok then
+        local errfile = _real_io_open(outdir .. "/error.txt", "a")
+        if errfile then
+            errfile:write("CHUNK_CRASH: " .. _real_tostring(vmFunc) .. "\n")
+            errfile:close()
+        end
+        return
+    end
+
+    if _real_type(vmFunc) ~= "function" then
+        local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
+        if diagf2 then
+            diagf2:write("Chunk did not return a function (type=" .. _real_type(vmFunc) .. ")\n")
+            diagf2:close()
+        end
+        _write_return_value(vmFunc)
+        return
+    end
+
+    local diagf3 = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf3 then
+        diagf3:write("VM function obtained, invoking...\n")
+        diagf3:close()
+    end
+
+    -- Step 2: Call the VM function with the 7 required arguments
     local ok, result = _real_xpcall(function()
-        local run_ok, run_result = pcall(f, _real_unpack(varargs_embedded))
+        local run_ok, run_result = pcall(vmFunc,
+            _real_getfenv(0) or _G,   -- environment
+            _real_unpack,              -- unpack
+            newproxy,                  -- newproxy
+            _real_setmetatable,        -- setmetatable
+            _real_getmetatable,        -- getmetatable
+            _real_select,              -- select
+            varargs_embedded           -- string table (already processed)
+        )
         if not run_ok then
             local errfile = _real_io_open(outdir .. "/error.txt", "a")
             if errfile then
@@ -463,7 +499,7 @@ local function _run_input()
             _write_return_value(run_result)
             local rvf = _real_io_open(outdir .. "/diag.txt", "a")
             if rvf then
-                rvf:write("Return value written to return_value.lua\n")
+                rvf:write("VM returned, return_value.lua written\n")
                 rvf:close()
             end
         end
@@ -477,10 +513,11 @@ local function _run_input()
             errfile:close()
         end
     end
-    local diagf2 = _real_io_open(outdir .. "/diag.txt", "a")
-    if diagf2 then
-        diagf2:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
-        diagf2:close()
+
+    local diagf4 = _real_io_open(outdir .. "/diag.txt", "a")
+    if diagf4 then
+        diagf4:write("Sandbox complete. Captures: " .. _real_tostring(_capture_count) .. "\n")
+        diagf4:close()
     end
 end
 
