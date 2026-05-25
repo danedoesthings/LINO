@@ -15,6 +15,12 @@ from string_decoders import MultiStrategyStringDecoder
 from pattern_matcher import ObfuscationFingerprinter
 from roblox_executor import execute_via_roblox
 
+try:
+    from luaparser import ast as lua_ast
+    HAS_LUAPARSER = True
+except ImportError:
+    HAS_LUAPARSER = False
+
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
@@ -33,6 +39,14 @@ LUA_SUBSTRINGS = [
     'setmetatable', 'getmetatable', 'loadstring', 'pcall', 'unpack',
     'string.byte', 'math.floor', 'table.concat', 'error', 'pairs',
     'ipairs', 'require', 'coroutine', 'rawset', 'rawget',
+]
+
+BAD_PATTERNS = [
+    r'\d+\s+end',
+    r'\.\.\s*\.\.',
+    r',\s*,',
+    r'function\s+end',
+    r'if\s+then\s+end',
 ]
 
 class DeobfEngine:
@@ -89,7 +103,8 @@ class DeobfEngine:
             roblox_result, roblox_error = self._try_roblox_exec(source)
             if roblox_result:
                 trace.append({'stage': 'roblox', 'success': True})
-                return roblox_result, 'roblox_execution', 'Deobfuscated via Roblox execution', trace
+                validated = self._validate_and_repair(roblox_result)
+                return validated, 'roblox_execution', 'Deobfuscated via Roblox execution', trace
             elif roblox_error:
                 trace.append({'stage': 'roblox', 'error': roblox_error})
 
@@ -99,23 +114,26 @@ class DeobfEngine:
                 for i, item in enumerate(layers):
                     result = self._process_layer(item, i, string_table, var_name)
                     if result:
-                        return result, 'sandbox_source', f'Layer {i} source captured', trace
+                        validated = self._validate_and_repair(result)
+                        return validated, 'sandbox_source', f'Layer {i} source captured', trace
 
             combined = self._static_decode_raw(source, string_table)
             if combined:
                 lifter = FullSemanticVMLifter(string_table, var_name)
                 lifted_code = lifter.lift(combined)
-                beautified = self._beautify(lifted_code)
-                if self._is_valid_lua(beautified):
+                validated = self._validate_and_repair(lifted_code)
+                if self._is_valid_lua(validated):
+                    beautified = self._beautify(validated)
                     return beautified, 'semantic_full', f'Semantically reconstructed ({len(beautified)} chars)', trace
-                return beautified, 'semantic_raw', f'VM source ({len(beautified)} chars)', trace
+                return validated, 'semantic_raw', f'VM source ({len(validated)} chars)', trace
 
         layers, caps, diag = execute_sandbox(source, timeout=120)
         if layers:
             for i, item in enumerate(layers):
                 result = self._process_layer(item, i, None, None)
                 if result:
-                    return result, 'sandbox_source', f'Layer {i} source captured', trace
+                    validated = self._validate_and_repair(result)
+                    return validated, 'sandbox_source', f'Layer {i} source captured', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
@@ -123,15 +141,61 @@ class DeobfEngine:
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
-    def _try_roblox_exec(self, source):
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result, error = loop.run_until_complete(execute_via_roblox(source))
-            loop.close()
-            return result, error
-        except Exception as e:
-            return None, str(e)
+    def _validate_and_repair(self, code):
+        if not code or len(code) < 50:
+            return code
+        if self._is_valid_lua(code):
+            return self._beautify(code)
+        repaired = self._normalize_lua(code)
+        if self._is_valid_lua(repaired):
+            return self._beautify(repaired)
+        return self._beautify(code)
+
+    def _normalize_lua(self, code):
+        code = code.replace('\r\n', '\n').replace('\r', '\n')
+        code = re.sub(r'\n\s*\n', '\n\n', code)
+        code = re.sub(r'(\d+)\s+end', r'\1\nend', code)
+        code = re.sub(r'(\d+)\s+then', r'\1\nthen', code)
+        code = re.sub(r'(\d+)\s+else', r'\1\nelse', code)
+        code = re.sub(r'(\d+)\s+elseif', r'\1\nelseif', code)
+        code = re.sub(r'(\d+)\s+do', r'\1\ndo', code)
+        code = re.sub(r',\s*,', ',', code)
+        code = re.sub(r'\.\s*\.', '..', code)
+        code = re.sub(r'\bif\s*\n\s*then\b', 'if true then', code)
+        code = re.sub(r'\bfunction\s+end\b', 'function dummy() end', code)
+        code = re.sub(r'(\w+)\s*\(\s*\)\s*\(\s*\)', r'\1()()', code)
+        code = re.sub(r'\n\s*return\s*\n', '\nreturn ', code)
+        code = re.sub(r'\n\s*local\s+function\s*\n', '\nlocal function ', code)
+        lines = code.split('\n')
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                cleaned.append('')
+                continue
+            cleaned.append(stripped)
+        return '\n'.join(cleaned)
+
+    @staticmethod
+    def _is_valid_lua(code):
+        if not code or len(code) < 50:
+            return False
+        if HAS_LUAPARSER:
+            try:
+                lua_ast.parse(code)
+                return True
+            except Exception:
+                pass
+        words = set(re.findall(r'\b\w+\b', code[:10000]))
+        if len(words & LUA_KEYWORDS) < 2:
+            return False
+        printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
+        if (printable / max(len(code), 1)) < 0.70:
+            return False
+        for pat in BAD_PATTERNS:
+            if re.search(pat, code):
+                return False
+        return True
 
     def _static_decode_raw(self, source, string_table):
         b64_rev = self._parse_n_table(source)
@@ -474,15 +538,26 @@ class DeobfEngine:
         except:
             pass
 
-    @staticmethod
-    def _is_valid_lua(code):
-        if not code or len(code) < 50:
-            return False
-        words = set(re.findall(r'\b\w+\b', code[:10000]))
-        if len(words & LUA_KEYWORDS) < 2:
-            return False
-        printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
-        return (printable / max(len(code), 1)) >= 0.70
+    def _try_roblox_exec(self, source):
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result, error = loop.run_until_complete(execute_via_roblox(source))
+            loop.close()
+        except Exception as e:
+            return None, str(e)
+
+        if error:
+            return None, error
+
+        if isinstance(result, list):
+            string_table = result
+            combined = self._static_decode_raw(source, string_table)
+            if combined:
+                return combined, None
+            return None, "Static decode failed on Roblox table"
+
+        return result, None
 
 
 @dataclass
