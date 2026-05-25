@@ -82,12 +82,13 @@ class DeobfEngine:
 
             combined = self._static_decode_raw(source, string_table)
             if combined:
-                devirtualized = self._devirtualize(combined, string_table, var_name)
-                if devirtualized and self._is_valid_lua(devirtualized):
-                    return self._beautify(devirtualized), 'devirtualized', f'De-virtualized source ({len(devirtualized)} chars)', trace
-
-                beautified = self._beautify(combined)
-                return beautified, 'static_raw', f'Decoded VM source ({len(combined)} chars)', trace
+                decoded = self._apply_arithmetic_folding(combined)
+                decoded = self._substitute_strings(decoded, string_table, var_name)
+                decoded = self._recover_identifiers(decoded)
+                beautified = self._beautify(decoded)
+                if self._is_valid_lua(beautified):
+                    return beautified, 'static_full', f'Fully deobfuscated ({len(beautified)} chars)', trace
+                return beautified, 'static_raw', f'Decoded VM source ({len(beautified)} chars)', trace
 
         layers, caps, diag = execute_sandbox(source, timeout=120)
         if layers:
@@ -102,83 +103,48 @@ class DeobfEngine:
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
 
-    def _devirtualize(self, vm_source, string_table, var_name):
-        payload = None
-        decoder = None
-
-        big_strings = re.findall(r'"((?:[^"\\]|\\.){50,})"', vm_source)
-        for s in big_strings:
-            decoded = self._lua_escapes_to_bytes(s)
-            if len(decoded) > 50 and self._has_lua_keywords(decoded.decode('latin-1', errors='replace')):
-                payload = s
-                break
-
-        if not payload:
-            number_table = re.search(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', vm_source)
-            if number_table:
-                nums = [int(n.strip()) for n in number_table.group(1).split(',') if n.strip().isdigit()]
-                if len(nums) > 20:
-                    for key in range(256):
-                        decoded = bytes([b ^ key for b in nums])
-                        try:
-                            text = decoded.decode('utf-8')
-                            if self._has_lua_keywords(text):
-                                return text
-                        except:
-                            try:
-                                text = decoded.decode('latin-1')
-                                if self._has_lua_keywords(text):
-                                    return text
-                            except:
-                                pass
-
-        xor_key = None
-        xor_match = re.search(r'local\s+\w+\s*=\s*(\d+)\s*;?\s*for', vm_source)
-        if xor_match:
-            xor_key = int(xor_match.group(1))
-        else:
-            xor_keys = re.findall(r'(\d+)\s*\)\s*;?\s*for', vm_source)
-            if xor_keys:
-                xor_key = int(xor_keys[0])
-
-        if xor_key and payload:
-            raw = self._lua_escapes_to_bytes(payload)
-            decoded = bytes([b ^ xor_key for b in raw])
+    def _apply_arithmetic_folding(self, code):
+        def fold_match(m):
+            expr = m.group(1)
             try:
-                text = decoded.decode('utf-8')
-                if self._has_lua_keywords(text):
-                    return text
+                val = eval(expr)
+                if isinstance(val, int) and -100000 < val < 100000:
+                    return str(val)
             except:
-                try:
-                    text = decoded.decode('latin-1')
-                    if self._has_lua_keywords(text):
-                        return text
-                except:
-                    pass
+                pass
+            return m.group(0)
+        code = re.sub(r'\((-?[\d+\-*/() ]+)\)', fold_match, code)
+        code = re.sub(r'(-?\d+)\s*([+\-])\s*(-?\d+)', lambda m: str(eval(m.group(0))), code)
+        return code
 
-        if payload:
-            base64_variants = [
-                payload.strip('"'),
-                payload.replace('\\n', '').replace('\\r', '').replace('\\t', ''),
-            ]
-            for variant in base64_variants:
-                try:
-                    raw = base64.b64decode(variant)
-                    try:
-                        text = raw.decode('utf-8')
-                        if self._has_lua_keywords(text):
-                            return text
-                    except:
-                        try:
-                            text = raw.decode('latin-1')
-                            if self._has_lua_keywords(text):
-                                return text
-                        except:
-                            pass
-                except:
-                    pass
-
-        return None
+    def _recover_identifiers(self, code):
+        symbol_map = {}
+        lines = code.split('\n')
+        for line in lines:
+            m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line.strip())
+            if m:
+                var, val = m.group(1), m.group(2)
+                if val in LUA_KEYWORDS or val in LUA_SUBSTRINGS:
+                    symbol_map[var] = val
+                continue
+            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line.strip())
+            if m:
+                var, base, field = m.group(1), m.group(2), m.group(3)
+                base_name = symbol_map.get(base, base)
+                symbol_map[var] = f"{base_name}_{field}"
+                continue
+            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\[([^\]]+)\]', line.strip())
+            if m:
+                var, base, idx = m.group(1), m.group(2), m.group(3)
+                idx = idx.strip('"\'')
+                base_name = symbol_map.get(base, base)
+                if idx.isdigit():
+                    idx = int(idx)
+                symbol_map[var] = f"{base_name}[{idx}]"
+                continue
+        for var, name in symbol_map.items():
+            code = re.sub(rf'\b{re.escape(var)}\b', name, code)
+        return code
 
     def _static_decode_raw(self, source, string_table):
         b64_rev = self._parse_n_table(source)
@@ -359,8 +325,11 @@ class DeobfEngine:
 
     def _parse_n_table(self, source):
         best_rev = {}
-        for m in re.finditer(r'local\s+\w{1,4}\s*=\s*\{([^}]{10,})\}', source):
-            body = m.group(1)
+        for m in re.finditer(r'local\s+\w{1,4}\s*=\s*\{', source):
+            brace_pos = m.end() - 1
+            body = self._extract_balanced_table(source, brace_pos)
+            if not body or len(body) < 10:
+                continue
             rev = {}
             for m2 in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
                 esc = m2.group(1)
@@ -491,7 +460,7 @@ class DeobfEngine:
         for kw in LUA_SUBSTRINGS:
             if kw in lower_text:
                 count += 1
-                if count >= 1:
+                if count >= 2:
                     return True
         return False
 
