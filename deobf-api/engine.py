@@ -500,14 +500,19 @@ class FullSemanticVMLifter:
         code = self._fold_arithmetic(code)
         code = self._subst_strings(code)
 
-        if not self._extract_any_table(code):
-            return 'return nil'
-        if not self._extract_any_handlers(code):
-            return 'return nil'
+        table_ok = self._extract_any_table(code)
+        handlers_ok = self._extract_any_handlers(code)
+
+        if not table_ok or not handlers_ok:
+            return vm_code
 
         self._build_cfg()
         self._symbolic_execute()
         self._optimize_ir()
+
+        if not self.output:
+            return vm_code
+
         return self._emit_lua()
 
     def _neutralize(self, code):
@@ -614,17 +619,21 @@ class FullSemanticVMLifter:
                     handlers[opc] = self._classify(m.group(3))
                 except:
                     continue
-            if len(handlers) >= 3:
+            if len(handlers) >= 2:
                 self.handlers = handlers
                 return True
 
+        handlers = {}
         for m in re.finditer(r'if\s+(\w+)\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)', code, re.DOTALL):
             try:
                 opc = int(m.group(2))
-                self.handlers[opc] = self._classify(m.group(3))
+                handlers[opc] = self._classify(m.group(3))
             except:
                 continue
-        return len(self.handlers) >= 3
+        if len(handlers) >= 2:
+            self.handlers = handlers
+            return True
+        return False
 
     def _classify(self, h):
         h = h.strip()
