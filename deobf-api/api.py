@@ -83,7 +83,10 @@ def deobf():
         log.error(f"Deobf failed: {e}\n{tb}")
         return jsonify({'error': str(e), 'traceback': tb[:4000]}), 500
 
-    is_valid, validation_error = validate_lua(result) if result else (False, "No output")
+    valid_result = validate_lua(result) if result else {"valid": False, "error": "No output"}
+    is_valid = valid_result.get("valid", False)
+    validation_error = valid_result.get("error", "")
+
     if not is_valid and result and len(result) > 50:
         log.warning(f"Output failed validation: {validation_error}")
         return jsonify({
