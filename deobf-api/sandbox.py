@@ -1,13 +1,54 @@
 import os, subprocess, tempfile, shutil, traceback
 
 LUNE_BIN = shutil.which('lune')
-RENBEX_VM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'renbex_vm.luau')
+RENBEX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'renbex0')
+
+DRIVER_TEMPLATE = r'''local Sandbox = require("./Sandbox")
+local FileSystem = require("@lune/fs")
+
+local cap_dir = "{cap_dir}"
+local cap_count = 0
+
+local ecore, mt, registry = Sandbox:Create()
+
+local orig_loadstring = ecore.loadstring
+ecore.loadstring = function(chunk, name)
+    cap_count = cap_count + 1
+    local f = io.open(cap_dir .. "/layer_" .. tostring(cap_count) .. ".luau", "w")
+    if f then
+        f:write(chunk)
+        f:close()
+    end
+    return orig_loadstring(chunk, name)
+end
+
+local code = FileSystem.readFile("{input_file}")
+local bytecode = require("@lune/luau").compile(code, {
+    optimizationLevel = 2,
+    coverageLevel = 0,
+    debugLevel = 0,
+})
+local fn = require("@lune/luau").load(bytecode, {
+    environment = setmetatable(ecore, mt),
+    injectGlobals = false,
+    codegenEnabled = false,
+})
+
+local ok, err = pcall(fn)
+if not ok then
+    io.stderr:write("EXECUTION_ERROR: " .. tostring(err) .. "\n")
+end
+
+local diag = io.open(cap_dir .. "/diag.txt", "w")
+if diag then
+    diag:write("Captures: " .. cap_count .. "\n")
+    diag:close()
+end
+'''
 
 def execute_sandbox(source, timeout=120, varargs=None):
-    if not LUNE_BIN:
-        return [], [], "Lune not installed"
-    if not os.path.isfile(RENBEX_VM_PATH):
-        return [], [], "Renbex0 VM not found"
+    if not LUNE_BIN or not os.path.isdir(RENBEX_DIR):
+        return [], [], "Renbex0 VM not available"
 
     error_log, layers, caps, diag = [], [], [], ''
     try:
@@ -15,58 +56,15 @@ def execute_sandbox(source, timeout=120, varargs=None):
     except Exception as e:
         return [], [], f'TEMP_DIR_ERROR: {e}'
     try:
-        input_script = os.path.join(temp_dir, 'input.luau')
-        driver_script = os.path.join(temp_dir, 'driver.luau')
-        output_dir   = temp_dir.replace('\\', '/')
+        output_dir = temp_dir.replace('\\', '/')
+        input_file = os.path.join(RENBEX_DIR, 'input.luau')
+        driver_file = os.path.join(temp_dir, 'driver.luau')
 
-        with open(input_script, 'wb') as f:
-            f.write(source.encode('utf-8', errors='replace'))
+        with open(input_file, 'w', encoding='utf-8') as f:
+            f.write(source)
 
-        driver_code = f'''
-local renbex = loadfile("{RENBEX_VM_PATH}")
-if renbex then
-    local ok, err = pcall(renbex)
-    if not ok then
-        io.stderr:write("RENBEX_LOAD_ERROR: " .. tostring(err) .. "\\n")
-    end
-end
-
-local cap_dir = "{output_dir}"
-local cap_count = 0
-
-local orig_load = loadstring or load
-loadstring = function(chunk, name)
-    cap_count = cap_count + 1
-    local f = io.open(cap_dir .. "/layer_" .. cap_count .. ".luau", "w")
-    if f then
-        f:write(chunk)
-        f:close()
-    end
-    if orig_load then
-        return orig_load(chunk, name)
-    end
-    return function() end
-end
-load = loadstring
-
-local target = loadfile("{input_script}")
-if target then
-    local ok, err = pcall(target)
-    if not ok then
-        io.stderr:write("EXECUTION_ERROR: " .. tostring(err) .. "\\n")
-    end
-else
-    io.stderr:write("COULD_NOT_LOAD_INPUT\\n")
-end
-
-local diag = io.open(cap_dir .. "/diag.txt", "w")
-if diag then
-    diag:write("Captures: " .. cap_count .. "\\n")
-    diag:close()
-end
-'''
-
-        with open(driver_script, 'w', encoding='utf-8') as f:
+        driver_code = DRIVER_TEMPLATE.format(cap_dir=output_dir, input_file=input_file)
+        with open(driver_file, 'w', encoding='utf-8') as f:
             f.write(driver_code)
 
         env = os.environ.copy()
@@ -74,8 +72,8 @@ end
         stderr_output = ''
         try:
             result = subprocess.run(
-                [LUNE_BIN, 'run', driver_script],
-                capture_output=True, text=True, timeout=timeout, cwd=temp_dir, env=env
+                [LUNE_BIN, 'run', driver_file],
+                capture_output=True, text=True, timeout=timeout, cwd=RENBEX_DIR, env=env
             )
             stderr_output = result.stderr
             if result.returncode != 0:
