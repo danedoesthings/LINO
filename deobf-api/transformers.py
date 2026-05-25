@@ -2,6 +2,7 @@ import re, base64, struct, string, itertools
 from collections import Counter
 
 class BaseLifter:
+    name = "BaseLifter"
     def get_diag(self):
         return {}
 
@@ -47,6 +48,7 @@ class BaseLifter:
         return text
 
 class AdvancedWeAreDevsLifter(BaseLifter):
+    name = "AdvancedWeAreDevsLifter"
     def __init__(self):
         self.string_tables_found = 0
         self.b64_maps_found = 0
@@ -252,6 +254,7 @@ class AdvancedWeAreDevsLifter(BaseLifter):
 
 
 class MoonSecLifter(BaseLifter):
+    name = "MoonSecLifter"
     def lift(self, source):
         results = []
         b64_tables = self._find_moonsec_tables(source)
@@ -306,6 +309,7 @@ class MoonSecLifter(BaseLifter):
 
 
 class IronBrewLifter(BaseLifter):
+    name = "IronBrewLifter"
     def lift(self, source):
         results = []
         xor_keys = self._find_xor_keys(source)
@@ -384,6 +388,7 @@ class IronBrewLifter(BaseLifter):
 
 
 class PSULifter(BaseLifter):
+    name = "PSULifter"
     def lift(self, source):
         results = []
         loadstring_calls = re.findall(r'loadstring\s*\(\s*([^)]+)\s*\)', source)
@@ -413,6 +418,7 @@ class PSULifter(BaseLifter):
 
 
 class XORStringDecoder(BaseLifter):
+    name = "XORStringDecoder"
     def lift(self, source):
         results = []
         encoded_arrays = re.findall(r'\{\s*([\d,\s]{30,})\s*\}', source)
@@ -434,6 +440,7 @@ class XORStringDecoder(BaseLifter):
 
 
 class NumberArrayDecoder(BaseLifter):
+    name = "NumberArrayDecoder"
     def lift(self, source):
         results = []
         patterns = [
@@ -455,6 +462,7 @@ class NumberArrayDecoder(BaseLifter):
 
 
 class StandardBase64Decoder(BaseLifter):
+    name = "StandardBase64Decoder"
     def lift(self, source):
         results = []
         b64_pattern = r'"([A-Za-z0-9+/=]{40,})"'
@@ -476,6 +484,7 @@ class StandardBase64Decoder(BaseLifter):
 
 
 class StringPatternExtractor:
+    name = "StringPatternExtractor"
     @staticmethod
     def extract_all(source):
         patterns = {
@@ -492,6 +501,7 @@ class StringPatternExtractor:
 
 
 class BytecodeHarvester:
+    name = "BytecodeHarvester"
     LUA_SIGNATURE = b'\x1bLua'
     LUA_VERSION_OFFSET = 4
 
