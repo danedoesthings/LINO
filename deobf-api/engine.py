@@ -57,7 +57,7 @@ BAD_PATTERNS = [
 ]
 
 # ----------------------------------------------------------------------
-# AST node classes (inlined from ast_nodes.py)
+# AST node classes
 # ----------------------------------------------------------------------
 class ASTNode:
     pass
@@ -131,7 +131,7 @@ class TableNode(ASTNode):
     fields: List[tuple] = field(default_factory=list)
 
 # ----------------------------------------------------------------------
-# Lua emitter (inlined from lua_emitter.py)
+# Lua emitter
 # ----------------------------------------------------------------------
 class LuaEmitter:
     def __init__(self):
@@ -216,7 +216,7 @@ class LuaEmitter:
         return "    " * self.indent
 
 # ----------------------------------------------------------------------
-# VM State / Symbolic execution (inlined)
+# VM State / Symbolic execution
 # ----------------------------------------------------------------------
 @dataclass
 class SymbolicValue:
@@ -381,8 +381,64 @@ class SymbolicExecutor:
 
 
 # ----------------------------------------------------------------------
-# Helper functions (inlined from dispatcher / instruction_decoder)
+# Helper functions (Prometheus-style robust extraction)
 # ----------------------------------------------------------------------
+def _find_table_literal_end(content, open_brace_index):
+    """Robust balanced-brace scanner from Prometheus deobfuscator."""
+    depth = 0
+    quote = None
+    idx = open_brace_index
+    while idx < len(content):
+        char = content[idx]
+        if quote:
+            if char == "\\":
+                idx += 2
+                continue
+            if char == quote:
+                quote = None
+            idx += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return idx + 1
+        idx += 1
+    return -1
+
+
+def extract_table_literal(content, pattern):
+    """Find a table literal matching pattern and return its full text."""
+    m = re.search(pattern, content)
+    if not m:
+        return None
+    open_brace_index = content.find("{", m.start())
+    if open_brace_index == -1:
+        return None
+    table_end = _find_table_literal_end(content, open_brace_index)
+    if table_end == -1:
+        return None
+    return content[open_brace_index:table_end]
+
+
+def parse_table_strings(table_body):
+    """Extract string entries from a table literal body."""
+    inner = table_body[1:-1]
+    entries = [e.strip() for e in re.split(r'\s*,\s*', inner) if e.strip()]
+    parsed = []
+    for e in entries:
+        if (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
+            parsed.append(e[1:-1])
+        elif e.lstrip('-').isdigit():
+            parsed.append(int(e))
+        else:
+            parsed.append(e)
+    return parsed
+
+
 def find_dispatch_loop(code):
     m = re.search(r'while\s+.+?do\s+(.*?)end\s*end', code, re.DOTALL)
     if not m:
@@ -428,55 +484,12 @@ def extract_handlers(dispatch_body):
     return handlers
 
 
-def extract_balanced(code, start):
-    if start >= len(code) or code[start] != '{':
-        return None
-    depth = 0
-    in_str = False
-    quote = None
-    i = start
-    while i < len(code):
-        c = code[i]
-        if in_str:
-            if c == '\\':
-                i += 2
-                continue
-            if c == quote:
-                in_str = False
-        else:
-            if c in ('"', "'"):
-                in_str = True
-                quote = c
-            elif c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    return code[start:i+1]
-        i += 1
-    return None
-
-
-def parse_table_entries(body):
-    inner = body[1:-1]
-    entries = [e.strip() for e in re.split(r'\s*,\s*', inner) if e.strip()]
-    parsed = []
-    for e in entries:
-        if (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
-            parsed.append(e[1:-1])
-        elif e.lstrip('-').isdigit():
-            parsed.append(int(e))
-        else:
-            parsed.append(e)
-    return parsed
-
-
 def extract_instruction_table(code):
     best = []
     for m in re.finditer(r'local\s+\w+\s*=\s*\{', code):
-        body = extract_balanced(code, m.end()-1)
+        body = extract_table_literal(code, rf'\b{re.escape(m.group(0)[:-1].strip())}\s*=\s*\{{')
         if body:
-            entries = parse_table_entries(body)
+            entries = parse_table_strings(body)
             if len(entries) > len(best):
                 best = entries
     return best
@@ -512,7 +525,7 @@ def decode_instruction_stream(inst_table, handlers):
 
 
 # ----------------------------------------------------------------------
-# Main DeobfEngine (with fixes)
+# Main DeobfEngine (with Prometheus-style fallback)
 # ----------------------------------------------------------------------
 class DeobfEngine:
     def __init__(self):
@@ -596,10 +609,11 @@ class DeobfEngine:
                             return beautified, 'sandbox_source', f'Layer {i} source captured', trace
 
                 combined = self._static_decode_raw(source, string_table)
+                if not combined:
+                    combined = self._static_decode_prometheus_fallback(source, var_name, string_table)
+
                 if combined:
                     stage = "static_decode"
-                    # No validation here – combined is raw bytes
-
                     lifted_code = self._vm_lift(combined, string_table, var_name)
                     if lifted_code:
                         stage = "vm_lift"
@@ -607,7 +621,6 @@ class DeobfEngine:
                         pipeline_validate_stage(beautified, stage, strict=True)
                         return beautified, 'semantic_full', f'Semantically reconstructed ({len(beautified)} chars)', trace
                     else:
-                        # fallback: use beautified raw combined if it looks like Lua
                         beautified = self._beautify(combined)
                         if self._is_valid_lua(beautified):
                             return beautified, 'static_decode', 'Direct static decode', trace
@@ -631,6 +644,58 @@ class DeobfEngine:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
+
+    def _static_decode_prometheus_fallback(self, source, var_name, string_table):
+        """Prometheus-style fallback: extract the table literal and run Lua to decode it."""
+        table_literal = extract_table_literal(source, rf'\blocal\s+{re.escape(var_name)}\s*=\s*\{{')
+        if not table_literal:
+            return None
+
+        lua_script = rf'''
+local function escape_lua_string(s)
+    local parts = {{'"'}}
+    for i = 1, #s do
+        local byte = string.byte(s, i)
+        if byte == 92 then table.insert(parts, "\\\\")
+        elseif byte == 34 then table.insert(parts, "\\\"")
+        elseif byte == 10 then table.insert(parts, "\\n")
+        elseif byte == 13 then table.insert(parts, "\\r")
+        elseif byte == 9 then table.insert(parts, "\\t")
+        elseif byte >= 32 and byte <= 126 then table.insert(parts, string.char(byte))
+        else table.insert(parts, string.format("\\%03d", byte)) end
+    end
+    table.insert(parts, '"')
+    return table.concat(parts)
+end
+local constants = {table_literal}
+local out = "local Constants = {{"
+for i, v in ipairs(constants) do
+    out = out .. " [" .. i .. "] = " .. escape_lua_string(v) .. ","
+end
+out = out .. " }}"
+print(out)
+'''
+        try:
+            result = subprocess.run(
+                ['lua5.1', '-e', lua_script],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+        try:
+            result = subprocess.run(
+                ['lua', '-e', lua_script],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+        return None
 
     def _vm_lift(self, decoded_source, string_table, var_name):
         dispatch_body = find_dispatch_loop(decoded_source)
@@ -719,12 +784,7 @@ class DeobfEngine:
             return self._static_decode_raw_inner(source, string_table)
         except Exception as e:
             save_crash_snapshot("static_decode", source, "", e)
-            raise LinoError(
-                stage="static_decode",
-                message=str(e),
-                original_exception=e,
-                confidence=confidence_score(source)
-            )
+            return None
 
     def _static_decode_raw_inner(self, source, string_table):
         b64_rev = self._parse_n_table(source)
@@ -847,13 +907,16 @@ class DeobfEngine:
         return '\n'.join(out_lines)
 
     def _parse_n_table(self, source):
+        """Robust N-table extraction using Prometheus-style balanced-brace scanning."""
         best_rev = {}
-        for m in re.finditer(r'local\s+\w{1,4}\s*=\s*\{', source):
-            brace_pos = m.end() - 1
-            body = self._extract_balanced_table(source, brace_pos)
+        # Look for any local table with numeric or string-key entries that could be a base64 map
+        for m in re.finditer(r'local\s+(\w+)\s*=\s*\{', source):
+            var_name = m.group(1)
+            body = extract_table_literal(source, rf'\blocal\s+{re.escape(var_name)}\s*=\s*\{{')
             if not body or len(body) < 10:
                 continue
             rev = {}
+            # Pattern: ["\NNN"] = value
             for m2 in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
                 esc = m2.group(1)
                 val = self._safe_eval(m2.group(2).strip())
@@ -861,6 +924,7 @@ class DeobfEngine:
                     code_point = self._lua_escape_to_int(esc)
                     if code_point is not None:
                         rev[val] = chr(code_point)
+            # Pattern: letter = value
             for m2 in re.finditer(r'(?<![\["\'"])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
                 ch = m2.group(1)
                 val = self._safe_eval(m2.group(2).strip())
@@ -872,9 +936,10 @@ class DeobfEngine:
         for i, ch in enumerate(std):
             if i not in best_rev:
                 best_rev[i] = ch
-        return best_rev
+        return best_rev if len(best_rev) >= 10 else {}
 
     def _parse_shuffle_ranges(self, source):
+        """Robust shuffle-range extraction."""
         ranges = []
         for m in re.finditer(r'ipairs\s*\(\s*\{', source):
             brace_pos = m.end() - 1
