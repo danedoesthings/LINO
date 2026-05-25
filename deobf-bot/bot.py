@@ -30,6 +30,7 @@ SUCCESS_METHODS = (
     'StandardBase64Decoder_unluac', 'recursive_unluac',
     'recursive_sandbox_capture', 'recursive_lune_capture',
     'lifter_unluac', 'lifter_source',
+    'roblox_execution', 'semantic_full', 'semantic_raw',
 )
 
 async def call_api(source_b64):
@@ -52,6 +53,19 @@ def _truncate(text, max_len):
 
 def _sanitize_diag(text):
     return ''.join(c for c in text if c.isprintable() or c in '\n\t')
+
+def _cleanup_lua_output(code):
+    if not code:
+        return code
+    code = code.replace('\r\n', '\n').replace('\r', '\n')
+    code = re.sub(r'\n\s*\n\s*\n', '\n\n', code)
+    code = re.sub(r'(\d+)\s+end', r'\1\nend', code)
+    code = re.sub(r'(\d+)\s+then', r'\1\nthen', code)
+    code = re.sub(r'(\d+)\s+else', r'\1\nelse', code)
+    code = re.sub(r'(\d+)\s+do', r'\1\ndo', code)
+    code = re.sub(r',\s*,', ',', code)
+    code = re.sub(r'\.\s*\.', '..', code)
+    return code
 
 async def run_deobf(raw_bytes, filename):
     if len(raw_bytes) > MAX_BYTES:
@@ -95,9 +109,11 @@ async def run_deobf(raw_bytes, filename):
         }
 
     result = data.get('result', '')
+    result = _cleanup_lua_output(result)
     detected = data.get('detected', 'unknown')
     diagnostic = data.get('diagnostic', '')
     trace = data.get('trace', [])
+    warning = data.get('warning', '')
 
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
@@ -105,6 +121,10 @@ async def run_deobf(raw_bytes, filename):
         title, color = 'Bytecode Extracted', 0xe67e22
     else:
         title, color = 'Deobfuscation Failed', 0xe74c3c
+
+    if warning:
+        title = f'{title} (with warnings)'
+        color = 0xf1c40f
 
     em = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
@@ -115,6 +135,9 @@ async def run_deobf(raw_bytes, filename):
         clean = _sanitize_diag(diagnostic)
         short_diag = clean[:900] + ('...' if len(clean) > 900 else '')
         em.add_field(name='Diagnostic', value=f'```\n{short_diag}\n```', inline=False)
+
+    if warning:
+        em.add_field(name='Warning', value=f'```\n{warning[:900]}\n```', inline=False)
 
     if trace:
         stages = [t.get('stage', '?') for t in trace[:10]]
@@ -178,7 +201,6 @@ async def prefix_fulldiag(ctx):
     res = last_results.get(ctx.channel.id)
     if not res or not res.get('full_diag'):
         return await ctx.send('No truncated diagnostic available. Run `=deobf` first.')
-
     diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
     file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
     await ctx.send('Full diagnostic:', file=file)
@@ -186,8 +208,7 @@ async def prefix_fulldiag(ctx):
 @prefix_deobf.error
 async def deobf_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
-        retry_seconds = error.retry_after
-        await ctx.send(f'Cooldown active. Try again in {retry_seconds:.0f}s')
+        await ctx.send(f'Cooldown active. Try again in {error.retry_after:.0f}s')
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send('Missing required argument. Usage: `=deobf <file>` or paste code.')
     elif isinstance(error, commands.CommandInvokeError):
@@ -209,8 +230,8 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
     if res.get('full_diag'):
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
-        file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
-        await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=file, ephemeral=True)
+        diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
+        await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file, ephemeral=True)
 
 @slash_deobf.error
 async def slash_deobf_error(interaction: discord.Interaction, error):
