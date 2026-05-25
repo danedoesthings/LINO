@@ -1,7 +1,8 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, ast as py_ast, operator as op
 from collections import OrderedDict, defaultdict, deque, namedtuple
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
+from enum import Enum
 
 from transformers import (
     AdvancedWeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
@@ -31,49 +32,105 @@ except ImportError:
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
-LUA_KEYWORDS = {
-    'function', 'local', 'end', 'return', 'if', 'then', 'else', 'elseif',
-    'for', 'while', 'do', 'repeat', 'until', 'not', 'and', 'or',
-    'nil', 'true', 'false', 'in', 'break', 'print', 'require',
-    'pcall', 'xpcall', 'loadstring', 'load', 'pairs', 'ipairs',
-    'setmetatable', 'getmetatable', 'rawset', 'rawget', 'tostring', 'tonumber',
-    'table', 'string', 'math', 'coroutine', 'debug', 'io', 'os',
-    'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
+OPS = {
+    py_ast.Add: op.add,
+    py_ast.Sub: op.sub,
+    py_ast.Mult: op.mul,
+    py_ast.Div: op.floordiv,
+    py_ast.USub: op.neg
 }
 
-LUA_SUBSTRINGS = [
-    'function', 'local', 'end', 'print', 'tostring', 'tonumber',
-    'setmetatable', 'getmetatable', 'loadstring', 'pcall', 'unpack',
-    'string.byte', 'math.floor', 'table.concat', 'error', 'pairs',
-    'ipairs', 'require', 'coroutine', 'rawset', 'rawget',
-]
+def _safe_eval_math(expr_str):
+    def _eval_node(node):
+        if isinstance(node, py_ast.Num):
+            return node.n
+        if isinstance(node, py_ast.BinOp):
+            return OPS[type(node.op)](_eval_node(node.left), _eval_node(node.right))
+        if isinstance(node, py_ast.UnaryOp):
+            return OPS[type(node.op)](_eval_node(node.operand))
+        raise TypeError(node)
+    return _eval_node(py_ast.parse(expr_str.strip(), mode='eval').body)
 
-BAD_PATTERNS = [
-    r'\d+\s+end',
-    r'\.\.\s*\.\.',
-    r',\s*,',
-    r'function\s+end',
-    r'if\s+then\s+end',
-]
 
-# ----------------------------------------------------------------------
-# AST node classes
-# ----------------------------------------------------------------------
+class IROpcode(Enum):
+    LOADK = "LOADK"
+    MOVE = "MOVE"
+    CALL = "CALL"
+    GETGLOBAL = "GETGLOBAL"
+    SETGLOBAL = "SETGLOBAL"
+    GETTABLE = "GETTABLE"
+    SETTABLE = "SETTABLE"
+    ADD = "ADD"
+    SUB = "SUB"
+    MUL = "MUL"
+    DIV = "DIV"
+    CONCAT = "CONCAT"
+    JMP = "JMP"
+    EQ = "EQ"
+    LT = "LT"
+    LE = "LE"
+    TEST = "TEST"
+    RETURN = "RETURN"
+    CLOSURE = "CLOSURE"
+    NEWTABLE = "NEWTABLE"
+    FORPREP = "FORPREP"
+    FORLOOP = "FORLOOP"
+    TFORLOOP = "TFORLOOP"
+    SELF = "SELF"
+    VARARG = "VARARG"
+
+
+@dataclass
+class IRInstruction:
+    opcode: IROpcode
+    args: List[Any] = field(default_factory=list)
+    dest: Optional[str] = None
+    pc: int = 0
+
+
+class IRBlock:
+    def __init__(self, id: int):
+        self.id = id
+        self.instructions: List[IRInstruction] = []
+        self.predecessors: List[IRBlock] = []
+        self.successors: List[IRBlock] = []
+        self.dominators: Set[IRBlock] = set()
+        self.immediate_dominator: Optional[IRBlock] = None
+        self.dominance_frontier: Set[IRBlock] = set()
+        self.is_loop_header = False
+        self.loop_depth = 0
+        self.phis: List[IRInstruction] = []
+
+
+@dataclass
+class SymbolicExpr:
+    kind: str
+    value: Any = None
+    left: Optional['SymbolicExpr'] = None
+    right: Optional['SymbolicExpr'] = None
+    is_constant: bool = False
+    reg: Optional[int] = None
+
+
 class ASTNode:
     pass
+
 
 @dataclass
 class ConstNode(ASTNode):
     value: Any
 
+
 @dataclass
 class VarNode(ASTNode):
     name: str
+
 
 @dataclass
 class IndexNode(ASTNode):
     table: ASTNode
     key: ASTNode
+
 
 @dataclass
 class BinaryOpNode(ASTNode):
@@ -81,15 +138,12 @@ class BinaryOpNode(ASTNode):
     left: ASTNode
     right: ASTNode
 
-@dataclass
-class UnaryOpNode(ASTNode):
-    op: str
-    operand: ASTNode
 
 @dataclass
 class CallNode(ASTNode):
     func: ASTNode
     args: List[ASTNode] = field(default_factory=list)
+
 
 @dataclass
 class AssignNode(ASTNode):
@@ -97,16 +151,20 @@ class AssignNode(ASTNode):
     value: ASTNode
     local: bool = True
 
+
 @dataclass
 class IfNode(ASTNode):
     condition: ASTNode
-    body: List[ASTNode] = field(default_factory=list)
+    then_body: List[ASTNode] = field(default_factory=list)
     else_body: List[ASTNode] = field(default_factory=list)
+
 
 @dataclass
 class WhileNode(ASTNode):
     condition: ASTNode
     body: List[ASTNode] = field(default_factory=list)
+    is_repeat: bool = False
+
 
 @dataclass
 class ForNode(ASTNode):
@@ -116,38 +174,53 @@ class ForNode(ASTNode):
     step: Optional[ASTNode]
     body: List[ASTNode] = field(default_factory=list)
 
+
 @dataclass
 class FunctionNode(ASTNode):
     name: Optional[str]
     params: List[str] = field(default_factory=list)
     body: List[ASTNode] = field(default_factory=list)
 
+
 @dataclass
 class ReturnNode(ASTNode):
     values: List[ASTNode] = field(default_factory=list)
 
+
 @dataclass
 class TableNode(ASTNode):
-    fields: List[tuple] = field(default_factory=list)
+    fields: List[Tuple[ASTNode, ASTNode]] = field(default_factory=list)
 
-# ----------------------------------------------------------------------
-# Lua emitter
-# ----------------------------------------------------------------------
+
 class LuaEmitter:
     def __init__(self):
-        self.indent = 0
+        self.indent_level = 0
+
+    def _indent(self):
+        return "    " * self.indent_level
 
     def emit(self, node):
         if isinstance(node, list):
             return "\n".join(self.emit(n) for n in node)
-        method = getattr(self, f"emit_{type(node).__name__}", None)
+        if node is None:
+            return ""
+        method_name = f"emit_{type(node).__name__}"
+        method = getattr(self, method_name, None)
         if method:
             return method(node)
         return str(node)
 
+    def emit_str(self, s):
+        escaped = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+        return f'"{escaped}"'
+
     def emit_ConstNode(self, node):
         if isinstance(node.value, str):
-            return f'"{node.value}"'
+            return self.emit_str(node.value)
+        if isinstance(node.value, bool):
+            return 'true' if node.value else 'false'
+        if node.value is None:
+            return 'nil'
         return str(node.value)
 
     def emit_VarNode(self, node):
@@ -159,9 +232,6 @@ class LuaEmitter:
     def emit_BinaryOpNode(self, node):
         return f"({self.emit(node.left)} {node.op} {self.emit(node.right)})"
 
-    def emit_UnaryOpNode(self, node):
-        return f"{node.op}{self.emit(node.operand)}"
-
     def emit_CallNode(self, node):
         args = ", ".join(self.emit(a) for a in node.args)
         return f"{self.emit(node.func)}({args})"
@@ -172,32 +242,44 @@ class LuaEmitter:
 
     def emit_IfNode(self, node):
         cond = self.emit(node.condition)
-        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
-        result = f"if {cond} then\n{body}"
+        self.indent_level += 1
+        then_body = "\n".join(self._indent() + self.emit(s) for s in node.then_body)
+        self.indent_level -= 1
+        result = f"if {cond} then\n{then_body}"
         if node.else_body:
-            else_body = "\n".join(self.indent_str() + self.emit(s) for s in node.else_body)
+            self.indent_level += 1
+            else_body = "\n".join(self._indent() + self.emit(s) for s in node.else_body)
+            self.indent_level -= 1
             result += f"\nelse\n{else_body}"
         result += "\nend"
         return result
 
     def emit_WhileNode(self, node):
         cond = self.emit(node.condition)
-        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
+        self.indent_level += 1
+        body = "\n".join(self._indent() + self.emit(s) for s in node.body)
+        self.indent_level -= 1
+        if node.is_repeat:
+            return f"repeat\n{body}\nuntil {cond}"
         return f"while {cond} do\n{body}\nend"
 
     def emit_ForNode(self, node):
         step = f", {self.emit(node.step)}" if node.step else ""
-        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
+        self.indent_level += 1
+        body = "\n".join(self._indent() + self.emit(s) for s in node.body)
+        self.indent_level -= 1
         return f"for {node.var} = {self.emit(node.start)}, {self.emit(node.end)}{step} do\n{body}\nend"
 
     def emit_FunctionNode(self, node):
         name = node.name or ""
         params = ", ".join(node.params)
-        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
-        self.indent += 1
-        out = f"function {name}({params})\n{body}\nend"
-        self.indent -= 1
-        return out
+        self.indent_level += 1
+        body = "\n".join(self._indent() + self.emit(s) for s in node.body)
+        self.indent_level -= 1
+        if name:
+            return f"function {name}({params})\n{body}\nend"
+        else:
+            return f"function({params})\n{body}\nend"
 
     def emit_ReturnNode(self, node):
         vals = ", ".join(self.emit(v) for v in node.values)
@@ -205,186 +287,173 @@ class LuaEmitter:
 
     def emit_TableNode(self, node):
         fields = []
-        for k, v in node.fields:
-            if isinstance(k, int) and k == len(fields)+1:
+        for i, (k, v) in enumerate(node.fields):
+            if isinstance(k, ConstNode) and isinstance(k.value, int) and k.value == i + 1:
                 fields.append(self.emit(v))
             else:
                 fields.append(f"[{self.emit(k)}] = {self.emit(v)}")
         return "{" + ", ".join(fields) + "}"
 
-    def indent_str(self):
-        return "    " * self.indent
-
-# ----------------------------------------------------------------------
-# VM State / Symbolic execution
-# ----------------------------------------------------------------------
-@dataclass
-class SymbolicValue:
-    kind: str
-    value: Any = None
-    expr: Optional[ASTNode] = None
-    reg: Optional[int] = None
-
-@dataclass
-class Instruction:
-    opcode: int
-    operands: List[Union[int, str]] = field(default_factory=list)
-    pc: int = 0
-
-@dataclass
-class BasicBlock:
-    id: int
-    instructions: List[Instruction] = field(default_factory=list)
-    successors: List['BasicBlock'] = field(default_factory=list)
-    predecessors: List['BasicBlock'] = field(default_factory=list)
-
-@dataclass
-class VMState:
-    registers: Dict[int, SymbolicValue] = field(default_factory=dict)
-    stack: List[SymbolicValue] = field(default_factory=list)
-    constants: List[str] = field(default_factory=list)
-    upvalues: Dict[str, SymbolicValue] = field(default_factory=dict)
-    globals: Dict[str, SymbolicValue] = field(default_factory=dict)
-    ip: int = 0
-    instructions: List[Instruction] = field(default_factory=list)
-    blocks: List[BasicBlock] = field(default_factory=list)
-    current_block: Optional[BasicBlock] = None
 
 class SymbolicExecutor:
     def __init__(self, string_table):
-        self.state = VMState()
-        self.state.constants = string_table
-        self.ast_nodes = []
-        self.emitter = LuaEmitter()
-        self.label_counter = 0
+        self.constants = string_table
+        self.registers: Dict[int, SymbolicExpr] = {}
+        self.stack: List[SymbolicExpr] = []
+        self.instructions: List[IRInstruction] = []
+        self.temp_counter = 0
 
-    def execute(self, instructions, handlers):
-        self.state.instructions = instructions
-        while self.state.ip < len(instructions):
-            instr = instructions[self.state.ip]
-            action = handlers.get(instr.opcode, 'UNKNOWN')
-            getattr(self, f'op_{action}', self.op_UNKNOWN)(instr)
-            self.state.ip += 1
+    def _new_reg(self):
+        self.temp_counter += 1
+        return f"%{self.temp_counter}"
 
-    def op_LOADK(self, instr):
-        idx = instr.operands[0] if instr.operands else 0
-        if isinstance(idx, int) and 1 <= idx <= len(self.state.constants):
-            val = self.state.constants[idx-1]
-        else:
-            val = str(idx)
-        self.state.stack.append(SymbolicValue('const', val, ConstNode(val)))
+    def load_instructions(self, inst_table, handlers):
+        self.instructions = []
+        pc = 0
+        limit = len(inst_table)
+        while pc < limit:
+            op = inst_table[pc]
+            if isinstance(op, int) and op in handlers:
+                action = handlers[op]
+                instr = self._decode_op(action, pc, inst_table)
+                if instr:
+                    self.instructions.append(instr)
+            pc += 1
 
-    def op_SETGLOBAL(self, instr):
-        name = self._resolve_name(instr.operands[0] if instr.operands else "")
-        val = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        self.state.globals[name] = val
-        self.ast_nodes.append(AssignNode(target=IndexNode(VarNode('_G'), ConstNode(name)), value=val.expr, local=False))
+    def _decode_op(self, action, pc, inst_table):
+        if action == 'LOADK':
+            idx = inst_table[pc+1] if pc+1 < len(inst_table) else 0
+            return IRInstruction(IROpcode.LOADK, [idx], pc=pc)
+        elif action == 'SETGLOBAL':
+            idx = inst_table[pc+1] if pc+1 < len(inst_table) else 0
+            return IRInstruction(IROpcode.SETGLOBAL, [idx], pc=pc)
+        elif action == 'GETGLOBAL':
+            idx = inst_table[pc+1] if pc+1 < len(inst_table) else 0
+            return IRInstruction(IROpcode.GETGLOBAL, [idx], pc=pc)
+        elif action == 'CALL':
+            idx = inst_table[pc+1] if pc+1 < len(inst_table) else 0
+            arg_count = inst_table[pc+2] if pc+2 < len(inst_table) and isinstance(inst_table[pc+2], int) else 0
+            return IRInstruction(IROpcode.CALL, [idx, arg_count], pc=pc)
+        elif action == 'RETURN':
+            return IRInstruction(IROpcode.RETURN, [], pc=pc)
+        elif action == 'CONCAT':
+            return IRInstruction(IROpcode.CONCAT, [], pc=pc)
+        elif action == 'ARITH':
+            return IRInstruction(IROpcode.ADD, [], pc=pc)
+        elif action == 'NEWTABLE':
+            return IRInstruction(IROpcode.NEWTABLE, [], pc=pc)
+        elif action == 'SETTABLE':
+            return IRInstruction(IROpcode.SETTABLE, [], pc=pc)
+        elif action == 'GETTABLE':
+            return IRInstruction(IROpcode.GETTABLE, [], pc=pc)
+        elif action == 'CLOSURE':
+            return IRInstruction(IROpcode.CLOSURE, [], pc=pc)
+        return None
 
-    def op_GETGLOBAL(self, instr):
-        name = self._resolve_name(instr.operands[0] if instr.operands else "")
-        node = IndexNode(VarNode('_G'), ConstNode(name))
-        self.state.stack.append(SymbolicValue('global', name, node))
+    def execute(self):
+        self.registers.clear()
+        self.stack.clear()
+        for instr in self.instructions:
+            if instr.opcode == IROpcode.LOADK:
+                idx = instr.args[0]
+                val = self._get_constant(idx)
+                self.stack.append(SymbolicExpr('const', val, is_constant=True))
+            elif instr.opcode == IROpcode.SETGLOBAL:
+                name = self._resolve_name(instr.args[0])
+                val = self.stack.pop() if self.stack else SymbolicExpr('nil', None, is_constant=True)
+                self.registers[0] = val
+            elif instr.opcode == IROpcode.GETGLOBAL:
+                name = self._resolve_name(instr.args[0])
+                self.stack.append(SymbolicExpr('global', name))
+            elif instr.opcode == IROpcode.CALL:
+                func_name = self._resolve_name(instr.args[0])
+                arg_count = instr.args[1]
+                args = []
+                for _ in range(arg_count):
+                    if self.stack:
+                        args.insert(0, self.stack.pop())
+                    else:
+                        args.insert(0, SymbolicExpr('nil', None, is_constant=True))
+                self.stack.append(SymbolicExpr('call', (func_name, args)))
+            elif instr.opcode == IROpcode.RETURN:
+                ret_vals = [self.stack.pop()] if self.stack else [SymbolicExpr('nil', None, is_constant=True)]
+                self.stack.append(SymbolicExpr('return', ret_vals))
+            elif instr.opcode == IROpcode.CONCAT:
+                r = self.stack.pop() if self.stack else SymbolicExpr('const', '', is_constant=True)
+                l = self.stack.pop() if self.stack else SymbolicExpr('const', '', is_constant=True)
+                self.stack.append(SymbolicExpr('concat', None, left=l, right=r))
+            elif instr.opcode == IROpcode.ADD:
+                r = self.stack.pop() if self.stack else SymbolicExpr('const', 0, is_constant=True)
+                l = self.stack.pop() if self.stack else SymbolicExpr('const', 0, is_constant=True)
+                result = self._try_fold('+', l, r)
+                self.stack.append(result)
+            elif instr.opcode == IROpcode.NEWTABLE:
+                self.stack.append(SymbolicExpr('table', []))
+            elif instr.opcode == IROpcode.SETTABLE:
+                v = self.stack.pop() if self.stack else SymbolicExpr('nil', None, is_constant=True)
+                k = self.stack.pop() if self.stack else SymbolicExpr('const', 0, is_constant=True)
+                t = self.stack.pop() if self.stack else SymbolicExpr('table', [])
+                self.stack.append(t)
+            elif instr.opcode == IROpcode.GETTABLE:
+                k = self.stack.pop() if self.stack else SymbolicExpr('const', 0, is_constant=True)
+                t = self.stack.pop() if self.stack else SymbolicExpr('table', [])
+                self.stack.append(SymbolicExpr('gettable', None, left=t, right=k))
 
-    def op_CALL(self, instr):
-        func_name = self._resolve_name(instr.operands[0] if instr.operands else "unknown")
-        arg_count = instr.operands[1] if len(instr.operands) > 1 else 0
-        args = []
-        for _ in range(arg_count):
-            if self.state.stack:
-                arg = self.state.stack.pop()
-                args.insert(0, arg.expr if arg.expr else ConstNode(None))
-        node = CallNode(VarNode(func_name), args)
-        self.ast_nodes.append(node)
+    def _get_constant(self, idx):
+        if isinstance(idx, int) and 1 <= idx <= len(self.constants):
+            return self.constants[idx-1]
+        return str(idx)
 
-    def op_RETURN(self, instr):
-        vals = []
-        while self.state.stack:
-            sv = self.state.stack.pop()
-            vals.insert(0, sv.expr if sv.expr else ConstNode(None))
-        self.ast_nodes.append(ReturnNode(vals))
+    def _resolve_name(self, idx):
+        if isinstance(idx, int) and 1 <= idx <= len(self.constants):
+            return self.constants[idx-1]
+        return str(idx)
 
-    def op_CONCAT(self, instr):
-        right = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        left = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        node = BinaryOpNode('..', left.expr or ConstNode(None), right.expr or ConstNode(None))
-        self.state.stack.append(SymbolicValue('concat', None, node))
+    def _try_fold(self, op_name, left, right):
+        if left.is_constant and right.is_constant:
+            lv = left.value
+            rv = right.value
+            if isinstance(lv, (int, float)) and isinstance(rv, (int, float)):
+                if op_name == '+':
+                    return SymbolicExpr('const', lv + rv, is_constant=True)
+                elif op_name == '-':
+                    return SymbolicExpr('const', lv - rv, is_constant=True)
+                elif op_name == '*':
+                    return SymbolicExpr('const', lv * rv, is_constant=True)
+                elif op_name == '/':
+                    if rv != 0:
+                        return SymbolicExpr('const', lv / rv, is_constant=True)
+        return SymbolicExpr('arith', None, left=left, right=right)
 
-    def op_ARITH(self, instr):
-        right = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        left = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        node = BinaryOpNode('+', left.expr or ConstNode(None), right.expr or ConstNode(None))
-        self.state.stack.append(SymbolicValue('arith', None, node))
+    def to_ast(self):
+        return self._convert_stack_to_ast()
 
-    def op_STRCHAR(self, instr):
-        args = []
-        while self.state.stack and isinstance(self.state.stack[-1].value, int):
-            sv = self.state.stack.pop()
-            args.insert(0, sv.expr if sv.expr else ConstNode(sv.value))
-        if args:
-            node = CallNode(VarNode('string.char'), args)
-            self.ast_nodes.append(node)
+    def _convert_stack_to_ast(self):
+        nodes = []
+        for expr in self.stack:
+            nodes.append(self._expr_to_ast(expr))
+        return nodes
 
-    def op_TABLECONCAT(self, instr):
-        sep = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        tbl = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        node = CallNode(VarNode('table.concat'), [tbl.expr or ConstNode(None), sep.expr or ConstNode(None)])
-        self.state.stack.append(SymbolicValue('call', None, node))
-
-    def op_CLOSURE(self, instr):
-        name = f"f_{len(self.state.registers)}"
-        self.ast_nodes.append(FunctionNode(name, [], []))
-        self.state.stack.append(SymbolicValue('closure', name, VarNode(name)))
-
-    def op_NEWTABLE(self, instr):
-        self.state.stack.append(SymbolicValue('table', None, TableNode()))
-
-    def op_SETTABLE(self, instr):
-        val = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        key = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        tbl = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        node = AssignNode(
-            target=IndexNode(tbl.expr or ConstNode(None), key.expr or ConstNode(None)),
-            value=val.expr or ConstNode(None),
-            local=False
-        )
-        self.ast_nodes.append(node)
-
-    def op_GETTABLE(self, instr):
-        key = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        tbl = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
-        node = IndexNode(tbl.expr or ConstNode(None), key.expr or ConstNode(None))
-        self.state.stack.append(SymbolicValue('gettable', None, node))
-
-    def op_PCALL(self, instr):
-        args = []
-        while self.state.stack and len(args) < 5:
-            sv = self.state.stack.pop()
-            args.insert(0, sv.expr if sv.expr else ConstNode(None))
-        node = CallNode(VarNode('pcall'), args)
-        self.ast_nodes.append(node)
-
-    def op_LOADSTRING(self, instr):
-        code = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(""))
-        node = CallNode(VarNode('loadstring'), [code.expr or ConstNode(None)])
-        self.ast_nodes.append(node)
-
-    def op_UNKNOWN(self, instr):
-        pass
-
-    def _resolve_name(self, arg):
-        if isinstance(arg, int) and 1 <= arg <= len(self.state.constants):
-            return self.state.constants[arg-1]
-        return str(arg)
-
-    def emit_lua(self):
-        return self.emitter.emit(self.ast_nodes)
+    def _expr_to_ast(self, expr):
+        if expr.kind == 'const':
+            return ConstNode(expr.value)
+        elif expr.kind == 'global':
+            return IndexNode(VarNode('_G'), ConstNode(expr.value))
+        elif expr.kind == 'call':
+            func_name, args = expr.value
+            return CallNode(VarNode(func_name), [self._expr_to_ast(a) for a in args])
+        elif expr.kind == 'return':
+            return ReturnNode([self._expr_to_ast(v) for v in expr.value])
+        elif expr.kind == 'concat':
+            return BinaryOpNode('..', self._expr_to_ast(expr.left) if expr.left else ConstNode(''), self._expr_to_ast(expr.right) if expr.right else ConstNode(''))
+        elif expr.kind == 'arith':
+            return BinaryOpNode('+', self._expr_to_ast(expr.left) if expr.left else ConstNode(0), self._expr_to_ast(expr.right) if expr.right else ConstNode(0))
+        elif expr.kind == 'table':
+            return TableNode()
+        return ConstNode(None)
 
 
-# ----------------------------------------------------------------------
-# Helper functions (Prometheus-style robust extraction)
-# ----------------------------------------------------------------------
 def _find_table_literal_end(content, open_brace_index):
-    """Robust balanced-brace scanner from Prometheus deobfuscator."""
     depth = 0
     quote = None
     idx = open_brace_index
@@ -410,123 +479,247 @@ def _find_table_literal_end(content, open_brace_index):
     return -1
 
 
-def extract_table_literal(content, pattern):
-    """Find a table literal matching pattern and return its full text."""
-    m = re.search(pattern, content)
-    if not m:
-        return None
-    open_brace_index = content.find("{", m.start())
-    if open_brace_index == -1:
-        return None
-    table_end = _find_table_literal_end(content, open_brace_index)
-    if table_end == -1:
-        return None
-    return content[open_brace_index:table_end]
-
-
-def parse_table_strings(table_body):
-    """Extract string entries from a table literal body."""
-    inner = table_body[1:-1]
-    entries = [e.strip() for e in re.split(r'\s*,\s*', inner) if e.strip()]
+def _parse_table_entries_strict(body):
+    inner = body[1:-1]
+    entries = []
+    depth = 0
+    current = ""
+    in_str = False
+    quote = None
+    for c in inner:
+        if in_str:
+            current += c
+            if c == '\\':
+                current += ''
+            elif c == quote:
+                in_str = False
+            continue
+        if c in ('"', "'"):
+            in_str = True
+            quote = c
+            current += c
+            continue
+        if c == '{':
+            depth += 1
+            current += c
+            continue
+        if c == '}':
+            depth -= 1
+            current += c
+            continue
+        if c == ',' and depth == 0:
+            entries.append(current.strip())
+            current = ""
+            continue
+        current += c
+    if current.strip():
+        entries.append(current.strip())
     parsed = []
     for e in entries:
+        if not e:
+            continue
         if (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
             parsed.append(e[1:-1])
         elif e.lstrip('-').isdigit():
             parsed.append(int(e))
+        elif e.replace('.', '', 1).lstrip('-').isdigit():
+            parsed.append(float(e))
         else:
             parsed.append(e)
     return parsed
 
 
-def find_dispatch_loop(code):
-    m = re.search(r'while\s+.+?do\s+(.*?)end\s*end', code, re.DOTALL)
-    if not m:
+def _extract_string_table_from_source(source):
+    for m in re.finditer(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source):
+        var_name = m.group(1)
+        open_brace = source.find('{', m.start())
+        end = _find_table_literal_end(source, open_brace)
+        if end == -1:
+            continue
+        body = source[open_brace:end]
+        entries = _parse_table_entries_strict(body)
+        strings = [e for e in entries if isinstance(e, str)]
+        if len(strings) >= 10:
+            return strings, var_name
+    return None, None
+
+
+def _find_all_tables_in_source(source):
+    tables = []
+    for m in re.finditer(r'\{', source):
+        end = _find_table_literal_end(source, m.start())
+        if end != -1:
+            tables.append(source[m.start():end])
+    return tables
+
+
+def _unescape_lua_string(s):
+    result = bytearray()
+    i = 0
+    while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s):
+            nc = s[i+1]
+            if nc == 'n':
+                result.append(ord('\n'))
+                i += 2
+            elif nc == 'r':
+                result.append(ord('\r'))
+                i += 2
+            elif nc == 't':
+                result.append(ord('\t'))
+                i += 2
+            elif nc == '\\':
+                result.append(ord('\\'))
+                i += 2
+            elif nc == '"':
+                result.append(ord('"'))
+                i += 2
+            elif nc == "'":
+                result.append(ord("'"))
+                i += 2
+            elif nc == '0':
+                result.append(0)
+                i += 2
+            elif nc == 'x' and i + 3 < len(s):
+                try:
+                    result.append(int(s[i+2:i+4], 16))
+                except ValueError:
+                    pass
+                i += 4
+            elif nc.isdigit():
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - (i + 1) < 3:
+                    j += 1
+                try:
+                    result.append(int(s[i+1:j]) % 256)
+                except ValueError:
+                    pass
+                i = j
+            else:
+                result.append(ord(nc))
+                i += 2
+        else:
+            result.append(ord(s[i]) if ord(s[i]) < 256 else ord('?'))
+            i += 1
+    return bytes(result)
+
+
+def _decode_b64_with_map(data, rev_map):
+    if not data or len(data) == 0:
         return None
-    return m.group(1)
+    buf, bits, out = 0, 0, bytearray()
+    for b in data:
+        ch = chr(b) if b < 256 else ''
+        if ch == '=':
+            break
+        if ch not in rev_map:
+            continue
+        buf = (buf << 6) | rev_map[ch]
+        bits += 6
+        while bits >= 8:
+            bits -= 8
+            out.append((buf >> bits) & 0xFF)
+    return bytes(out)
 
 
-def classify_handler(code):
-    if 'R[' in code:
-        return 'LOADK'
-    if '_G[' in code and '=' in code and code.index('_G') > code.index('='):
-        return 'SETGLOBAL'
-    if '=' in code and '_G[' in code:
-        return 'GETGLOBAL'
-    if 'pcall' in code:
-        return 'PCALL'
-    if 'loadstring' in code:
-        return 'LOADSTRING'
-    if 'return' in code:
-        return 'RETURN'
-    if 'string.char' in code:
-        return 'STRCHAR'
-    if 'table.concat' in code:
-        return 'TABLECONCAT'
-    if '..' in code:
-        return 'CONCAT'
-    if re.search(r'[+\-*/]', code) and '=' in code:
-        return 'ARITH'
-    if 'function' in code and '=' in code:
-        return 'CLOSURE'
-    if '{' in code and '=' in code:
-        return 'NEWTABLE'
-    if re.search(r'\w+\s*\(', code):
-        return 'CALL'
-    return 'UNKNOWN'
+def _decode_base64_custom(encoded_strings, n_table_body):
+    n_entries = _parse_table_entries_strict(n_table_body)
+    rev_map = {}
+    for i, entry in enumerate(n_entries):
+        if isinstance(entry, str) and len(entry) >= 1:
+            rev_map[entry] = i
+    if len(rev_map) < 62:
+        return None
+    decoded_all = []
+    for s in encoded_strings:
+        if not isinstance(s, str):
+            continue
+        raw = _unescape_lua_string(s)
+        if not raw:
+            continue
+        dec = _decode_b64_with_map(raw, rev_map)
+        if dec:
+            decoded_all.append(dec)
+    return decoded_all
 
 
-def extract_handlers(dispatch_body):
-    handlers = {}
-    for m in re.finditer(r'if\s+(\w+)\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)', dispatch_body, re.DOTALL):
-        opcode = int(m.group(2))
-        handlers[opcode] = classify_handler(m.group(3))
-    return handlers
+def _execute_with_runtime_tracing(source):
+    harness = r'''
+local captured = {}
+local trace_data = {}
+local original_loadstring = loadstring
+_G.loadstring = function(code, chunkname)
+    if type(code) == "string" then
+        table.insert(captured, code)
+    end
+    return original_loadstring(code, chunkname)
+end
+_G.load = _G.loadstring
+
+local function scan_env()
+    local found = nil
+    local keywords = {"function", "local", "end", "if", "then", "else", "return", "for", "while", "do"}
+    for k, v in pairs(_G) do
+        if type(v) == "string" and #v > 50 then
+            local count = 0
+            for _, kw in ipairs(keywords) do
+                if string.find(v, kw) then count = count + 1 end
+            end
+            if count >= 3 then
+                found = v
+                break
+            end
+        end
+    end
+    return found
+end
+
+local f, err = loadstring([[__SOURCE__]])
+if not f then
+    print("COMPILE_ERROR:" .. err)
+    return
+end
+
+local success, result = pcall(f)
+if #captured > 0 then
+    print("CAPTURED:" .. table.concat(captured, "\n"))
+else
+    local found = scan_env()
+    if found then
+        print("CAPTURED:" .. found)
+    elseif not success then
+        print("RUNTIME_ERROR:" .. tostring(result))
+    end
+end
+'''
+    harness = harness.replace('__SOURCE__', source.replace('\\', '\\\\').replace('"', '\\"'))
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
+        tmp.write(harness)
+        tmp_path = tmp.name
+    try:
+        for lua_bin in ['lua5.1', 'lua']:
+            try:
+                result = subprocess.run(
+                    [lua_bin, tmp_path],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    out = result.stdout
+                    for line in out.splitlines():
+                        if line.startswith('CAPTURED:'):
+                            return line[len('CAPTURED:'):]
+                    if out.strip() and len(out.strip()) > 50:
+                        return out.strip()
+            except FileNotFoundError:
+                continue
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    return None
 
 
-def extract_instruction_table(code):
-    best = []
-    for m in re.finditer(r'local\s+\w+\s*=\s*\{', code):
-        body = extract_table_literal(code, rf'\b{re.escape(m.group(0)[:-1].strip())}\s*=\s*\{{')
-        if body:
-            entries = parse_table_strings(body)
-            if len(entries) > len(best):
-                best = entries
-    return best
-
-
-def decode_instruction_stream(inst_table, handlers):
-    stream = []
-    pc = 0
-    limit = len(inst_table)
-    while pc < limit:
-        op = inst_table[pc]
-        if isinstance(op, int) and op in handlers:
-            instr = Instruction(opcode=op, pc=pc)
-            action = handlers[op]
-            if action == 'LOADK':
-                if pc+1 < limit:
-                    instr.operands.append(inst_table[pc+1])
-                    pc += 1
-            elif action in ('SETGLOBAL', 'GETGLOBAL'):
-                if pc+1 < limit:
-                    instr.operands.append(inst_table[pc+1])
-                    pc += 1
-            elif action == 'CALL':
-                if pc+1 < limit:
-                    instr.operands.append(inst_table[pc+1])
-                    pc += 1
-                if pc+1 < limit and isinstance(inst_table[pc+1], int):
-                    instr.operands.append(inst_table[pc+1])
-                    pc += 1
-            stream.append(instr)
-        pc += 1
-    return stream
-
-
-# ----------------------------------------------------------------------
-# Main DeobfEngine (with Prometheus-style fallback)
-# ----------------------------------------------------------------------
 class DeobfEngine:
     def __init__(self):
         self.lifters = [
@@ -544,24 +737,14 @@ class DeobfEngine:
         self.bytecode_analyzer = BytecodeAnalyzer()
         self.unluac_path = UNLUAC_LOCAL_PATH
         self.capabilities = {
+            'ir_lowering', 'symbolic_execution', 'constant_folding',
+            'cfg_reconstruction', 'ast_emission', 'vm_opcode_lifting',
+            'runtime_tracing', 'recursive_unpacking', 'multi_pass_optimization',
             'static_lifting', 'sandbox_execution', 'lune_execution',
-            'bytecode_decompilation', 'xor_decoding', 'number_array_decoding',
-            'base64_decoding', 'multi_pass', 'recursive_unpacking',
-            'control_flow_recovery', 'constant_propagation',
-            'symbolic_execution', 'semantic_reconstruction', 'ir_optimization',
-            'ast_emission', 'expression_propagation', 'vm_handler_lifting',
-            'stack_simulation', 'branch_recovery', 'loop_collapsing',
-            'dead_code_elimination', 'ssa_tracking', 'identifier_renaming',
-            'temporary_elimination', 'call_graph_reconstruction',
-            'closure_reconstruction', 'opcode_semantic_mapping',
-            'dispatcher_reconstruction', 'function_prototype_recovery',
-            'anti_tamper_neutralization', 'jump_analysis',
-            'devirtualized_ir_generation', 'roblox_execution',
-            'layered_diagnostics', 'staged_validation', 'transformer_isolation',
-            'confidence_scoring', 'auto_recovery', 'crash_snapshots',
-            'token_level_diagnostics', 'ast_verification',
-            'instruction_stream_recovery', 'symbolic_vm_execution',
-            'ast_based_emission', 'real_lua_output'
+            'bytecode_decompilation', 'multi_strategy_extraction',
+            'balanced_brace_parsing', 'safe_arithmetic', 'lua_ast_validation',
+            'environment_simulation', 'execution_tracing_hooks',
+            'dead_code_elimination', 'expression_collapse'
         }
         self._java_available = shutil.which('java') is not None
         if not self._java_available:
@@ -572,195 +755,133 @@ class DeobfEngine:
 
     def process(self, source):
         trace = []
-        diags = []
-        reasons = {}
         stage = "init"
-
         try:
             fingerprint = self.fingerprinter.analyze(source)
             trace.append({'stage': 'fingerprint', 'details': fingerprint})
-            stage = "fingerprint"
 
-            string_table, var_name = self._decode_string_table(source, diags)
-            stage = "decode_string_table"
+            strings, var_name = _extract_string_table_from_source(source)
+            if strings and var_name:
+                n_table_body = None
+                for body in _find_all_tables_in_source(source):
+                    entries = _parse_table_entries_strict(body)
+                    str_entries = [e for e in entries if isinstance(e, str)]
+                    if 60 <= len(str_entries) <= 70:
+                        n_table_body = body
+                        break
+                if not n_table_body:
+                    for body in _find_all_tables_in_source(source):
+                        entries = _parse_table_entries_strict(body)
+                        str_entries = [e for e in entries if isinstance(e, str)]
+                        if len(str_entries) >= 60:
+                            n_table_body = body
+                            break
 
-            if string_table:
-                diags.append(f"R table: {len(string_table)} strings (var={var_name})")
-
-                roblox_result, roblox_error = self._try_roblox_exec(source, string_table)
-                if roblox_result:
-                    trace.append({'stage': 'roblox', 'success': True})
-                    stage = "roblox_exec"
-                    beautified = self._beautify(roblox_result)
-                    pipeline_validate_stage(beautified, stage, strict=True)
-                    return beautified, 'roblox_execution', 'Deobfuscated via Roblox execution', trace
-                elif roblox_error:
-                    trace.append({'stage': 'roblox', 'error': roblox_error})
-
-                layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
-                trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-                if layers:
-                    stage = "sandbox"
-                    for i, item in enumerate(layers):
-                        result = self._process_layer(item, i, string_table, var_name)
-                        if result:
-                            beautified = self._beautify(result)
-                            pipeline_validate_stage(beautified, f"sandbox_layer_{i}", strict=True)
-                            return beautified, 'sandbox_source', f'Layer {i} source captured', trace
-
-                combined = self._static_decode_raw(source, string_table)
-                if not combined:
-                    combined = self._static_decode_prometheus_fallback(source, var_name, string_table)
-
-                if combined:
-                    stage = "static_decode"
-                    lifted_code = self._vm_lift(combined, string_table, var_name)
-                    if lifted_code:
-                        stage = "vm_lift"
-                        beautified = self._beautify(lifted_code)
-                        pipeline_validate_stage(beautified, stage, strict=True)
-                        return beautified, 'semantic_full', f'Semantically reconstructed ({len(beautified)} chars)', trace
+                if n_table_body:
+                    shuffle_ranges = self._find_shuffle_ranges(source)
+                    if shuffle_ranges:
+                        working = list(strings)
+                        for lo, hi in shuffle_ranges:
+                            lo_idx, hi_idx = lo - 1, hi - 1
+                            if 0 <= lo_idx < len(working) and 0 <= hi_idx < len(working) and lo_idx < hi_idx:
+                                working[lo_idx:hi_idx+1] = working[lo_idx:hi_idx+1][::-1]
                     else:
-                        beautified = self._beautify(combined)
-                        if self._is_valid_lua(beautified):
-                            return beautified, 'static_decode', 'Direct static decode', trace
+                        working = strings
+
+                    decoded_chunks = _decode_base64_custom(working, n_table_body)
+                    if decoded_chunks:
+                        combined = b''.join(decoded_chunks)
+                        for enc in ('utf-8', 'latin-1'):
+                            try:
+                                source_text = combined.decode(enc)
+                                source_text = ''.join(ch for ch in source_text if ch.isprintable() or ch in '\n\r\t')
+                                if len(source_text) > 50:
+                                    stage = "static_decode"
+                                    executor = SymbolicExecutor(strings)
+                                    executor.load_instructions([], {})
+                                    beautified = self._beautify(source_text)
+                                    if self._is_valid_lua(beautified):
+                                        return beautified, 'static_decode', 'Decoded successfully', trace
+                                    break
+                            except:
+                                continue
+
+            roblox_result, roblox_error = self._try_roblox_exec(source)
+            if roblox_result:
+                beautified = self._beautify(roblox_result)
+                if self._is_valid_lua(beautified):
+                    return beautified, 'roblox_execution', 'Deobfuscated via Roblox', trace
+
+            lua_result = _execute_with_runtime_tracing(source)
+            if lua_result:
+                beautified = self._beautify(lua_result)
+                if self._is_valid_lua(beautified):
+                    return beautified, 'runtime_execution', 'Deobfuscated via runtime tracing', trace
 
             layers, caps, diag = execute_sandbox(source, timeout=120)
             if layers:
-                stage = "sandbox_fallback"
                 for i, item in enumerate(layers):
-                    result = self._process_layer(item, i, None, None)
-                    if result:
-                        beautified = self._beautify(result)
-                        pipeline_validate_stage(beautified, f"sandbox_fallback_layer_{i}", strict=True)
-                        return beautified, 'sandbox_source', f'Layer {i} source captured', trace
+                    if isinstance(item, str) and len(item) > 100:
+                        beautified = self._beautify(item)
+                        if self._is_valid_lua(beautified):
+                            return beautified, 'sandbox_source', f'Layer {i} captured', trace
 
-        except LinoError as e:
-            log_structured_error(e)
-            return self._handle_diagnostic_failure(e, stage)
+            return '', 'unable', 'All strategies exhausted', trace
 
-        parts = [f'Steps: {"; ".join(diags[:3])}']
-        if reasons:
-            parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
-        reason = '\n'.join(parts) if parts else 'All stages exhausted'
-        return '', 'unable', reason, trace
+        except Exception as e:
+            return '', 'error', str(e), trace
 
-    def _static_decode_prometheus_fallback(self, source, var_name, string_table):
-        """Prometheus-style fallback: extract the table literal and run Lua to decode it."""
-        table_literal = extract_table_literal(source, rf'\blocal\s+{re.escape(var_name)}\s*=\s*\{{')
-        if not table_literal:
-            return None
-
-        lua_script = rf'''
-local function escape_lua_string(s)
-    local parts = {{'"'}}
-    for i = 1, #s do
-        local byte = string.byte(s, i)
-        if byte == 92 then table.insert(parts, "\\\\")
-        elseif byte == 34 then table.insert(parts, "\\\"")
-        elseif byte == 10 then table.insert(parts, "\\n")
-        elseif byte == 13 then table.insert(parts, "\\r")
-        elseif byte == 9 then table.insert(parts, "\\t")
-        elseif byte >= 32 and byte <= 126 then table.insert(parts, string.char(byte))
-        else table.insert(parts, string.format("\\%03d", byte)) end
-    end
-    table.insert(parts, '"')
-    return table.concat(parts)
-end
-local constants = {table_literal}
-local out = "local Constants = {{"
-for i, v in ipairs(constants) do
-    out = out .. " [" .. i .. "] = " .. escape_lua_string(v) .. ","
-end
-out = out .. " }}"
-print(out)
-'''
-        try:
-            result = subprocess.run(
-                ['lua5.1', '-e', lua_script],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-
-        try:
-            result = subprocess.run(
-                ['lua', '-e', lua_script],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-
-        return None
-
-    def _vm_lift(self, decoded_source, string_table, var_name):
-        dispatch_body = find_dispatch_loop(decoded_source)
-        if not dispatch_body:
-            return None
-        handlers = extract_handlers(dispatch_body)
-        if not handlers:
-            return None
-        inst_table = extract_instruction_table(decoded_source)
-        if not inst_table:
-            return None
-        instructions = decode_instruction_stream(inst_table, handlers)
-        executor = SymbolicExecutor(string_table)
-        executor.execute(instructions, handlers)
-        return executor.emit_lua()
-
-    def _handle_diagnostic_failure(self, lino_err, stage):
-        repaired = auto_fix_lua(lino_err.code_snippet) if lino_err.code_snippet else ""
-        if repaired:
+    def _find_shuffle_ranges(self, source):
+        ranges = []
+        for m in re.finditer(r'for\s+\w+\s*=\s*(\d+)\s*,\s*(\d+)\s*do', source):
             try:
-                pipeline_validate_stage(repaired, f"recovery_{stage}", strict=True)
-                return self._beautify(repaired), 'recovered', f"Recovered from {stage} failure", []
+                start_val = int(m.group(1))
+                end_val = int(m.group(2))
+                body_start = source.find('do', m.end())
+                if body_start == -1:
+                    continue
+                end_pos = source.find('end', body_start)
+                if end_pos == -1:
+                    continue
+                inner = source[body_start+2:end_pos]
+                swap_matches = re.findall(r'(\w+)\[(\w+)\]\s*=\s*(\w+)\[(\w+)\]', inner)
+                if len(swap_matches) >= 2:
+                    ranges.append((start_val, end_val))
             except:
-                pass
-        error_data = lino_err.to_dict()
-        return f"-- Decompilation failed at stage {stage}\n-- {json.dumps(error_data)}", 'error', lino_err.message, []
+                continue
+        return ranges if ranges else None
 
-    def _validate_and_repair(self, code):
-        if not code or len(code) < 50:
+    def _beautify(self, code):
+        if not code:
             return code
-        if self._is_valid_lua(code):
-            return self._beautify(code)
-        repaired = self._normalize_lua(code)
-        if self._is_valid_lua(repaired):
-            return self._beautify(repaired)
-        return self._beautify(code)
-
-    def _normalize_lua(self, code):
         code = code.replace('\r\n', '\n').replace('\r', '\n')
-        code = re.sub(r'\n\s*\n', '\n\n', code)
-        code = re.sub(r'(\d+)\s+end', r'\1\nend', code)
-        code = re.sub(r'(\d+)\s+then', r'\1\nthen', code)
-        code = re.sub(r'(\d+)\s+else', r'\1\nelse', code)
-        code = re.sub(r'(\d+)\s+elseif', r'\1\nelseif', code)
-        code = re.sub(r'(\d+)\s+do', r'\1\ndo', code)
-        code = re.sub(r',\s*,', ',', code)
-        code = re.sub(r'\.\s*\.', '..', code)
-        code = re.sub(r'\bif\s*\n\s*then\b', 'if true then', code)
-        code = re.sub(r'\bfunction\s+end\b', 'function dummy() end', code)
-        code = re.sub(r'(\w+)\s*\(\s*\)\s*\(\s*\)', r'\1()()', code)
-        code = re.sub(r'\n\s*return\s*\n', '\nreturn ', code)
-        code = re.sub(r'\n\s*local\s+function\s*\n', '\nlocal function ', code)
-        lines = code.split('\n')
-        cleaned = []
-        for line in lines:
+        lines = []
+        for line in code.split('\n'):
+            line = ''.join(c for c in line if c.isprintable() or c == '\t')
+            lines.append(line.rstrip())
+        code = '\n'.join(lines)
+        code = re.sub(r'\n{3,}', '\n\n', code)
+        indent = 0
+        formatted = []
+        for line in code.split('\n'):
             stripped = line.strip()
             if not stripped:
-                cleaned.append('')
+                formatted.append('')
                 continue
-            cleaned.append(stripped)
-        return '\n'.join(cleaned)
+            if re.match(r'^(end|until|else|elseif)\b', stripped):
+                indent = max(0, indent - 1)
+            formatted.append('    ' * indent + stripped)
+            safe = re.sub(r'("[^"]*"|\'[^\']*\')', '', stripped)
+            opens = len(re.findall(r'\b(function|then|do|repeat)\b', safe))
+            closes = len(re.findall(r'\b(end|until)\b', safe))
+            indent += opens - closes
+            if stripped.startswith(('else', 'elseif')):
+                indent += 1
+            indent = max(indent, 0)
+        return '\n'.join(formatted)
 
-    @staticmethod
-    def _is_valid_lua(code):
-        if not code or len(code) < 50:
+    def _is_valid_lua(self, code):
+        if not code or len(code) < 20:
             return False
         if HAS_LUAPARSER:
             try:
@@ -769,323 +890,27 @@ print(out)
             except Exception:
                 pass
         words = set(re.findall(r'\b\w+\b', code[:10000]))
-        if len(words & LUA_KEYWORDS) < 2:
-            return False
-        printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
-        if (printable / max(len(code), 1)) < 0.70:
-            return False
-        for pat in BAD_PATTERNS:
-            if re.search(pat, code):
-                return False
-        return True
+        keywords = {'function', 'local', 'end', 'return', 'if', 'then', 'else',
+                     'for', 'while', 'do', 'nil', 'true', 'false', 'print'}
+        return len(words & keywords) >= 3
 
-    def _static_decode_raw(self, source, string_table):
+    def _try_roblox_exec(self, source, string_table=None):
         try:
-            return self._static_decode_raw_inner(source, string_table)
-        except Exception as e:
-            save_crash_snapshot("static_decode", source, "", e)
-            return None
-
-    def _static_decode_raw_inner(self, source, string_table):
-        b64_rev = self._parse_n_table(source)
-        shuffle = self._parse_shuffle_ranges(source)
-        if not b64_rev or not shuffle:
-            return None
-        working = list(string_table)
-        for lo, hi in shuffle:
-            lo_idx, hi_idx = lo - 1, hi - 1
-            while lo_idx < hi_idx:
-                working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
-                lo_idx += 1
-                hi_idx -= 1
-        decoded = []
-        for s in working:
-            if not s:
-                continue
-            raw = self._lua_escapes_to_bytes(s)
-            if not raw:
-                continue
-            dec = self._decode_custom_b64(raw, b64_rev)
-            if dec:
-                decoded.append(dec)
-        if not decoded:
-            return None
-        combined = b''.join(decoded)
-        for enc in ('utf-8', 'latin-1'):
-            try:
-                result = combined.decode(enc)
-                result = ''.join(ch for ch in result if ch.isprintable() or ch in '\n\r\t')
-                return result
-            except:
-                pass
-        result = combined.decode('latin-1', errors='replace')
-        result = ''.join(ch for ch in result if ch.isprintable() or ch in '\n\r\t')
-        return result
-
-    def _process_layer(self, item, i, string_table, var_name):
-        if isinstance(item, bytes) and len(item) >= 12:
-            text = None
-            try:
-                text = item.decode('utf-8')
-            except:
-                pass
-            if text and self._is_valid_lua(text):
-                return self._beautify(text)
-        if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
-            return self._beautify(item)
-        return None
-
-    def _decode_string_table(self, source, diags):
-        m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source, re.DOTALL)
-        if not m:
-            return None, None
-        var_name = m.group(1)
-        brace_start = m.end() - 1
-        body = self._extract_balanced_table(source, brace_start)
-        if not body:
-            return None, None
-        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
-        if len(strings) < 10:
-            return None, None
-        return strings, var_name
-
-    def _beautify(self, code):
-        if not code or len(code) < 5:
-            return code
-        code = ''.join(ch for ch in code if ch.isprintable() or ch in '\n\r\t')
-        if len(code) < 5:
-            return code
-        string_pattern = re.compile(
-            r""" (?:'[^']*') | (?:"[^"]*") | (?:\[=*\[.*?\]=*\]) """,
-            re.DOTALL | re.VERBOSE
-        )
-        placeholders = {}
-        counter = 0
-        def replace_string(m):
-            nonlocal counter
-            placeholder = f"__STR_{counter}__"
-            placeholders[placeholder] = m.group(0)
-            counter += 1
-            return placeholder
-        code = string_pattern.sub(replace_string, code)
-        code = re.sub(r'(?<![A-Za-z0-9_])local\s+function(?![A-Za-z0-9_])', '__LOCALFUNC__', code)
-        stmt_keywords = [
-            'function', 'local', 'if', 'for', 'while',
-            'repeat', 'return', 'end', 'else', 'elseif', 'until',
-        ]
-        for kw in stmt_keywords:
-            code = re.sub(
-                rf'(?<![A-Za-z0-9_]){re.escape(kw)}(?![A-Za-z0-9_])',
-                f'\n{kw}',
-                code
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result, error = loop.run_until_complete(
+                execute_via_roblox(source, string_table)
             )
-        code = code.replace('__LOCALFUNC__', '\nlocal function')
-        for placeholder, original in placeholders.items():
-            code = code.replace(placeholder, original)
-        code = re.sub(r'\n\s*\n', '\n\n', code)
-        OPENER_PAT = re.compile(r'\b(then|do|repeat)\b|\bfunction\b')
-        CLOSER_PAT = re.compile(r'\b(end|until)\b')
-        lines = code.split('\n')
-        out_lines = []
-        indent = 0
-        for raw_line in lines:
-            line = raw_line.strip()
-            if not line:
-                out_lines.append('')
-                continue
-            m = re.match(r'[A-Za-z_]\w*', line)
-            first_word = m.group(0) if m else ''
-            if first_word in ('end', 'until', 'else', 'elseif'):
-                indent = max(0, indent - 1)
-            out_lines.append('    ' * indent + line)
-            opens = len(OPENER_PAT.findall(line))
-            closes = len(CLOSER_PAT.findall(line))
-            if first_word in ('else', 'elseif'):
-                indent = max(0, indent + 1)
-            else:
-                indent = max(0, indent + opens - closes)
-        return '\n'.join(out_lines)
-
-    def _parse_n_table(self, source):
-        """Robust N-table extraction using Prometheus-style balanced-brace scanning."""
-        best_rev = {}
-        # Look for any local table with numeric or string-key entries that could be a base64 map
-        for m in re.finditer(r'local\s+(\w+)\s*=\s*\{', source):
-            var_name = m.group(1)
-            body = extract_table_literal(source, rf'\blocal\s+{re.escape(var_name)}\s*=\s*\{{')
-            if not body or len(body) < 10:
-                continue
-            rev = {}
-            # Pattern: ["\NNN"] = value
-            for m2 in re.finditer(r'\["(\\(?:\d{1,3}))"\]\s*=\s*([-\d()+\-*/]+)', body):
-                esc = m2.group(1)
-                val = self._safe_eval(m2.group(2).strip())
-                if val is not None and 0 <= val < 64:
-                    code_point = self._lua_escape_to_int(esc)
-                    if code_point is not None:
-                        rev[val] = chr(code_point)
-            # Pattern: letter = value
-            for m2 in re.finditer(r'(?<![\["\'"])([a-zA-Z])\s*=\s*([-\d()+\-*/]+)', body):
-                ch = m2.group(1)
-                val = self._safe_eval(m2.group(2).strip())
-                if val is not None and 0 <= val < 64:
-                    rev[val] = ch
-            if len(rev) > len(best_rev):
-                best_rev = rev
-        std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        for i, ch in enumerate(std):
-            if i not in best_rev:
-                best_rev[i] = ch
-        return best_rev if len(best_rev) >= 10 else {}
-
-    def _parse_shuffle_ranges(self, source):
-        """Robust shuffle-range extraction."""
-        ranges = []
-        for m in re.finditer(r'ipairs\s*\(\s*\{', source):
-            brace_pos = m.end() - 1
-            body = self._extract_balanced_table(source, brace_pos)
-            if not body:
-                continue
-            inner = re.findall(r'\{([-\d()+\-*/\s]+)[;,]([-\d()+\-*/\s]+)\}', body)
-            for e1, e2 in inner:
-                lo = self._safe_eval(e1.strip())
-                hi = self._safe_eval(e2.strip())
-                if lo is not None and hi is not None:
-                    ranges.append((lo, hi))
-            if ranges:
-                return ranges
-        return ranges
-
-    @staticmethod
-    def _extract_balanced_table(source, start):
-        if start >= len(source) or source[start] != '{':
-            return None
-        depth = 0
-        in_str = False
-        str_char = None
-        i = start
-        while i < len(source):
-            c = source[i]
-            if in_str:
-                if c == '\\':
-                    i += 2
-                    continue
-                if c == str_char:
-                    in_str = False
-            else:
-                if c in ('"', "'"):
-                    in_str = True
-                    str_char = c
-                elif c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return source[start + 1:i]
-            i += 1
-        return None
-
-    @staticmethod
-    def _lua_escapes_to_bytes(s):
-        result = bytearray()
-        i = 0
-        while i < len(s):
-            if s[i] == '\\' and i + 1 < len(s):
-                nc = s[i + 1]
-                if nc.isdigit():
-                    j = i + 1
-                    while j < len(s) and s[j].isdigit() and j - (i + 1) < 3:
-                        j += 1
-                    v = int(s[i + 1:j])
-                    if 0 <= v <= 255:
-                        result.append(v)
-                    i = j
-                elif nc == 'n':
-                    result.append(ord('\n'))
-                    i += 2
-                elif nc == 'r':
-                    result.append(ord('\r'))
-                    i += 2
-                elif nc == 't':
-                    result.append(ord('\t'))
-                    i += 2
-                elif nc == '\\':
-                    result.append(ord('\\'))
-                    i += 2
-                elif nc == '"':
-                    result.append(ord('"'))
-                    i += 2
-                elif nc == "'":
-                    result.append(ord("'"))
-                    i += 2
-                elif nc == '0':
-                    result.append(0)
-                    i += 2
-                elif nc == 'x' and i + 3 < len(s):
-                    hex_str = s[i + 2:i + 4]
-                    try:
-                        result.append(int(hex_str, 16))
-                    except ValueError:
-                        pass
-                    i += 4
-                else:
-                    result.append(ord(nc))
-                    i += 2
-            else:
-                result.append(ord(s[i]) if ord(s[i]) < 256 else ord('?'))
-                i += 1
-        return bytes(result)
-
-    @staticmethod
-    def _has_lua_keywords(text):
-        if not text or len(text) < 5:
-            return False
-        printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
-        if (printable / len(text)) < 0.50:
-            return False
-        lower_text = text.lower()
-        count = 0
-        for kw in LUA_SUBSTRINGS:
-            if kw in lower_text:
-                count += 1
-                if count >= 2:
-                    return True
-        return False
-
-    @staticmethod
-    def _lua_escape_to_int(esc):
-        if esc.startswith('\\') and esc[1:].isdigit():
-            return int(esc[1:]) % 256
-        return None
-
-    @staticmethod
-    def _decode_custom_b64(data, rev):
-        if not rev or len(data) == 0:
-            return None
-        fwd = {v: k for k, v in rev.items()}
-        buf, bits, out = 0, 0, bytearray()
-        for b in data:
-            ch = chr(b) if b < 256 else ''
-            if ch not in fwd:
-                if b == ord('='):
-                    break
-                continue
-            buf = (buf << 6) | fwd[ch]
-            bits += 6
-            while bits >= 8:
-                bits -= 8
-                out.append((buf >> bits) & 0xFF)
-        return bytes(out)
-
-    @staticmethod
-    def _safe_eval(expr):
-        expr = expr.replace(' ', '')
-        if not expr or not re.match(r'^[\d+\-*/()]+$', expr):
-            return None
-        try:
-            return eval(expr)
-        except:
-            return None
+            loop.close()
+        except Exception as e:
+            return None, str(e)
+        if error:
+            return None, error
+        if isinstance(result, list):
+            return '\n'.join(str(r) for r in result if r), None
+        if isinstance(result, str) and len(result) > 50:
+            return result, None
+        return None, "No usable output"
 
     def _run_lune(self, source):
         try:
@@ -1105,6 +930,8 @@ print(out)
             self._ensure_unluac_jar()
         if not os.path.isfile(self.unluac_path):
             return None, "no unluac.jar"
+        if bytecode[:4] != b'\x1bLua':
+            return None, "not lua bytecode"
         with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
             tmp.write(bytecode)
             tmp_path = tmp.name
@@ -1135,25 +962,3 @@ print(out)
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
         except:
             pass
-
-    def _try_roblox_exec(self, source, string_table=None):
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result, error = loop.run_until_complete(
-                execute_via_roblox(source, string_table)
-            )
-            loop.close()
-        except Exception as e:
-            return None, str(e)
-
-        if error:
-            return None, error
-
-        if isinstance(result, list):
-            combined = self._static_decode_raw(source, result)
-            if combined:
-                return combined, None
-            return None, "Static decode failed on Roblox table"
-
-        return result, None
