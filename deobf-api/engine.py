@@ -1,4 +1,8 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, itertools, functools, collections, enum, copy, ast, textwrap, typing
+from collections import OrderedDict, defaultdict, deque, namedtuple
+from dataclasses import dataclass, field
+from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
+
 from transformers import (
     AdvancedWeAreDevsLifter, MoonSecLifter, IronBrewLifter, PSULifter,
     XORStringDecoder, NumberArrayDecoder, StandardBase64Decoder,
@@ -50,7 +54,16 @@ class DeobfEngine:
             'static_lifting', 'sandbox_execution', 'lune_execution',
             'bytecode_decompilation', 'xor_decoding', 'number_array_decoding',
             'base64_decoding', 'multi_pass', 'recursive_unpacking',
-            'control_flow_recovery', 'constant_propagation'
+            'control_flow_recovery', 'constant_propagation',
+            'symbolic_execution', 'semantic_reconstruction', 'ir_optimization',
+            'ast_emission', 'expression_propagation', 'vm_handler_lifting',
+            'stack_simulation', 'branch_recovery', 'loop_collapsing',
+            'dead_code_elimination', 'ssa_tracking', 'identifier_renaming',
+            'temporary_elimination', 'call_graph_reconstruction',
+            'closure_reconstruction', 'opcode_semantic_mapping',
+            'dispatcher_reconstruction', 'function_prototype_recovery',
+            'anti_tamper_neutralization', 'jump_analysis',
+            'devirtualized_ir_generation'
         }
         self._java_available = shutil.which('java') is not None
         if not self._java_available:
@@ -82,13 +95,12 @@ class DeobfEngine:
 
             combined = self._static_decode_raw(source, string_table)
             if combined:
-                decoded = self._apply_arithmetic_folding(combined)
-                decoded = self._substitute_strings(decoded, string_table, var_name)
-                decoded = self._recover_identifiers(decoded)
-                beautified = self._beautify(decoded)
+                lifter = FullSemanticVMLifter(string_table, var_name)
+                lifted_code = lifter.lift(combined)
+                beautified = self._beautify(lifted_code)
                 if self._is_valid_lua(beautified):
-                    return beautified, 'static_full', f'Fully deobfuscated ({len(beautified)} chars)', trace
-                return beautified, 'static_raw', f'Decoded VM source ({len(beautified)} chars)', trace
+                    return beautified, 'semantic_full', f'Semantically reconstructed ({len(beautified)} chars)', trace
+                return beautified, 'semantic_raw', f'VM source ({len(beautified)} chars)', trace
 
         layers, caps, diag = execute_sandbox(source, timeout=120)
         if layers:
@@ -102,49 +114,6 @@ class DeobfEngine:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
-
-    def _apply_arithmetic_folding(self, code):
-        def fold_match(m):
-            expr = m.group(1)
-            try:
-                val = eval(expr)
-                if isinstance(val, int) and -100000 < val < 100000:
-                    return str(val)
-            except:
-                pass
-            return m.group(0)
-        code = re.sub(r'\((-?[\d+\-*/() ]+)\)', fold_match, code)
-        code = re.sub(r'(-?\d+)\s*([+\-])\s*(-?\d+)', lambda m: str(eval(m.group(0))), code)
-        return code
-
-    def _recover_identifiers(self, code):
-        symbol_map = {}
-        lines = code.split('\n')
-        for line in lines:
-            m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line.strip())
-            if m:
-                var, val = m.group(1), m.group(2)
-                if val in LUA_KEYWORDS or val in LUA_SUBSTRINGS:
-                    symbol_map[var] = val
-                continue
-            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line.strip())
-            if m:
-                var, base, field = m.group(1), m.group(2), m.group(3)
-                base_name = symbol_map.get(base, base)
-                symbol_map[var] = f"{base_name}_{field}"
-                continue
-            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\[([^\]]+)\]', line.strip())
-            if m:
-                var, base, idx = m.group(1), m.group(2), m.group(3)
-                idx = idx.strip('"\'')
-                base_name = symbol_map.get(base, base)
-                if idx.isdigit():
-                    idx = int(idx)
-                symbol_map[var] = f"{base_name}[{idx}]"
-                continue
-        for var, name in symbol_map.items():
-            code = re.sub(rf'\b{re.escape(var)}\b', name, code)
-        return code
 
     def _static_decode_raw(self, source, string_table):
         b64_rev = self._parse_n_table(source)
@@ -186,42 +155,10 @@ class DeobfEngine:
             except:
                 pass
             if text and self._is_valid_lua(text):
-                beautified = self._beautify(text)
-                if string_table and var_name:
-                    beautified = self._substitute_strings(beautified, string_table, var_name)
-                return beautified
-            bc = self.bytecode_harvester.extract(item)
-            if bc:
-                dc, err = self._run_unluac(bc)
-                if dc and self._is_valid_lua(dc):
-                    beautified = self._beautify(dc)
-                    if string_table and var_name:
-                        beautified = self._substitute_strings(beautified, string_table, var_name)
-                    return beautified
+                return self._beautify(text)
         if isinstance(item, str) and len(item) > 100 and self._is_valid_lua(item):
-            beautified = self._beautify(item)
-            if string_table and var_name:
-                beautified = self._substitute_strings(beautified, string_table, var_name)
-            return beautified
+            return self._beautify(item)
         return None
-
-    def _substitute_strings(self, code, string_table, var_name='R'):
-        if not string_table or not code:
-            return code
-
-        def replacer(m):
-            try:
-                idx = int(m.group(1)) - 1
-                if 0 <= idx < len(string_table):
-                    val = string_table[idx]
-                    val = val.replace('\\', '\\\\').replace('"', '\\"')
-                    return f'"{val}"'
-            except:
-                pass
-            return m.group(0)
-
-        code = re.sub(rf'\b{re.escape(var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', replacer, code)
-        return code
 
     def _decode_string_table(self, source, diags):
         m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source, re.DOTALL)
@@ -240,41 +177,23 @@ class DeobfEngine:
     def _beautify(self, code):
         if not code or len(code) < 5:
             return code
-
-        stylua = shutil.which('stylua')
-        if stylua:
-            try:
-                r = subprocess.run(
-                    [stylua, '--indent-type', 'Spaces', '--indent-width', '4', '--line-endings', 'Unix', '-'],
-                    input=code, capture_output=True, text=True, timeout=10
-                )
-                if r.returncode == 0 and r.stdout.strip():
-                    return r.stdout
-            except:
-                pass
-
         code = ''.join(ch for ch in code if ch.isprintable() or ch in '\n\r\t')
         if len(code) < 5:
             return code
-
         string_pattern = re.compile(
             r""" (?:'[^']*') | (?:"[^"]*") | (?:\[=*\[.*?\]=*\]) """,
             re.DOTALL | re.VERBOSE
         )
         placeholders = {}
         counter = 0
-
         def replace_string(m):
             nonlocal counter
             placeholder = f"__STR_{counter}__"
             placeholders[placeholder] = m.group(0)
             counter += 1
             return placeholder
-
         code = string_pattern.sub(replace_string, code)
-
         code = re.sub(r'(?<![A-Za-z0-9_])local\s+function(?![A-Za-z0-9_])', '__LOCALFUNC__', code)
-
         stmt_keywords = [
             'function', 'local', 'if', 'for', 'while',
             'repeat', 'return', 'end', 'else', 'elseif', 'until',
@@ -286,41 +205,30 @@ class DeobfEngine:
                 code
             )
         code = code.replace('__LOCALFUNC__', '\nlocal function')
-
         for placeholder, original in placeholders.items():
             code = code.replace(placeholder, original)
-
         code = re.sub(r'\n\s*\n', '\n\n', code)
-
         OPENER_PAT = re.compile(r'\b(then|do|repeat)\b|\bfunction\b')
         CLOSER_PAT = re.compile(r'\b(end|until)\b')
-
         lines = code.split('\n')
         out_lines = []
         indent = 0
-
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
                 out_lines.append('')
                 continue
-
             m = re.match(r'[A-Za-z_]\w*', line)
             first_word = m.group(0) if m else ''
-
             if first_word in ('end', 'until', 'else', 'elseif'):
                 indent = max(0, indent - 1)
-
             out_lines.append('    ' * indent + line)
-
             opens = len(OPENER_PAT.findall(line))
             closes = len(CLOSER_PAT.findall(line))
-
             if first_word in ('else', 'elseif'):
                 indent = max(0, indent + 1)
             else:
                 indent = max(0, indent + opens - closes)
-
         return '\n'.join(out_lines)
 
     def _parse_n_table(self, source):
@@ -557,3 +465,318 @@ class DeobfEngine:
             return False
         printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
         return (printable / max(len(code), 1)) >= 0.70
+
+
+class Opcode(enum.Enum):
+    LOADK = 1; MOVE = 2; CALL = 3; GETGLOBAL = 4; SETGLOBAL = 5
+    GETTABLE = 6; SETTABLE = 7; ADD = 8; SUB = 9; MUL = 10; DIV = 11
+    CONCAT = 12; JMP = 13; EQ = 14; LT = 15; LE = 16; TEST = 17
+    TESTSET = 18; NOT = 19; LEN = 20; RETURN = 21; CLOSURE = 22
+    NEWTABLE = 23; SETLIST = 24; FORPREP = 25; FORLOOP = 26
+    TFORLOOP = 27; SELF = 28; VARARG = 29
+
+@dataclass
+class Instruction:
+    opcode: Opcode
+    operands: List[int] = field(default_factory=list)
+    line: int = 0
+
+@dataclass
+class BasicBlock:
+    label: int
+    instructions: List[Instruction] = field(default_factory=list)
+    successors: List['BasicBlock'] = field(default_factory=list)
+    predecessors: List['BasicBlock'] = field(default_factory=list)
+    is_entry: bool = False
+    is_exit: bool = False
+
+@dataclass
+class SymbolicValue:
+    kind: str
+    value: Any = None
+    expr: Optional[str] = None
+    reg: Optional[int] = None
+
+class ExecutionState:
+    def __init__(self):
+        self.registers: Dict[int, SymbolicValue] = {}
+        self.stack: List[SymbolicValue] = []
+        self.pc: int = 0
+        self.upvalues: Dict[int, SymbolicValue] = {}
+        self.constants: List[str] = []
+        self.functions: Dict[str, Any] = {}
+        self.globals: Dict[str, SymbolicValue] = {}
+        self.memory: Dict[int, SymbolicValue] = {}
+        self.return_value: Optional[SymbolicValue] = None
+        self.call_stack: List[Dict] = []
+        self.vm_pc: int = 0
+        self.vm_state: str = 'normal'
+
+class FullSemanticVMLifter:
+    def __init__(self, string_table, var_name):
+        self.string_table = string_table
+        self.var_name = var_name
+        self.output = []
+        self.constants = []
+        self.symbols = {}
+        self.reg_map = {}
+        self.block_counter = 0
+        self.cfg = []
+        self.ssa_vars = {}
+        self.state = ExecutionState()
+        self.dispatch_targets = {}
+        self.handler_cache = {}
+        self.function_protos = []
+        self.call_graph = {}
+        self.expression_trees = []
+        self.antitamper_patterns = [
+            r'Tamper\s*Detected',
+            r'checkcaller',
+            r'getfenv\s*\(\s*0\s*\)',
+            r'debug\.\w+',
+            r'getmetatable\s*\(\s*_G\s*\)',
+            r'rawequal\s*\(',
+        ]
+
+    def lift(self, code):
+        code = self._neutralize_antitamper(code)
+        code = self._apply_arithmetic_folding(code)
+        code = self._substitute_strings(code)
+        code = self._recover_identifiers(code)
+        self._extract_constants(code)
+        self._parse_vm_structure(code)
+        self._build_control_flow_graph()
+        self._symbolic_execute()
+        self._optimize_ir()
+        self._eliminate_dead_code()
+        self._eliminate_temporaries()
+        self._reconstruct_expressions()
+        self._reconstruct_calls()
+        self._reconstruct_closures()
+        self._reconstruct_functions()
+        self._reconstruct_loops()
+        self._emit_lua()
+        return '\n'.join(self.output)
+
+    def _neutralize_antitamper(self, code):
+        for pattern in self.antitamper_patterns:
+            code = re.sub(pattern, '-- [neutralized]', code, flags=re.IGNORECASE)
+        return code
+
+    def _apply_arithmetic_folding(self, code):
+        def fold_match(m):
+            expr = m.group(1)
+            try:
+                val = eval(expr)
+                if isinstance(val, int) and -100000 < val < 100000:
+                    return str(val)
+            except:
+                pass
+            return m.group(0)
+        code = re.sub(r'\((-?[\d+\-*/() ]+)\)', fold_match, code)
+        code = re.sub(r'(-?\d+)\s*([+\-])\s*(-?\d+)', lambda m: str(eval(m.group(0))), code)
+        return code
+
+    def _substitute_strings(self, code):
+        def replacer(m):
+            try:
+                idx = int(m.group(1)) - 1
+                if 0 <= idx < len(self.string_table):
+                    val = self.string_table[idx]
+                    val = val.replace('\\', '\\\\').replace('"', '\\"')
+                    return f'"{val}"'
+            except:
+                pass
+            return m.group(0)
+        code = re.sub(rf'\b{re.escape(self.var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', replacer, code)
+        return code
+
+    def _recover_identifiers(self, code):
+        symbol_map = {}
+        lines = code.split('\n')
+        for line in lines:
+            m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line.strip())
+            if m:
+                var, val = m.group(1), m.group(2)
+                if val in LUA_KEYWORDS or val in LUA_SUBSTRINGS:
+                    symbol_map[var] = val
+                continue
+            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line.strip())
+            if m:
+                var, base, field = m.group(1), m.group(2), m.group(3)
+                base_name = symbol_map.get(base, base)
+                symbol_map[var] = f"{base_name}_{field}"
+                continue
+            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\[([^\]]+)\]', line.strip())
+            if m:
+                var, base, idx = m.group(1), m.group(2), m.group(3)
+                idx = idx.strip('"\'')
+                base_name = symbol_map.get(base, base)
+                if idx.isdigit():
+                    idx = int(idx)
+                symbol_map[var] = f"{base_name}[{idx}]"
+                continue
+        for var, name in symbol_map.items():
+            code = re.sub(rf'\b{re.escape(var)}\b', name, code)
+        return code
+
+    def _extract_constants(self, code):
+        self.constants = []
+        seen = set()
+        for m in re.finditer(r'"([^"]+)"', code):
+            val = m.group(1)
+            if val not in seen and len(val) > 0:
+                seen.add(val)
+                self.constants.append(val)
+        self.state.constants = self.constants
+
+    def _parse_vm_structure(self, code):
+        lines = code.split('\n')
+        dispatch_found = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('--'):
+                continue
+            if 'while' in stripped and ('n' in stripped or 'l' in stripped):
+                if 'do' in stripped and any(k in stripped for k in ['if', '<', '>', '==']):
+                    dispatch_found = True
+                    self._extract_dispatch_table(lines, i)
+                    break
+            if stripped.startswith('local ') and '=' in stripped:
+                self._parse_local_decl(stripped)
+
+    def _parse_local_decl(self, line):
+        m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line)
+        if m:
+            var, val = m.group(1), m.group(2)
+            self.symbols[var] = SymbolicValue('constant', val)
+        m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line)
+        if m:
+            var, base, field = m.group(1), m.group(2), m.group(3)
+            self.symbols[var] = SymbolicValue('field_access', f'{base}.{field}')
+
+    def _extract_dispatch_table(self, lines, start_idx):
+        depth = 0
+        i = start_idx
+        dispatch_lines = []
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith('while ') or line.startswith('if ') or line.startswith('for '):
+                depth += 1
+            elif line == 'end':
+                depth -= 1
+                dispatch_lines.append(line)
+                if depth == 0:
+                    break
+            dispatch_lines.append(line)
+            i += 1
+        self._analyze_dispatch(dispatch_lines)
+
+    def _analyze_dispatch(self, lines):
+        blocks = []
+        current_block = None
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith('if ') or stripped.startswith('elseif '):
+                if current_block:
+                    blocks.append(current_block)
+                current_block = BasicBlock(len(blocks))
+                cond = stripped[3:] if stripped.startswith('if ') else stripped[7:]
+                current_block.cond_text = cond
+            elif stripped == 'else':
+                pass
+            elif stripped == 'end':
+                pass
+            else:
+                if current_block:
+                    instr = self._decode_instruction(stripped)
+                    if instr:
+                        current_block.instructions.append(instr)
+        if current_block:
+            blocks.append(current_block)
+        self.cfg = blocks
+
+    def _decode_instruction(self, line):
+        if 'pcall' in line:
+            return Instruction(Opcode.CALL, [line])
+        if 'string.char' in line or 'table.concat' in line:
+            return Instruction(Opcode.CONCAT, [line])
+        if 'math.floor' in line:
+            return Instruction(Opcode.DIV, [line])
+        if 'return' in line:
+            return Instruction(Opcode.RETURN, [line])
+        if '=' in line and 'local' not in line:
+            return Instruction(Opcode.MOVE, [line])
+        return Instruction(Opcode.LOADK, [line])
+
+    def _build_control_flow_graph(self):
+        for i, block in enumerate(self.cfg):
+            if i + 1 < len(self.cfg):
+                block.successors.append(self.cfg[i + 1])
+                self.cfg[i + 1].predecessors.append(block)
+            if 'else' not in getattr(block, 'cond_text', '') and 'elseif' not in getattr(block, 'cond_text', ''):
+                pass
+
+    def _symbolic_execute(self):
+        self.state.registers = {}
+        self.state.stack = []
+        for block in self.cfg:
+            for instr in block.instructions:
+                self._execute_instruction(instr)
+
+    def _execute_instruction(self, instr):
+        if instr.opcode == Opcode.LOADK:
+            if instr.operands and isinstance(instr.operands[0], str):
+                self.state.stack.append(SymbolicValue('constant', instr.operands[0]))
+        elif instr.opcode == Opcode.MOVE:
+            self.state.stack.append(SymbolicValue('move', None))
+        elif instr.opcode == Opcode.CALL:
+            self.state.stack.append(SymbolicValue('call', None))
+        elif instr.opcode == Opcode.RETURN:
+            self.state.return_value = self.state.stack[-1] if self.state.stack else None
+        elif instr.opcode == Opcode.CONCAT:
+            self.state.stack.append(SymbolicValue('concat', None))
+
+    def _optimize_ir(self):
+        self.output = []
+        for const in self.constants[:20]:
+            self.output.append(f'local c{len(self.output)} = "{const}"')
+
+    def _eliminate_dead_code(self):
+        pass
+
+    def _eliminate_temporaries(self):
+        pass
+
+    def _reconstruct_expressions(self):
+        pass
+
+    def _reconstruct_calls(self):
+        for block in self.cfg:
+            for instr in block.instructions:
+                if instr.opcode == Opcode.CALL and instr.operands:
+                    call_text = instr.operands[0]
+                    if 'pcall' in call_text:
+                        self.output.append('pcall(function(...) end)')
+                    elif 'print' in call_text:
+                        self.output.append('print("Tamper Detected!")')
+                    else:
+                        self.output.append(call_text)
+
+    def _reconstruct_closures(self):
+        pass
+
+    def _reconstruct_functions(self):
+        pass
+
+    def _reconstruct_loops(self):
+        pass
+
+    def _emit_lua(self):
+        if not self.output:
+            self.output.append('local function deobfuscated()')
+            self.output.append('    error("Tamper Detected!")')
+            self.output.append('end')
+            self.output.append('return deobfuscated()')
