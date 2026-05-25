@@ -1,4 +1,4 @@
-import os, json, httpx, asyncio
+import os, json, httpx, asyncio, re
 
 ROBLOX_API_KEY = os.environ.get("ROBLOX_API_KEY", "")
 ROBLOX_PLACE_ID = os.environ.get("ROBLOX_PLACE_ID", "")
@@ -7,83 +7,78 @@ ROBLOX_UNIVERSE_ID = os.environ.get("ROBLOX_UNIVERSE_ID", "")
 BASE_URL = "https://apis.roblox.com/cloud/v2"
 CREATE_TASK_URL = f"{BASE_URL}/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/luau-execution-session-tasks"
 
-HOOK_TEMPLATE = r"""
+EXTRACT_TEMPLATE = r"""
 local HttpService = game:GetService("HttpService")
-
-local realLoadstring = loadstring
-local captured = {}
-
-_G.loadstring = function(code, chunkname)
-    if type(code) == "string" then
-        table.insert(captured, code)
-    end
-    return realLoadstring(code, chunkname)
+local tableData = {__STRING_TABLE__}
+local encoded = {}
+for i, str in ipairs(tableData) do
+    encoded[i] = str
 end
-_G.load = _G.loadstring
-
-local scriptContent = [[{}]]
-local func, compileErr = realLoadstring(scriptContent)
-
-if not func then
-    _G.loadstring = realLoadstring
-    _G.load = realLoadstring
-    return HttpService:JSONEncode({error = "Compile error: " .. tostring(compileErr)})
-end
-
-local success, result = pcall(func)
-
-_G.loadstring = realLoadstring
-_G.load = realLoadstring
-
-if #captured > 0 then
-    return HttpService:JSONEncode({output = table.concat(captured, "\n")})
-end
-
-local foundTable = nil
-for k, v in pairs(getfenv(0)) do
-    if type(v) == "table" and #v > 10 and k ~= "shared" and k ~= "syn" and k ~= "_G" and k ~= "package" then
-        local stringCount = 0
-        for i, entry in ipairs(v) do
-            if type(entry) == "string" then
-                stringCount = stringCount + 1
-            end
-        end
-        if stringCount > 10 then
-            foundTable = v
-            break
-        end
-    end
-end
-
-if foundTable then
-    local encodedStrings = {}
-    for i, str in ipairs(foundTable) do
-        encodedStrings[i] = str
-    end
-    return HttpService:JSONEncode({stringTable = encodedStrings})
-end
-
-if not success then
-    return HttpService:JSONEncode({error = "Runtime error: " .. tostring(result)})
-end
-
-return HttpService:JSONEncode({output = tostring(result)})
+return HttpService:JSONEncode({stringTable = encoded})
 """
+
+def _extract_string_table_from_source(source):
+    patterns = [
+        r'return\s+(?:\(\s*)?function\s*\([^)]*\)[^\{]*(\{.*?\})\s*end\s*(?:\))?\s*\(',
+        r'local\s+\w+\s*=\s*(\{.*?\})\s*;?\s*return',
+        r'=\s*(\{.*?\})\s*;?\s*return',
+    ]
+    for pat in patterns:
+        m = re.search(pat, source, re.DOTALL)
+        if m:
+            return m.group(1)
+    for m in re.finditer(r'\{', source):
+        body = _extract_balanced(source, m.start())
+        if body and body.count('"') > 20:
+            return body
+    return None
+
+def _extract_balanced(code, start):
+    if start >= len(code) or code[start] != '{':
+        return None
+    depth = 0
+    in_str = False
+    str_char = None
+    i = start
+    while i < len(code):
+        c = code[i]
+        if in_str:
+            if c == '\\':
+                i += 2
+                continue
+            if c == str_char:
+                in_str = False
+        else:
+            if c in ('"', "'"):
+                in_str = True
+                str_char = c
+            elif c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return code[start:i+1]
+        i += 1
+    return None
+
 
 async def execute_via_roblox(script_source):
     if not ROBLOX_API_KEY or not ROBLOX_PLACE_ID or not ROBLOX_UNIVERSE_ID:
         return None, "Roblox API not configured"
+
+    table_body = _extract_string_table_from_source(script_source)
+    if not table_body:
+        return None, "Could not extract string table from script"
+
+    extract_script = EXTRACT_TEMPLATE.replace("__STRING_TABLE__", table_body)
 
     headers = {
         "x-api-key": ROBLOX_API_KEY,
         "Content-Type": "application/json"
     }
 
-    escaped_source = script_source.replace("\\", "\\\\").replace('"', '\\"')
-    hook_script = HOOK_TEMPLATE.replace("{}", escaped_source)
-
     payload = {
-        "script": hook_script,
+        "script": extract_script,
         "arguments": []
     }
 
