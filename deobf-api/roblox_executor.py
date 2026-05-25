@@ -17,50 +17,40 @@ end
 return HttpService:JSONEncode({stringTable = encoded})
 """
 
-def _extract_string_table_from_source(source):
-    patterns = [
-        r'return\s+(?:\(\s*)?function\s*\([^)]*\)[^\{]*(\{.*?\})\s*end\s*(?:\))?\s*\(',
-        r'local\s+\w+\s*=\s*(\{.*?\})\s*;?\s*return',
-        r'=\s*(\{.*?\})\s*;?\s*return',
-    ]
-    for pat in patterns:
-        m = re.search(pat, source, re.DOTALL)
-        if m:
-            return m.group(1)
-    for m in re.finditer(r'\{', source):
-        body = _extract_balanced(source, m.start())
-        if body and body.count('"') > 20:
-            return body
-    return None
-
-def _extract_balanced(code, start):
-    if start >= len(code) or code[start] != '{':
-        return None
+def _find_table_literal_end(content, open_brace_index):
     depth = 0
-    in_str = False
-    str_char = None
-    i = start
-    while i < len(code):
-        c = code[i]
-        if in_str:
-            if c == '\\':
-                i += 2
+    quote = None
+    idx = open_brace_index
+    while idx < len(content):
+        char = content[idx]
+        if quote:
+            if char == "\\":
+                idx += 2
                 continue
-            if c == str_char:
-                in_str = False
-        else:
-            if c in ('"', "'"):
-                in_str = True
-                str_char = c
-            elif c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    return code[start:i+1]
-        i += 1
-    return None
+            if char == quote:
+                quote = None
+            idx += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return idx + 1
+        idx += 1
+    return -1
 
+def _extract_string_table_from_source(content):
+    m = re.search(r'local\s+\w+\s*=\s*\{', content)
+    if not m:
+        return None
+    open_brace_index = content.find("{", m.start())
+    table_end = _find_table_literal_end(content, open_brace_index)
+    if table_end == -1:
+        return None
+    return content[open_brace_index:table_end]
 
 async def execute_via_roblox(script_source):
     if not ROBLOX_API_KEY or not ROBLOX_PLACE_ID or not ROBLOX_UNIVERSE_ID:
