@@ -18,6 +18,13 @@ class BaseLifter:
                 elif nc == '"': result.append('"')
                 elif nc == "'": result.append("'")
                 elif nc == '0': result.append('\0')
+                elif nc == 'x' and i + 3 < len(s):
+                    try:
+                        code = int(s[i+2:i+4], 16)
+                        result.append(chr(code % 256))
+                        i += 3
+                    except ValueError:
+                        result.append(s[i])
                 elif nc.isdigit():
                     j = i + 1
                     while j < len(s) and s[j].isdigit() and j - i < 4:
@@ -34,7 +41,10 @@ class BaseLifter:
             else:
                 result.append(s[i])
                 i += 1
-        return ''.join(result)
+        text = ''.join(result)
+        text = text.replace('\x00', '')
+        text = re.sub(r'[^\x20-\x7E\n\r\t]', '', text)
+        return text
 
 class AdvancedWeAreDevsLifter(BaseLifter):
     def __init__(self):
@@ -137,14 +147,26 @@ class AdvancedWeAreDevsLifter(BaseLifter):
             return None
         depth = 0
         i = start
+        in_str = False
+        str_char = None
         while i < len(text):
             c = text[i]
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    return text[start:i+1]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == str_char:
+                    in_str = False
+            else:
+                if c in ('"', "'"):
+                    in_str = True
+                    str_char = c
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
             i += 1
         return None
 
@@ -174,10 +196,11 @@ class AdvancedWeAreDevsLifter(BaseLifter):
             try:
                 start = int(m.group(1))
                 end = int(m.group(2))
-                src_var = m.group(5)
-                dst_var = m.group(3)
                 pairs = []
-                for assign in re.finditer(rf'{re.escape(src_var)}\[(\d+)\]\s*=\s*{re.escape(dst_var)}\[(\d+)\]', source):
+                for assign in re.finditer(
+                    rf'{re.escape(m.group(5))}\[(\d+)\]\s*=\s*{re.escape(m.group(3))}\[(\d+)\]',
+                    source
+                ):
                     a = int(assign.group(2))
                     b = int(assign.group(1))
                     pairs.append((a, b))
@@ -226,6 +249,7 @@ class AdvancedWeAreDevsLifter(BaseLifter):
                 bits -= 8
                 out.append((bit_buf >> bits) & 0xFF)
         return bytes(out)
+
 
 class MoonSecLifter(BaseLifter):
     def lift(self, source):
@@ -279,6 +303,7 @@ class MoonSecLifter(BaseLifter):
             return bytes(out)
         except Exception:
             return None
+
 
 class IronBrewLifter(BaseLifter):
     def lift(self, source):
@@ -357,6 +382,7 @@ class IronBrewLifter(BaseLifter):
                 i += 1
         return bytes(result)
 
+
 class PSULifter(BaseLifter):
     def lift(self, source):
         results = []
@@ -385,6 +411,7 @@ class PSULifter(BaseLifter):
                 return f'[{func_name} function body]'
         return None
 
+
 class XORStringDecoder(BaseLifter):
     def lift(self, source):
         results = []
@@ -405,12 +432,13 @@ class XORStringDecoder(BaseLifter):
                     pass
         return results
 
+
 class NumberArrayDecoder(BaseLifter):
     def lift(self, source):
         results = []
         patterns = [
             r'string\.char\s*\(\s*([\d,\s]+)\s*\)',
-            r'string\.char%(([\d,\s]+)%)',
+            r'string\.char%([\d,\s]+)%)',
         ]
         for pat in patterns:
             for m in re.finditer(pat, source):
@@ -424,6 +452,7 @@ class NumberArrayDecoder(BaseLifter):
                     except Exception:
                         results.append(decoded)
         return results
+
 
 class StandardBase64Decoder(BaseLifter):
     def lift(self, source):
@@ -445,6 +474,7 @@ class StandardBase64Decoder(BaseLifter):
                 pass
         return results
 
+
 class StringPatternExtractor:
     @staticmethod
     def extract_all(source):
@@ -459,6 +489,7 @@ class StringPatternExtractor:
             for m in re.finditer(pat, source, re.DOTALL):
                 results.append(m.group(0))
         return results
+
 
 class BytecodeHarvester:
     LUA_SIGNATURE = b'\x1bLua'
@@ -493,103 +524,12 @@ class BytecodeHarvester:
 
     def _find_bytecode_end(self, data, start):
         try:
-            if start + 12 > len(data):
-                return None
-            version = data[start + 4]
-            format_ver = data[start + 5]
-            endian_flag = data[start + 6]
-            int_size = data[start + 7]
-            size_t_size = data[start + 8]
-            instruction_size = data[start + 9]
-            number_size = data[start + 10]
-            integral_flag = data[start + 11]
-            ptr = start + 12
-            if version == 0x51 and format_ver == 0:
-                if ptr + int_size > len(data):
-                    return None
-                if ptr + int_size + size_t_size > len(data):
-                    return None
-                source_name_len = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                if source_name_len > 0:
-                    ptr += source_name_len
-                if ptr >= len(data):
-                    return None
-                line_defined = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                last_line_defined = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                num_upvalues = data[ptr] if ptr < len(data) else 0
-                ptr += 1
-                num_params = data[ptr] if ptr < len(data) else 0
-                ptr += 1
-                is_vararg = data[ptr] if ptr < len(data) else 0
-                ptr += 1
-                max_stack_size = data[ptr] if ptr < len(data) else 0
-                ptr += 1
-                if ptr + int_size > len(data):
-                    return None
-                code_size = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                ptr += code_size * instruction_size
-                if ptr + int_size > len(data):
-                    return None
-                const_size = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                for _ in range(const_size):
-                    if ptr >= len(data):
-                        return None
-                    const_type = data[ptr]
-                    ptr += 1
-                    if const_type == 4:
-                        if ptr + int_size > len(data):
-                            return None
-                        str_len = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                        ptr += int_size + str_len
-                    elif const_type == 3:
-                        ptr += number_size
-                    elif const_type == 1:
-                        ptr += 1
-                if ptr + int_size > len(data):
-                    return None
-                proto_size = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                for _ in range(proto_size):
-                    sub_end = self._find_bytecode_end(data, ptr)
-                    if sub_end:
-                        ptr = sub_end
-                    else:
-                        return None
-                if ptr + int_size > len(data):
-                    return None
-                upvalue_count = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                for _ in range(upvalue_count):
-                    if ptr + 2 > len(data):
-                        return None
-                    ptr += 2
-                if ptr + int_size > len(data):
-                    return None
-                local_count = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                for _ in range(local_count):
-                    if ptr + int_size + 4 > len(data):
-                        return None
-                    str_len = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                    ptr += int_size + str_len + 4
-                if ptr + int_size > len(data):
-                    return None
-                lineinfo_count = struct.unpack_from('<I', data, ptr)[0] if int_size == 4 else struct.unpack_from('<H', data, ptr)[0]
-                ptr += int_size
-                ptr += lineinfo_count * int_size
-                return ptr
             return len(data)
         except Exception:
             return len(data)
 
     @staticmethod
     def _try_all_base64(data):
-        b64_chars = set(string.ascii_letters + string.digits + '+/=')
         candidates = re.findall(rb'[A-Za-z0-9+/=]{40,}', data)
         for candidate in candidates:
             try:
