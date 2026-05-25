@@ -3,9 +3,9 @@ import os, subprocess, tempfile, shutil, traceback
 LUA_BIN = shutil.which('lua5.1') or shutil.which('lua51') or shutil.which('lua') or 'lua'
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DUMPER_LUA = r'''
-local OBFUSCATED_SCRIPT = [[{script}]]
+DRIVER_LUA = r'''
 local CAP_DIR = "{cap_dir}"
+local TARGET_FILE = "{target_file}"
 
 local RealEnv = getfenv()
 local MockEnv = {}
@@ -576,15 +576,7 @@ setmetatable(MockEnv, {
     end
 })
 
-if not newproxy then
-    function newproxy(u)
-        local t = {}
-        if u then local mt = {}; setmetatable(t, mt) end
-        return t
-    end
-end
-
-local func, err = loadstring(OBFUSCATED_SCRIPT)
+local func, err = loadfile(TARGET_FILE)
 if func then
     setfenv(func, MockEnv)
     Log("Executing script...")
@@ -606,15 +598,17 @@ def execute_sandbox(source, timeout=120, varargs=None):
     except Exception as e:
         return [], [], f'TEMP_DIR_ERROR: {e}'
     try:
-        drv = os.path.join(temp_dir, 'driver.lua')
+        target_file = os.path.join(temp_dir, 'obfuscated.lua')
+        driver_file = os.path.join(temp_dir, 'driver.lua')
         out_dir = temp_dir.replace('\\', '/')
 
-        escaped_source = source.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+        with open(target_file, 'w', encoding='utf-8') as f:
+            f.write(source)
 
-        lua_code = DUMPER_LUA.replace('{script}', escaped_source).replace('{cap_dir}', out_dir)
+        driver_code = DRIVER_LUA.replace('{cap_dir}', out_dir).replace('{target_file}', target_file.replace('\\', '/'))
 
-        with open(drv, 'w', encoding='utf-8') as f:
-            f.write(lua_code)
+        with open(driver_file, 'w', encoding='utf-8') as f:
+            f.write(driver_code)
 
         env = os.environ.copy()
         env['LUA_PATH'] = os.path.join(APP_DIR, '?.lua') + ';' + env.get('LUA_PATH', '')
@@ -623,7 +617,7 @@ def execute_sandbox(source, timeout=120, varargs=None):
         stderr_output = ''
         try:
             result = subprocess.run(
-                [LUA_BIN, drv],
+                [LUA_BIN, driver_file],
                 capture_output=True, text=True, timeout=timeout, cwd=temp_dir, env=env
             )
             stderr_output = result.stderr
