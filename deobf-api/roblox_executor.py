@@ -9,54 +9,37 @@ CREATE_TASK_URL = f"{BASE_URL}/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLA
 
 HOOK_TEMPLATE = r"""
 local HttpService = game:GetService("HttpService")
-local originalLoadstring = loadstring
-local originalLoad = load
-local captured = {}
+local capturedTable = nil
 
-local function hookLoadstring(code, chunkname)
-    if type(code) == "string" then
-        table.insert(captured, code)
+local function captureStringTable(name, value)
+    if type(value) == "table" and #value > 10 then
+        capturedTable = value
     end
-    return originalLoadstring(code, chunkname)
 end
 
-_G.loadstring = hookLoadstring
-_G.load = hookLoadstring
+local env = setmetatable({}, {__index = getfenv(), __newindex = function(t, k, v)
+    rawset(t, k, v)
+    captureStringTable(k, v)
+end})
 
 local scriptContent = [[{}]]
-local func, compileErr = originalLoadstring(scriptContent)
+local func, compileErr = loadstring(scriptContent)
 if not func then
     return HttpService:JSONEncode({error = "Compile error: " .. tostring(compileErr)})
 end
 
+setfenv(func, env)
 local success, result = pcall(func)
 if not success then
     return HttpService:JSONEncode({error = "Runtime error: " .. tostring(result)})
 end
 
-local allSources = table.concat(captured, "\n")
-if #allSources > 0 then
-    return HttpService:JSONEncode({output = allSources})
-end
-
-local luaKeywords = {"function", "local", "end", "if", "then", "else", "return", "for", "while", "do"}
-local candidates = {}
-for k, v in pairs(getfenv()) do
-    if type(v) == "string" and #v > 100 then
-        local count = 0
-        for _, kw in ipairs(luaKeywords) do
-            if string.find(v, kw) then
-                count = count + 1
-            end
-        end
-        if count >= 2 then
-            table.insert(candidates, {source = v, count = count})
-        end
+if capturedTable then
+    local encodedStrings = {}
+    for i, str in ipairs(capturedTable) do
+        encodedStrings[i] = str
     end
-end
-table.sort(candidates, function(a, b) return a.count > b.count end)
-if #candidates > 0 then
-    return HttpService:JSONEncode({output = candidates[1].source})
+    return HttpService:JSONEncode({stringTable = encodedStrings})
 end
 
 return HttpService:JSONEncode({output = tostring(result)})
@@ -105,7 +88,9 @@ async def execute_via_roblox(script_source):
                     raw_output = poll_data.get("output", "")
                     try:
                         parsed = json.loads(raw_output)
-                        if "output" in parsed:
+                        if "stringTable" in parsed:
+                            return parsed["stringTable"], None
+                        elif "output" in parsed:
                             return parsed["output"], None
                         elif "error" in parsed:
                             return None, parsed["error"]
