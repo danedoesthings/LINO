@@ -7,3 +7,4 @@ lupa
 uncompyle6
 colorama
 regex
+pygments
