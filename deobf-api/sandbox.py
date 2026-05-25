@@ -7,6 +7,8 @@ DRIVER_LUA = r'''
 local CAP_DIR = "{cap_dir}"
 local TARGET_FILE = "{target_file}"
 
+local _real_loadfile = loadfile
+
 local RealEnv = getfenv()
 local MockEnv = {}
 
@@ -576,7 +578,15 @@ setmetatable(MockEnv, {
     end
 })
 
-local func, err = loadfile(TARGET_FILE)
+if not newproxy then
+    function newproxy(u)
+        local t = {}
+        if u then local mt = {}; setmetatable(t, mt) end
+        return t
+    end
+end
+
+local func, err = _real_loadfile(TARGET_FILE)
 if func then
     setfenv(func, MockEnv)
     Log("Executing script...")
