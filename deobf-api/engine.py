@@ -467,42 +467,23 @@ class DeobfEngine:
         return (printable / max(len(code), 1)) >= 0.70
 
 
-@dataclass
-class VMInstruction:
-    opcode: int
-    operands: List[Union[int, str]] = field(default_factory=list)
-    handler_code: str = ""
-    action: str = "UNKNOWN"
-
-@dataclass 
-class SymbolicValue:
-    kind: str
-    value: Any = None
-    expr: str = ""
-    const_idx: int = -1
-    reg_name: str = ""
-
 class FullSemanticVMLifter:
     def __init__(self, string_table, var_name):
         self.string_table = string_table
         self.var_name = var_name
-        self.constants = []
-        self.vm_instructions = []
-        self.vm_table_var = ""
-        self.vm_pc_var = ""
-        self.vm_opcode_var = ""
-        self.vm_dispatch_block = ""
-        self.opcode_map = {}
-        self.symbolic_stack = []
-        self.symbolic_regs = {}
-        self.symbolic_upvals = {}
-        self.symbolic_globals = {}
-        self.ir_statements = []
-        self.function_protos = []
+        self.instruction_table = []
+        self.table_var = ""
+        self.pc_var = ""
+        self.opcode_var = ""
+        self.opcode_handlers = {}
+        self.lua_output = []
         self.temp_counter = 0
-        self.current_function = None
+        self.indent_level = 0
+        self.var_counter = 0
         self.label_counter = 0
-        self.function_registry = {}
+        self.function_stack = []
+        self.constant_pool = []
+        self.exported_globals = set()
 
     def lift(self, vm_code):
         code = self._neutralize_antitamper(vm_code)
@@ -510,37 +491,33 @@ class FullSemanticVMLifter:
         code = self._substitute_strings(code)
         code = self._recover_identifiers(code)
 
-        self._extract_vm_components(code)
-        if not self.vm_instructions or not self.opcode_map:
-            return self._emit_fallback(code)
+        self._extract_instruction_table(code)
+        if not self.instruction_table or len(self.instruction_table) < 20:
+            return self._fallback(code)
 
-        self._symbolic_execute()
-        self._reconstruct_expressions()
-        self._reconstruct_calls()
-        self._reconstruct_functions()
-        self._reconstruct_loops()
-        self._eliminate_dead_code()
-        self._eliminate_temporaries()
-        return self._emit_lua()
+        self._extract_dispatch_variables(code)
+        self._extract_opcode_handlers(code)
+        if not self.opcode_handlers or len(self.opcode_handlers) < 3:
+            return self._fallback(code)
+
+        self._extract_constant_pool(code)
+        self._translate_instructions()
+        return self._format_output()
 
     def _neutralize_antitamper(self, code):
-        for pattern in [
-            r'if\s+not\s+pcall\s*\(\s*function\s*\(\)[^)]*end\s*\)\s*then\s*error\s*\(\s*"[^"]*"[^)]*\)\s*end',
-            r'error\s*\(\s*"[^"]*Tamper[^"]*"[^)]*\)',
-            r'checkcaller\s*\(\s*\)',
-            r'getfenv\s*\(\s*0\s*\)\s*==\s*getfenv\s*\(\s*\)',
-            r'getmetatable\s*\(\s*_G\s*\)\s*==\s*nil',
-            r'rawequal\s*\(\s*getfenv\s*\(\s*\)',
-        ]:
-            code = re.sub(pattern, 'true', code, flags=re.IGNORECASE)
-        code = re.sub(r'error\s*\(\s*"[^"]*Tamper\s*Detected[^"]*"[^)]*\)', 'do return end', code)
+        code = re.sub(
+            r'if\s+not\s+pcall\s*\(\s*function\s*\(\)[^)]*end\s*\)\s*then\s*error\s*\([^)]*\)\s*end',
+            'do end',
+            code, flags=re.DOTALL
+        )
+        code = re.sub(r'error\s*\(\s*"[^"]*Tamper\s*Detected[^"]*"\)', 'do return end', code)
+        code = re.sub(r'checkcaller\s*\(\s*\)', 'true', code)
         return code
 
     def _apply_arithmetic_folding(self, code):
-        def fold_match(m):
-            expr = m.group(1)
+        def fold(m):
             try:
-                val = eval(expr)
+                val = eval(m.group(1))
                 if isinstance(val, (int, float)) and -100000 < val < 100000:
                     if isinstance(val, float) and val == int(val):
                         return str(int(val))
@@ -548,14 +525,14 @@ class FullSemanticVMLifter:
             except:
                 pass
             return m.group(0)
-        code = re.sub(r'\(\s*(-?[\d+\-*/.() ]+)\s*\)', fold_match, code)
-        code = re.sub(r'(-?\d+(?:\.\d+)?)\s*([+\-])\s*(-?\d+(?:\.\d+)?)', lambda m: str(eval(m.group(0))), code)
-        return code
+        return re.sub(r'\(\s*(-?[\d+\-*/.() ]+)\s*\)', fold, code)
 
     def _substitute_strings(self, code):
-        def replacer(m):
+        def repl(m):
             try:
-                idx = int(m.group(1)) - 1
+                bracket = m.group(0)[0]
+                idx_str = m.group(1)
+                idx = int(idx_str) - 1
                 if 0 <= idx < len(self.string_table):
                     val = self.string_table[idx]
                     val = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
@@ -563,7 +540,7 @@ class FullSemanticVMLifter:
             except:
                 pass
             return m.group(0)
-        code = re.sub(rf'\b{re.escape(self.var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', replacer, code)
+        code = re.sub(rf'\b{re.escape(self.var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', repl, code)
         return code
 
     def _recover_identifiers(self, code):
@@ -591,305 +568,411 @@ class FullSemanticVMLifter:
                     idx = int(idx)
                 symbol_map[var] = f"{base_name}[{idx}]"
                 continue
-        for var, name in symbol_map.items():
+        for var, name in sorted(symbol_map.items(), key=lambda x: -len(x[0])):
             code = re.sub(rf'\b{re.escape(var)}\b', name, code)
         return code
 
-    def _extract_vm_components(self, code):
-        table_match = re.search(r'local\s+(\w+)\s*=\s*\{((?:\s*[^,{}]+(?:,|$))*)\}', code, re.DOTALL)
-        if not table_match:
-            table_match = re.search(r'(\w+)\s*=\s*\{((?:\s*[^,{}]+(?:,|$))*)\}', code, re.DOTALL)
-        if table_match:
-            self.vm_table_var = table_match.group(1)
-            body = table_match.group(2)
-            self._parse_vm_instruction_table(body)
-
-        dispatch_match = re.search(
-            r'(local\s+(\w+)\s*=\s*(\w+)\[(\w+)\][^\n]*\n(?:\s*[^\n]*\n)*?\s*end\s*end)',
-            code, re.DOTALL
-        )
-        if dispatch_match:
-            self.vm_dispatch_block = dispatch_match.group(1)
-            self._parse_dispatch_block()
-
-    def _parse_vm_instruction_table(self, body):
-        entries = []
-        for tok in re.finditer(r'(-?\d+(?:\.\d+)?|"[^"]*"|\'[^\']*\')', body):
-            val = tok.group(1)
-            if val.startswith('"') or val.startswith("'"):
-                entries.append(val[1:-1])
-            else:
-                try:
-                    entries.append(int(val))
-                except ValueError:
-                    try:
-                        entries.append(float(val))
-                    except ValueError:
-                        entries.append(val)
-        if len(entries) > 20:
-            self.vm_instructions = entries
-
-    def _parse_dispatch_block(self):
-        pc_match = re.search(r'local\s+(\w+)\s*=\s*(\w+)\[(\w+)\]', self.vm_dispatch_block)
-        if pc_match:
-            self.vm_opcode_var = pc_match.group(1)
-            self.vm_table_var = pc_match.group(2)
-            self.vm_pc_var = pc_match.group(3)
-
-        for match in re.finditer(
-            r'(?:else)?if\s+' + re.escape(self.vm_opcode_var) + r'\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end\b))',
-            self.vm_dispatch_block, re.DOTALL
-        ):
-            opcode = int(match.group(1))
-            handler = match.group(2)
-            self.opcode_map[opcode] = self._classify_handler(handler)
-
-    def _classify_handler(self, handler_code):
-        classification = {'action': 'UNKNOWN', 'handler': handler_code}
-
-        if re.search(r'R\s*\[[^\]]+\]\s*\[[^\]]+\]', handler_code):
-            classification['action'] = 'GETTABLE'
-        elif re.search(r'R\s*\[', handler_code):
-            classification['action'] = 'LOADK'
-            idx_match = re.search(r'R\s*\[([^\]]+)\]', handler_code)
-            if idx_match:
-                classification['index_expr'] = idx_match.group(1)
-        elif re.search(r'_G\s*\[[^\]]+\]\s*=', handler_code):
-            classification['action'] = 'SETGLOBAL'
-            name_match = re.search(r'_G\s*\[([^\]]+)\]', handler_code)
-            if name_match:
-                classification['name_expr'] = name_match.group(1)
-        elif re.search(r'=\s*_G\s*\[', handler_code):
-            classification['action'] = 'GETGLOBAL'
-            name_match = re.search(r'_G\s*\[([^\]]+)\]', handler_code)
-            if name_match:
-                classification['name_expr'] = name_match.group(1)
-        elif re.search(r'pcall\s*\(', handler_code):
-            classification['action'] = 'PCALL'
-            func_match = re.search(r'pcall\s*\(([^,)]+)', handler_code)
-            if func_match:
-                classification['func_expr'] = func_match.group(1)
-        elif re.search(r'loadstring\s*\(', handler_code):
-            classification['action'] = 'LOADSTRING'
-        elif re.search(r'string\.char\s*\(', handler_code):
-            classification['action'] = 'STRCHAR'
-        elif re.search(r'table\.concat\s*\(', handler_code):
-            classification['action'] = 'TABLECONCAT'
-        elif re.search(r'math\.floor\s*\(', handler_code):
-            classification['action'] = 'MATHFLOOR'
-        elif re.search(r'return\b', handler_code):
-            classification['action'] = 'RETURN'
-        elif re.search(r'=\s*function\s*\(', handler_code):
-            classification['action'] = 'CLOSURE'
-        elif re.search(r'=\s*\{', handler_code):
-            classification['action'] = 'NEWTABLE'
-        elif re.search(r'\[[^\]]+\]\s*=', handler_code) and '_G' not in handler_code:
-            classification['action'] = 'SETTABLE'
-        elif re.search(r'for\s+\w+\s*=', handler_code):
-            classification['action'] = 'FORLOOP'
-        elif re.search(r'if\s+', handler_code):
-            classification['action'] = 'CONDJUMP'
-        elif '+' in handler_code or '-' in handler_code or '*' in handler_code or '/' in handler_code:
-            classification['action'] = 'ARITH'
-        elif '..' in handler_code:
-            classification['action'] = 'CONCAT'
-        elif '=' in handler_code and 'local' not in handler_code:
-            classification['action'] = 'MOVE'
-        elif re.search(r'\w+\s*\(', handler_code):
-            classification['action'] = 'CALL'
-            func_match = re.search(r'(\w+)\s*\(', handler_code)
-            if func_match:
-                classification['func_name'] = func_match.group(1)
-
-        return classification
-
-    def _symbolic_execute(self):
-        pc = 0
-        instructions = self.vm_instructions
-        instruction_limit = len(instructions)
-
-        while pc < instruction_limit and len(self.ir_statements) < 10000:
-            op = instructions[pc]
-            pc += 1
-
-            if not isinstance(op, int) or op not in self.opcode_map:
+    def _extract_instruction_table(self, code):
+        best_var = ""
+        best_body = ""
+        best_count = 0
+        
+        for m in re.finditer(r'\b(local\s+)?(\w+)\s*=\s*\{', code):
+            is_local = m.group(1) is not None
+            var_name = m.group(2)
+            brace_pos = m.end() - 1
+            body = self._extract_balanced(code, brace_pos)
+            if not body:
                 continue
+            inner = body[1:-1]
+            entries = re.split(r'\s*,\s*', inner)
+            count = len([e for e in entries if e.strip() and (e.strip().lstrip('-').isdigit() or e.strip().startswith('"'))])
+            if count > best_count:
+                best_count = count
+                best_var = var_name
+                best_body = inner
 
-            handler = self.opcode_map[op]
-            action = handler['action']
+        if best_body:
+            self.table_var = best_var
+            self.instruction_table = self._parse_entries('{' + best_body + '}')
 
+    def _extract_balanced(self, code, brace_pos):
+        if brace_pos >= len(code) or code[brace_pos] != '{':
+            return None
+        depth = 0
+        in_str = False
+        str_char = None
+        i = brace_pos
+        while i < len(code):
+            c = code[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == str_char:
+                    in_str = False
+            else:
+                if c in ('"', "'"):
+                    in_str = True
+                    str_char = c
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return code[brace_pos:i+1]
+            i += 1
+        return None
+
+    def _parse_entries(self, table_body):
+        entries = []
+        body = table_body[1:-1]
+        depth = 0
+        current = ""
+        in_str = False
+        str_char = None
+        
+        for c in body:
+            if in_str:
+                current += c
+                if c == '\\':
+                    current += ''
+                elif c == str_char:
+                    in_str = False
+                continue
+            
+            if c in ('"', "'"):
+                in_str = True
+                str_char = c
+                current += c
+                continue
+            
+            if c == '{':
+                depth += 1
+                current += c
+                continue
+            
+            if c == '}':
+                depth -= 1
+                current += c
+                continue
+            
+            if c == ',' and depth == 0:
+                entries.append(current.strip())
+                current = ""
+                continue
+            
+            current += c
+        
+        if current.strip():
+            entries.append(current.strip())
+        
+        parsed = []
+        for e in entries:
+            e = e.strip()
+            if not e:
+                continue
+            if (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
+                parsed.append(e[1:-1])
+            elif e.lstrip('-').isdigit():
+                parsed.append(int(e))
+            elif e.replace('.', '', 1).lstrip('-').isdigit():
+                parsed.append(float(e))
+            else:
+                parsed.append(e)
+        
+        return parsed
+
+    def _extract_dispatch_variables(self, code):
+        m = re.search(r'local\s+(\w+)\s*=\s*(\w+)\[(\w+)\]', code)
+        if m:
+            self.opcode_var = m.group(1)
+            self.table_var = m.group(2)
+            self.pc_var = m.group(3)
+            return
+        
+        m = re.search(r'(\w+)\s*=\s*(\w+)\[(\w+)\]', code)
+        if m:
+            self.opcode_var = m.group(1)
+            self.table_var = m.group(2)
+            self.pc_var = m.group(3)
+
+    def _extract_opcode_handlers(self, code):
+        if not self.opcode_var:
+            self._extract_dispatch_variables(code)
+        
+        if not self.opcode_var:
+            return
+        
+        pattern = re.compile(
+            r'(?:else)?if\s+' + re.escape(self.opcode_var) + r'\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)',
+            re.DOTALL
+        )
+        
+        for m in pattern.finditer(code):
+            opcode = int(m.group(1))
+            handler_body = m.group(2)
+            self.opcode_handlers[opcode] = self._classify_handler(handler_body)
+
+    def _classify_handler(self, handler):
+        h = handler.strip()
+        
+        if re.search(r'R\s*\[[^\]]+\]\s*\[[^\]]+\]', h):
+            return 'GETTABLE'
+        if re.search(r'R\s*\[', h):
+            return 'LOADK'
+        if re.search(r'_G\s*\[[^\]]+\]\s*=', h):
+            return 'SETGLOBAL'
+        if re.search(r'=\s*_G\s*\[', h):
+            return 'GETGLOBAL'
+        if 'pcall' in h:
+            return 'PCALL'
+        if 'loadstring' in h:
+            return 'LOADSTRING'
+        if 'string.char' in h:
+            return 'STRCHAR'
+        if 'table.concat' in h:
+            return 'TABLECONCAT'
+        if 'math.floor' in h:
+            return 'MATHFLOOR'
+        if 'return' in h:
+            return 'RETURN'
+        if '=' in h and 'function' in h:
+            return 'CLOSURE'
+        if '=' in h and '{' in h and '}' in h:
+            return 'NEWTABLE'
+        if '[' in h and ']' in h and '=' in h and '_G' not in h:
+            return 'SETTABLE'
+        if 'for ' in h:
+            return 'FORLOOP'
+        if 'while ' in h:
+            return 'WHILELOOP'
+        if 'if ' in h:
+            return 'CONDJUMP'
+        if '..' in h:
+            return 'CONCAT'
+        if re.search(r'[+\-*/]', h) and '=' in h:
+            return 'ARITH'
+        if '=' in h and 'local' not in h:
+            return 'MOVE'
+        if re.search(r'\w+\s*\(', h):
+            return 'CALL'
+        
+        return 'UNKNOWN'
+
+    def _extract_constant_pool(self, code):
+        self.constant_pool = list(self.string_table)
+
+    def _translate_instructions(self):
+        table = self.instruction_table
+        pc = 0
+        limit = len(table)
+        self.lua_output = []
+        stack = []
+        
+        while pc < limit and len(self.lua_output) < 50000:
+            op = table[pc]
+            pc += 1
+            
+            if not isinstance(op, int) or op not in self.opcode_handlers:
+                continue
+            
+            action = self.opcode_handlers[op]
+            
             if action == 'LOADK':
-                if pc < instruction_limit:
-                    const_idx = instructions[pc]
+                if pc < limit:
+                    idx = table[pc]
                     pc += 1
-                    if isinstance(const_idx, int) and 0 <= const_idx - 1 < len(self.string_table):
-                        val = self.string_table[const_idx - 1]
-                        self.symbolic_stack.append(SymbolicValue('const', val, f'"{val}"', const_idx))
-                    else:
-                        self.symbolic_stack.append(SymbolicValue('unknown', const_idx, str(const_idx)))
-
-            elif action == 'GETGLOBAL':
-                name_expr = handler.get('name_expr', '')
-                self.symbolic_stack.append(SymbolicValue('global', name_expr, f'_G[{name_expr}]'))
-
+                    const_val = self._resolve_constant(idx)
+                    stack.append(('const', const_val))
+            
             elif action == 'SETGLOBAL':
-                name_expr = handler.get('name_expr', '')
-                val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                self.ir_statements.append(f'_G[{name_expr}] = {val.expr}')
-
+                if pc + 1 < limit:
+                    name_idx = table[pc]
+                    val_idx = table[pc + 1]
+                    pc += 2
+                    name = self._resolve_constant(name_idx)
+                    val = self._resolve_constant(val_idx)
+                    self.lua_output.append(f'_G["{name}"] = {self._format_value(val)}')
+                    self.exported_globals.add(name)
+            
+            elif action == 'GETGLOBAL':
+                if pc < limit:
+                    name_idx = table[pc]
+                    pc += 1
+                    name = self._resolve_constant(name_idx)
+                    stack.append(('global', name))
+            
             elif action == 'GETTABLE':
-                key = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                tbl = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                self.symbolic_stack.append(SymbolicValue('gettable', None, f'{tbl.expr}[{key.expr}]'))
-
+                key = stack.pop() if stack else ('nil', 'nil')
+                tbl = stack.pop() if stack else ('nil', 'nil')
+                key_str = self._format_value(key[1]) if isinstance(key, tuple) else str(key)
+                tbl_str = self._format_value(tbl[1]) if isinstance(tbl, tuple) else str(tbl)
+                stack.append(('expr', f'{tbl_str}[{key_str}]'))
+            
             elif action == 'SETTABLE':
-                val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                key = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                tbl = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                self.ir_statements.append(f'{tbl.expr}[{key.expr}] = {val.expr}')
-
+                val = stack.pop() if stack else ('nil', 'nil')
+                key = stack.pop() if stack else ('nil', 'nil')
+                tbl = stack.pop() if stack else ('nil', 'nil')
+                val_str = self._format_value(val[1]) if isinstance(val, tuple) else str(val)
+                key_str = self._format_value(key[1]) if isinstance(key, tuple) else str(key)
+                tbl_str = self._format_value(tbl[1]) if isinstance(tbl, tuple) else str(tbl)
+                self.lua_output.append(f'{tbl_str}[{key_str}] = {val_str}')
+            
             elif action == 'CALL':
-                func_name = handler.get('func_name', 'unknown')
-                args = []
-                for _ in range(min(3, len(self.symbolic_stack))):
-                    args.insert(0, self.symbolic_stack.pop().expr)
-                args_str = ', '.join(args)
-                self.ir_statements.append(f'{func_name}({args_str})')
-                self.symbolic_stack.append(SymbolicValue('call_result', None, f'{func_name}_result'))
-
+                if pc < limit:
+                    func_idx = table[pc]
+                    pc += 1
+                    func_name = self._resolve_constant(func_idx)
+                    arg_count = 0
+                    if pc < limit and isinstance(table[pc], int) and table[pc] not in self.opcode_handlers:
+                        arg_count = table[pc]
+                        pc += 1
+                    
+                    args = []
+                    for _ in range(arg_count):
+                        if stack:
+                            arg = stack.pop()
+                            args.insert(0, self._format_value(arg[1]) if isinstance(arg, tuple) else str(arg))
+                    
+                    args_str = ', '.join(args)
+                    self.lua_output.append(f'{func_name}({args_str})')
+            
             elif action == 'PCALL':
-                func_expr = handler.get('func_expr', 'function() end')
                 args = []
-                for _ in range(min(2, len(self.symbolic_stack))):
-                    args.insert(0, self.symbolic_stack.pop().expr)
+                depth = 0
+                temp_stack = []
+                while stack and depth < 5:
+                    arg = stack.pop()
+                    temp_stack.append(arg)
+                    depth += 1
+                for arg in reversed(temp_stack):
+                    args.append(self._format_value(arg[1]) if isinstance(arg, tuple) else str(arg))
                 args_str = ', '.join(args)
-                self.ir_statements.append(f'pcall({func_expr}, {args_str})')
-
+                self.lua_output.append(f'pcall(function() {args_str} end)')
+            
             elif action == 'RETURN':
                 ret_vals = []
-                while self.symbolic_stack:
-                    ret_vals.insert(0, self.symbolic_stack.pop().expr)
+                while stack:
+                    val = stack.pop()
+                    ret_vals.insert(0, self._format_value(val[1]) if isinstance(val, tuple) else str(val))
                 ret_str = ', '.join(ret_vals) if ret_vals else ''
-                self.ir_statements.append(f'return {ret_str}')
-
+                self.lua_output.append(f'return {ret_str}')
+                break
+            
             elif action == 'MOVE':
-                if self.symbolic_stack:
-                    val = self.symbolic_stack.pop()
-                    dest = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('temp', None, f'temp_{self.temp_counter}')
-                    self.ir_statements.append(f'{dest.expr} = {val.expr}')
-                    self.symbolic_stack.append(val)
-
-            elif action == 'ARITH':
-                b = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                a = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
-                result = SymbolicValue('arith', None, f'({a.expr} + {b.expr})')
-                self.symbolic_stack.append(result)
-
+                if len(stack) >= 2:
+                    src = stack.pop()
+                    dst = stack.pop()
+                    src_str = self._format_value(src[1]) if isinstance(src, tuple) else str(src)
+                    dst_str = self._format_value(dst[1]) if isinstance(dst, tuple) else str(dst)
+                    self.lua_output.append(f'{dst_str} = {src_str}')
+            
             elif action == 'CONCAT':
-                b = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, '""')
-                a = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, '""')
-                result = SymbolicValue('concat', None, f'({a.expr} .. {b.expr})')
-                self.symbolic_stack.append(result)
-
+                if len(stack) >= 2:
+                    right = stack.pop()
+                    left = stack.pop()
+                    right_str = self._format_value(right[1]) if isinstance(right, tuple) else str(right)
+                    left_str = self._format_value(left[1]) if isinstance(left, tuple) else str(left)
+                    stack.append(('expr', f'{left_str} .. {right_str}'))
+            
+            elif action == 'ARITH':
+                if len(stack) >= 2:
+                    b = stack.pop()
+                    a = stack.pop()
+                    b_str = self._format_value(b[1]) if isinstance(b, tuple) else str(b)
+                    a_str = self._format_value(a[1]) if isinstance(a, tuple) else str(a)
+                    stack.append(('expr', f'({a_str} + {b_str})'))
+            
             elif action == 'CLOSURE':
-                func_body = handler.get('handler', '')
-                func_name = f'func_{len(self.function_protos)}'
-                self.function_protos.append({'name': func_name, 'body': func_body})
-                self.symbolic_stack.append(SymbolicValue('function', None, func_name))
-
+                func_var = f'func_{len(self.function_stack)}'
+                self.function_stack.append(func_var)
+                self.lua_output.append(f'local function {func_var}()')
+                self.lua_output.append('end')
+            
             elif action == 'NEWTABLE':
-                self.symbolic_stack.append(SymbolicValue('table', None, '{}'))
-
-            elif action == 'LOADSTRING':
-                code_val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('const', '', '""')
-                self.ir_statements.append(f'loadstring({code_val.expr})()')
-
+                stack.append(('expr', '{}'))
+            
             elif action == 'STRCHAR':
                 args = []
-                while self.symbolic_stack and isinstance(self.symbolic_stack[-1].value, int):
-                    args.insert(0, str(self.symbolic_stack.pop().value))
-                char_str = f'string.char({", ".join(args)})'
-                self.symbolic_stack.append(SymbolicValue('expr', None, char_str))
-
+                while stack and len(args) < 20:
+                    val = stack.pop()
+                    val_str = self._format_value(val[1]) if isinstance(val, tuple) else str(val)
+                    if val_str.isdigit():
+                        args.insert(0, val_str)
+                    else:
+                        stack.append(val)
+                        break
+                if args:
+                    self.lua_output.append(f'string.char({", ".join(args)})')
+            
             elif action == 'TABLECONCAT':
-                tbl = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('table', None, '{}')
-                sep = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('const', ' ', '" "')
-                self.symbolic_stack.append(SymbolicValue('concat', None, f'table.concat({tbl.expr}, {sep.expr})'))
-
-            elif action == 'MATHFLOOR':
-                val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, '0')
-                self.symbolic_stack.append(SymbolicValue('expr', None, f'math.floor({val.expr})'))
-
+                if len(stack) >= 2:
+                    sep = stack.pop()
+                    tbl = stack.pop()
+                    sep_str = self._format_value(sep[1]) if isinstance(sep, tuple) else str(sep)
+                    tbl_str = self._format_value(tbl[1]) if isinstance(tbl, tuple) else str(tbl)
+                    stack.append(('expr', f'table.concat({tbl_str}, {sep_str})'))
+            
             elif action == 'FORLOOP':
-                self.ir_statements.append('for i = 1, 1 do')
-                self.ir_statements.append('end')
-
+                self.lua_output.append('for i = 1, 1 do')
+                self.lua_output.append('end')
+            
             elif action == 'CONDJUMP':
-                cond = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'false')
-                self.ir_statements.append(f'if {cond.expr} then')
+                if stack:
+                    cond = stack.pop()
+                    cond_str = self._format_value(cond[1]) if isinstance(cond, tuple) else str(cond)
+                    self.lua_output.append(f'if {cond_str} then')
+                    self.lua_output.append('end')
 
-            else:
-                pass
+    def _resolve_constant(self, idx):
+        if isinstance(idx, int) and 1 <= idx <= len(self.string_table):
+            return self.string_table[idx - 1]
+        if isinstance(idx, int) and 1 <= idx <= len(self.constant_pool):
+            return self.constant_pool[idx - 1]
+        return str(idx)
 
-    def _reconstruct_expressions(self):
-        reconstructed = []
-        for stmt in self.ir_statements:
-            stmt = re.sub(r'temp_\d+', lambda m: f'v{self.temp_counter}', stmt)
-            self.temp_counter += 1
-            stmt = re.sub(r'"([^"]*)"', lambda m: f'"{m.group(1)}"', stmt)
-            reconstructed.append(stmt)
-        self.ir_statements = reconstructed
+    def _format_value(self, val):
+        if val is None:
+            return 'nil'
+        if isinstance(val, bool):
+            return 'true' if val else 'false'
+        if isinstance(val, (int, float)):
+            return str(val)
+        if isinstance(val, str):
+            if val in ('nil', 'true', 'false'):
+                return val
+            if any(c in val for c in ('"', '\\', '\n', '\r')):
+                escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+                return f'"{escaped}"'
+            return f'"{val}"'
+        return str(val)
 
-    def _reconstruct_calls(self):
-        call_pattern = re.compile(r'(\w+)_result')
-        def replace_call_result(m):
-            return f'{m.group(1)}()'
-        self.ir_statements = [call_pattern.sub(replace_call_result, s) for s in self.ir_statements]
-
-    def _reconstruct_functions(self):
-        for proto in self.function_protos:
-            self.ir_statements.append(f'local function {proto["name"]}()')
-            self.ir_statements.append('end')
-
-    def _reconstruct_loops(self):
-        pass
-
-    def _eliminate_dead_code(self):
-        filtered = []
-        for stmt in self.ir_statements:
-            if 'nil = nil' in stmt:
-                continue
-            if stmt.strip() in ('do', 'then') and not filtered:
-                continue
-            filtered.append(stmt)
-        self.ir_statements = filtered
-
-    def _eliminate_temporaries(self):
-        cleaned = []
-        for stmt in self.ir_statements:
-            if re.match(r'^v\d+\s*=\s*v\d+$', stmt.strip()):
-                continue
-            cleaned.append(stmt)
-        self.ir_statements = cleaned
-
-    def _emit_lua(self):
-        if not self.ir_statements:
-            return self._emit_fallback("")
+    def _format_output(self):
+        if not self.lua_output:
+            return self._fallback("")
+        
         lines = []
         indent = 0
-        for stmt in self.ir_statements:
+        indent_str = '    '
+        
+        for stmt in self.lua_output:
             stmt = stmt.strip()
             if not stmt:
                 lines.append('')
                 continue
+            
             if any(stmt.startswith(kw) for kw in ('end', 'until', 'else', 'elseif')):
                 indent = max(0, indent - 1)
-            lines.append('    ' * indent + stmt)
-            if any(kw in stmt for kw in ('function ', 'if ', 'for ', 'while ', 'repeat', 'do')):
+            
+            lines.append(indent_str * indent + stmt)
+            
+            if any(kw in stmt for kw in ('function ', 'if ', 'for ', 'while ', 'repeat', 'do')) and not stmt.startswith('end'):
                 indent += 1
-        return '\n'.join(lines)
+        
+        result = '\n'.join(lines)
+        result = re.sub(r'\n\s*\n\s*\n', '\n\n', result)
+        return result
 
-    def _emit_fallback(self, code):
-        if self.ir_statements:
-            return '\n'.join(self.ir_statements)
-        return 'local function deobfuscated()\n    error("VM lifting incomplete - manual review required")\nend\nreturn deobfuscated()'
+    def _fallback(self, code):
+        return 'local function deobfuscated()\n    error("Decompilation incomplete - manual review required")\nend\nreturn deobfuscated()'
