@@ -9,10 +9,9 @@ CREATE_TASK_URL = f"{BASE_URL}/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLA
 
 HOOK_TEMPLATE = r"""
 local HttpService = game:GetService("HttpService")
-local RunService = game:GetService("RunService")
-
-local captured = {}
 local originalLoadstring = loadstring
+local originalLoad = load
+local captured = {}
 
 local function hookLoadstring(code, chunkname)
     if type(code) == "string" then
@@ -21,13 +20,8 @@ local function hookLoadstring(code, chunkname)
     return originalLoadstring(code, chunkname)
 end
 
-local env = getfenv()
-env.loadstring = hookLoadstring
-env.require = function(module)
-    local result = originalRequire(module)
-    return result
-end
-setmetatable(env, {__index = getfenv(0)})
+_G.loadstring = hookLoadstring
+_G.load = hookLoadstring
 
 local scriptContent = [[{}]]
 local func, compileErr = originalLoadstring(scriptContent)
@@ -35,18 +29,37 @@ if not func then
     return HttpService:JSONEncode({error = "Compile error: " .. tostring(compileErr)})
 end
 
-setfenv(func, env)
 local success, result = pcall(func)
+if not success then
+    return HttpService:JSONEncode({error = "Runtime error: " .. tostring(result)})
+end
 
 local allSources = table.concat(captured, "\n")
-
 if #allSources > 0 then
     return HttpService:JSONEncode({output = allSources})
-elseif not success then
-    return HttpService:JSONEncode({error = "Runtime error: " .. tostring(result)})
-else
-    return HttpService:JSONEncode({output = tostring(result)})
 end
+
+local luaKeywords = {"function", "local", "end", "if", "then", "else", "return", "for", "while", "do"}
+local candidates = {}
+for k, v in pairs(getfenv()) do
+    if type(v) == "string" and #v > 100 then
+        local count = 0
+        for _, kw in ipairs(luaKeywords) do
+            if string.find(v, kw) then
+                count = count + 1
+            end
+        end
+        if count >= 2 then
+            table.insert(candidates, {source = v, count = count})
+        end
+    end
+end
+table.sort(candidates, function(a, b) return a.count > b.count end)
+if #candidates > 0 then
+    return HttpService:JSONEncode({output = candidates[1].source})
+end
+
+return HttpService:JSONEncode({output = tostring(result)})
 """
 
 async def execute_via_roblox(script_source):
