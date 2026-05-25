@@ -467,266 +467,308 @@ class DeobfEngine:
         return (printable / max(len(code), 1)) >= 0.70
 
 
+@dataclass
+class BasicBlock:
+    id: int
+    start_pc: int
+    end_pc: int
+    instructions: List[Any] = field(default_factory=list)
+    successors: List['BasicBlock'] = field(default_factory=list)
+    predecessors: List['BasicBlock'] = field(default_factory=list)
+
+@dataclass
+class SymbolicExpr:
+    kind: str
+    value: Any = None
+    left: Optional['SymbolicExpr'] = None
+    right: Optional['SymbolicExpr'] = None
+    args: List['SymbolicExpr'] = field(default_factory=list)
+    reg: str = ""
+
 class FullSemanticVMLifter:
     def __init__(self, string_table, var_name):
         self.string_table = string_table
         self.var_name = var_name
-        self.instruction_table = []
-        self.opcode_handlers = {}
-        self.output_statements = []
+        self.inst_table = []
+        self.table_var = ""
+        self.pc_var = ""
+        self.op_var = ""
+        self.handlers = {}
+        self.cfg_blocks = []
+        self.ssa_count = 0
+        self.reg_map = {}
+        self.output = []
         self.globals = {}
-        self.stack = []
-        self.locals = {}
-        self.temp_counter = 0
+        self.temp_exprs = {}
+        self.anti_tamper_patterns = [
+            r'if\s+not\s+pcall\s*\(\s*function\s*\(\)[^)]*end\s*\)\s*then\s*error\s*\([^)]*\)\s*end',
+            r'error\s*\(\s*"[^"]*Tamper\s*Detected[^"]*"\)',
+        ]
 
     def lift(self, vm_code):
-        if not self._extract_vm_components(vm_code):
-            return self._fallback()
-        self._execute_vm()
+        code = self._neutralize(vm_code)
+        code = self._fold_arithmetic(code)
+        code = self._subst_strings(code)
+        if not self._extract_components(code):
+            return 'return nil'
+        self._build_cfg()
+        self._symbolic_execute()
+        self._optimize_ir()
         return self._emit_lua()
 
-    def _extract_vm_components(self, code):
-        dispatch_loop = re.search(r'while\s+.+?do\s+(.*?)end\s*end', code, re.DOTALL)
-        if not dispatch_loop:
-            return False
-        loop_body = dispatch_loop.group(1)
+    def _neutralize(self, code):
+        for pat in self.anti_tamper_patterns:
+            code = re.sub(pat, '', code, flags=re.DOTALL)
+        return code
 
-        pc_match = re.search(r'(\w+)\s*=\s*(\w+)\[(\w+)\]', loop_body)
-        if not pc_match:
+    def _fold_arithmetic(self, code):
+        return re.sub(r'\(\s*(-?[\d+\-*/.() ]+)\s*\)', lambda m: str(eval(m.group(1))), code)
+
+    def _subst_strings(self, code):
+        def repl(m):
+            try:
+                idx = int(m.group(1)) - 1
+                if 0 <= idx < len(self.string_table):
+                    return f'"{self.string_table[idx]}"'
+            except:
+                pass
+            return m.group(0)
+        return re.sub(rf'\b{re.escape(self.var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', repl, code)
+
+    def _extract_components(self, code):
+        loop_match = re.search(r'while\s+.+?do\s+(.*?)end\s*end', code, re.DOTALL)
+        if not loop_match:
             return False
-        self.op_var = pc_match.group(1)
-        self.table_var = pc_match.group(2)
-        self.pc_var = pc_match.group(3)
+        body = loop_match.group(1)
+
+        pc_m = re.search(r'(\w+)\s*=\s*(\w+)\[(\w+)\]', body)
+        if not pc_m:
+            return False
+        self.op_var, self.table_var, self.pc_var = pc_m.group(1), pc_m.group(2), pc_m.group(3)
 
         table_decl = re.search(rf'{re.escape(self.table_var)}\s*=\s*\{{(.+?)\}}', code, re.DOTALL)
         if not table_decl:
-            table_decl = re.search(rf'local\s+{re.escape(self.table_var)}\s*=\s*\{{(.+?)\}}', code, re.DOTALL)
-        if not table_decl:
             return False
-
-        self.instruction_table = self._parse_table(table_decl.group(1))
+        self.inst_table = self._parse_table_entries(table_decl.group(1))
 
         handlers = {}
-        handler_pattern = re.compile(
-            rf'(?:else)?if\s+{re.escape(self.op_var)}\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)',
-            re.DOTALL
-        )
-        for m in handler_pattern.finditer(loop_body):
-            opcode = int(m.group(1))
-            handler_code = m.group(2)
-            handlers[opcode] = self._parse_handler(handler_code)
-
+        for m in re.finditer(rf'(?:else)?if\s+{re.escape(self.op_var)}\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)', body, re.DOTALL):
+            opc = int(m.group(1))
+            handlers[opc] = self._classify(m.group(2))
         if not handlers:
             return False
-
-        self.opcode_handlers = handlers
+        self.handlers = handlers
         return True
 
-    def _parse_table(self, body):
+    def _parse_table_entries(self, body):
         entries = re.split(r'\s*,\s*', body)
-        parsed = []
+        out = []
         for e in entries:
             e = e.strip()
             if not e:
                 continue
-            if e.startswith('"') and e.endswith('"'):
-                parsed.append(e[1:-1])
-            elif e.startswith("'") and e.endswith("'"):
-                parsed.append(e[1:-1])
+            if (e[0] == '"' and e[-1] == '"') or (e[0] == "'" and e[-1] == "'"):
+                out.append(e[1:-1])
             elif e.lstrip('-').isdigit():
-                parsed.append(int(e))
+                out.append(int(e))
             else:
-                parsed.append(e)
-        return parsed
+                out.append(e)
+        return out
 
-    def _parse_handler(self, handler):
+    def _classify(self, handler):
         h = handler.strip()
         if re.search(r'R\s*\[', h):
-            m = re.search(r'R\s*\[([^\]]+)\]', h)
-            index_expr = m.group(1) if m else '1'
-            return {'action': 'LOADK', 'index': index_expr}
+            return 'LOADK'
         if '_G[' in h and '=' in h and h.index('_G') > h.index('='):
-            m = re.search(r'_G\s*\[([^\]]+)\]', h)
-            name_expr = m.group(1) if m else '""'
-            return {'action': 'SETGLOBAL', 'name': name_expr}
+            return 'SETGLOBAL'
         if '=' in h and '_G[' in h:
-            m = re.search(r'_G\s*\[([^\]]+)\]', h)
-            name_expr = m.group(1) if m else '""'
-            return {'action': 'GETGLOBAL', 'name': name_expr}
+            return 'GETGLOBAL'
         if 'pcall' in h:
-            return {'action': 'PCALL'}
+            return 'PCALL'
         if 'loadstring' in h:
-            return {'action': 'LOADSTRING'}
+            return 'LOADSTRING'
         if 'return' in h:
-            return {'action': 'RETURN'}
+            return 'RETURN'
         if 'string.char' in h:
-            return {'action': 'STRCHAR'}
+            return 'STRCHAR'
         if 'table.concat' in h:
-            return {'action': 'TABLECONCAT'}
+            return 'TABLECONCAT'
         if '..' in h:
-            return {'action': 'CONCAT'}
+            return 'CONCAT'
         if re.search(r'[+\-*/]', h) and '=' in h:
-            return {'action': 'ARITH'}
+            return 'ARITH'
         if '=' in h and 'function' in h:
-            return {'action': 'CLOSURE'}
+            return 'CLOSURE'
         if '=' in h and '{' in h:
-            return {'action': 'NEWTABLE'}
+            return 'NEWTABLE'
         if '[' in h and ']' in h and '=' in h:
-            return {'action': 'SETTABLE'}
+            return 'SETTABLE'
         if re.search(r'\w+\s*\(', h):
-            m = re.search(r'(\w+)\s*\(', h)
-            func = m.group(1) if m else 'unknown'
-            return {'action': 'CALL', 'func': func}
-        return {'action': 'UNKNOWN'}
+            return 'CALL'
+        return 'UNKNOWN'
 
-    def _execute_vm(self):
-        table = self.instruction_table
+    def _build_cfg(self):
         pc = 0
-        limit = len(table)
-        self.stack = []
-        self.locals = {}
-        self.output_statements = []
-        self.globals = {}
-
+        blocks = []
+        current = []
+        block_start = 0
+        limit = len(self.inst_table)
         while pc < limit:
-            opcode = table[pc]
-            pc += 1
-            if not isinstance(opcode, int) or opcode not in self.opcode_handlers:
-                continue
-
-            handler = self.opcode_handlers[opcode]
-            action = handler['action']
-
-            if action == 'LOADK':
-                idx = self._eval_index(handler['index'], pc, table)
-                if idx is not None and isinstance(idx, int) and 1 <= idx <= len(self.string_table):
-                    val = self.string_table[idx - 1]
+            op = self.inst_table[pc]
+            if isinstance(op, int) and op in self.handlers:
+                action = self.handlers[op]
+                if action == 'RETURN' or action == 'LOADSTRING':
+                    if current:
+                        blocks.append(BasicBlock(len(blocks), block_start, pc-1, list(current)))
+                    blocks.append(BasicBlock(len(blocks), pc, pc, [op]))
+                    block_start = pc+1
+                    current = []
+                elif action == 'CONDJUMP':
+                    if current:
+                        blocks.append(BasicBlock(len(blocks), block_start, pc-1, list(current)))
+                    blocks.append(BasicBlock(len(blocks), pc, pc, [op]))
+                    block_start = pc+1
+                    current = []
                 else:
-                    val = idx
-                self.stack.append(val)
-                pc = self._advance_pc_for_index(pc, handler['index'])
+                    current.append(op)
+            else:
+                current.append(op)
+            pc += 1
+        if current:
+            blocks.append(BasicBlock(len(blocks), block_start, limit-1, current))
+        for i, blk in enumerate(blocks):
+            if i+1 < len(blocks):
+                blk.successors.append(blocks[i+1])
+                blocks[i+1].predecessors.append(blk)
+        self.cfg_blocks = blocks
 
-            elif action == 'SETGLOBAL':
-                name = self._resolve_string(handler['name'])
-                val = self.stack.pop() if self.stack else 'nil'
-                self.globals[name] = val
-                self.output_statements.append(f'_G["{name}"] = {self._format_val(val)}')
+    def _symbolic_execute(self):
+        state = {'stack': [], 'regs': {}, 'upvals': {}, 'globals': {}}
+        self.ssa_count = 0
+        self.temp_exprs.clear()
+        self.output.clear()
 
-            elif action == 'GETGLOBAL':
-                name = self._resolve_string(handler['name'])
-                self.stack.append(('global', name))
+        for block in self.cfg_blocks:
+            pc = block.start_pc
+            while pc <= block.end_pc:
+                op = self.inst_table[pc]
+                if isinstance(op, int) and op in self.handlers:
+                    action = self.handlers[op]
+                    if action == 'LOADK':
+                        idx = self._resolve_index(pc)
+                        val = self._const(idx)
+                        self._push(state, val)
+                        pc = self._skip_operand(pc)
+                    elif action == 'SETGLOBAL':
+                        name = self._resolve_name(pc)
+                        val = self._pop(state)
+                        self.output.append(f'_G["{name}"] = {self._expr_str(val)}')
+                        state['globals'][name] = val
+                    elif action == 'GETGLOBAL':
+                        name = self._resolve_name(pc)
+                        self._push(state, SymbolicExpr('global', value=name))
+                    elif action == 'CALL':
+                        func = self._resolve_func(pc)
+                        args = [self._pop(state) for _ in range(min(3, len(state['stack'])))]
+                        args.reverse()
+                        args_str = ', '.join(self._expr_str(a) for a in args)
+                        self.output.append(f'{func}({args_str})')
+                    elif action == 'RETURN':
+                        rets = [self._pop(state) for _ in range(len(state['stack']))]
+                        rets.reverse()
+                        self.output.append(f'return {", ".join(self._expr_str(r) for r in rets)}')
+                        return
+                    elif action == 'CONCAT':
+                        r = self._pop(state)
+                        l = self._pop(state)
+                        self._push(state, SymbolicExpr('concat', left=l, right=r))
+                    elif action == 'ARITH':
+                        r = self._pop(state)
+                        l = self._pop(state)
+                        self._push(state, SymbolicExpr('arith', left=l, right=r))
+                    elif action == 'STRCHAR':
+                        args = []
+                        while state['stack'] and isinstance(state['stack'][-1].value, int):
+                            args.insert(0, self._pop(state))
+                        if args:
+                            self.output.append(f'string.char({", ".join(self._expr_str(a) for a in args)})')
+                    elif action == 'TABLECONCAT':
+                        sep = self._pop(state)
+                        tbl = self._pop(state)
+                        self._push(state, SymbolicExpr('call', value='table.concat', args=[tbl, sep]))
+                    elif action == 'NEWTABLE':
+                        self._push(state, SymbolicExpr('table'))
+                    elif action == 'CLOSURE':
+                        name = f'f_{len(state["regs"])}'
+                        self._push(state, SymbolicExpr('closure', value=name))
+                        self.output.append(f'local function {name}() end')
+                pc += 1
 
-            elif action == 'CALL':
-                func = handler.get('func', 'unknown')
-                args = [self.stack.pop() for _ in range(min(3, len(self.stack)))]
-                args.reverse()
-                args_str = ', '.join(self._format_val(a) for a in args)
-                self.output_statements.append(f'{func}({args_str})')
+    def _push(self, state, expr):
+        reg = f'%{self.ssa_count}'
+        self.ssa_count += 1
+        expr.reg = reg
+        state['stack'].append(expr)
 
-            elif action == 'RETURN':
-                ret_vals = [self.stack.pop() for _ in range(len(self.stack))]
-                ret_vals.reverse()
-                ret_str = ', '.join(self._format_val(v) for v in ret_vals) if ret_vals else ''
-                self.output_statements.append(f'return {ret_str}')
-                break
+    def _pop(self, state):
+        return state['stack'].pop() if state['stack'] else SymbolicExpr('nil')
 
-            elif action == 'CONCAT':
-                right = self.stack.pop()
-                left = self.stack.pop()
-                self.stack.append(f'{self._format_val(left)} .. {self._format_val(right)}')
+    def _const(self, idx):
+        if isinstance(idx, int) and 1 <= idx <= len(self.string_table):
+            return SymbolicExpr('const', value=self.string_table[idx-1])
+        return SymbolicExpr('unknown', value=idx)
 
-            elif action == 'ARITH':
-                b = self.stack.pop()
-                a = self.stack.pop()
-                self.stack.append(f'({self._format_val(a)} + {self._format_val(b)})')
+    def _resolve_index(self, pc):
+        if pc+1 < len(self.inst_table):
+            return self.inst_table[pc+1]
+        return 0
 
-            elif action == 'STRCHAR':
-                args = []
-                for _ in range(min(10, len(self.stack))):
-                    val = self.stack.pop()
-                    if isinstance(val, int):
-                        args.insert(0, str(val))
-                    else:
-                        self.stack.append(val)
-                        break
-                if args:
-                    self.output_statements.append(f'string.char({", ".join(args)})')
+    def _skip_operand(self, pc):
+        return pc+1 if pc+1 < len(self.inst_table) else pc
 
-            elif action == 'TABLECONCAT':
-                sep = self.stack.pop()
-                tbl = self.stack.pop()
-                self.stack.append(f'table.concat({self._format_val(tbl)}, {self._format_val(sep)})')
-
-            elif action == 'PCALL':
-                args = [self.stack.pop() for _ in range(min(2, len(self.stack)))]
-                args.reverse()
-                self.output_statements.append(f'pcall(function() {" ".join(self._format_val(a) for a in args)} end)')
-
-            elif action == 'LOADSTRING':
-                code = self.stack.pop()
-                self.output_statements.append(f'loadstring({self._format_val(code)})()')
-
-            elif action == 'SETTABLE':
-                val = self.stack.pop()
-                key = self.stack.pop()
-                tbl = self.stack.pop()
-                self.output_statements.append(f'{self._format_val(tbl)}[{self._format_val(key)}] = {self._format_val(val)}')
-
-            elif action == 'NEWTABLE':
-                self.stack.append('{}')
-
-            elif action == 'CLOSURE':
-                self.output_statements.append(f'local function func_{self.temp_counter}() end')
-                self.stack.append(f'func_{self.temp_counter}')
-                self.temp_counter += 1
-
-        for name, val in self.globals.items():
-            if name not in [s.split('"')[1] if '"' in s else '' for s in self.output_statements]:
-                self.output_statements.insert(0, f'_G["{name}"] = {self._format_val(val)}')
-
-    def _eval_index(self, expr, pc, table):
-        expr = expr.strip()
-        if expr.isdigit():
-            return int(expr)
-        if re.match(rf'{re.escape(self.table_var)}\[.+?\]', expr):
-            return table[pc] if pc < len(table) else 0
-        return None
-
-    def _advance_pc_for_index(self, pc, expr):
-        if re.match(rf'{re.escape(self.table_var)}\[.+?\]', expr):
-            return pc + 1
-        return pc
-
-    def _resolve_string(self, expr):
-        expr = expr.strip()
-        if expr.startswith('"') and expr.endswith('"'):
-            return expr[1:-1]
-        if expr.isdigit():
-            idx = int(expr) - 1
-            if 0 <= idx < len(self.string_table):
-                return self.string_table[idx]
-        return expr
-
-    def _format_val(self, val):
-        if val is None:
-            return 'nil'
-        if isinstance(val, bool):
-            return 'true' if val else 'false'
-        if isinstance(val, (int, float)):
+    def _resolve_name(self, pc):
+        if pc+1 < len(self.inst_table):
+            val = self.inst_table[pc+1]
+            if isinstance(val, int) and 1 <= val <= len(self.string_table):
+                return self.string_table[val-1]
             return str(val)
-        if isinstance(val, tuple) and val[0] == 'global':
-            return f'_G["{val[1]}"]'
-        if isinstance(val, str):
-            if val in ('nil', 'true', 'false'):
-                return val
-            escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-            return f'"{escaped}"'
-        return str(val)
+        return ""
+
+    def _resolve_func(self, pc):
+        if pc+1 < len(self.inst_table):
+            val = self.inst_table[pc+1]
+            if isinstance(val, int) and 1 <= val <= len(self.string_table):
+                return self.string_table[val-1]
+            return str(val)
+        return "unknown"
+
+    def _expr_str(self, expr):
+        if expr.kind == 'const':
+            if isinstance(expr.value, str):
+                return f'"{expr.value}"'
+            return str(expr.value)
+        if expr.kind == 'global':
+            return f'_G["{expr.value}"]'
+        if expr.kind == 'concat':
+            return f'({self._expr_str(expr.left)} .. {self._expr_str(expr.right)})'
+        if expr.kind == 'arith':
+            return f'({self._expr_str(expr.left)} + {self._expr_str(expr.right)})'
+        if expr.kind == 'call':
+            args_str = ', '.join(self._expr_str(a) for a in expr.args)
+            return f'{expr.value}({args_str})'
+        if expr.kind == 'table':
+            return '{}'
+        if expr.kind == 'closure':
+            return expr.value
+        return 'nil'
+
+    def _optimize_ir(self):
+        cleaned = []
+        for stmt in self.output:
+            if 'nil = nil' in stmt:
+                continue
+            cleaned.append(stmt)
+        self.output = cleaned
 
     def _emit_lua(self):
-        if not self.output_statements:
-            return self._fallback()
-        return '\n'.join(self.output_statements)
-
-    def _fallback(self):
-        return 'return nil'
+        return '\n'.join(self.output)
