@@ -492,26 +492,25 @@ class FullSemanticVMLifter:
         code = self._recover_identifiers(code)
 
         self._extract_instruction_table(code)
-        if not self.instruction_table or len(self.instruction_table) < 20:
+        if not self.instruction_table or len(self.instruction_table) < 5:
             return self._fallback(code)
 
-        self._extract_dispatch_variables(code)
         self._extract_opcode_handlers(code)
-        if not self.opcode_handlers or len(self.opcode_handlers) < 3:
+        if not self.opcode_handlers or len(self.opcode_handlers) < 2:
             return self._fallback(code)
 
         self._extract_constant_pool(code)
         self._translate_instructions()
+        if not self.lua_output:
+            return self._fallback(code)
         return self._format_output()
 
     def _neutralize_antitamper(self, code):
         code = re.sub(
             r'if\s+not\s+pcall\s*\(\s*function\s*\(\)[^)]*end\s*\)\s*then\s*error\s*\([^)]*\)\s*end',
-            'do end',
-            code, flags=re.DOTALL
+            '', code, flags=re.DOTALL
         )
-        code = re.sub(r'error\s*\(\s*"[^"]*Tamper\s*Detected[^"]*"\)', 'do return end', code)
-        code = re.sub(r'checkcaller\s*\(\s*\)', 'true', code)
+        code = re.sub(r'error\s*\(\s*"[^"]*Tamper\s*Detected[^"]*"\)', '', code)
         return code
 
     def _apply_arithmetic_folding(self, code):
@@ -530,9 +529,7 @@ class FullSemanticVMLifter:
     def _substitute_strings(self, code):
         def repl(m):
             try:
-                bracket = m.group(0)[0]
-                idx_str = m.group(1)
-                idx = int(idx_str) - 1
+                idx = int(m.group(1)) - 1
                 if 0 <= idx < len(self.string_table):
                     val = self.string_table[idx]
                     val = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
@@ -540,61 +537,28 @@ class FullSemanticVMLifter:
             except:
                 pass
             return m.group(0)
-        code = re.sub(rf'\b{re.escape(self.var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', repl, code)
-        return code
+        return re.sub(rf'\b{re.escape(self.var_name)}\s*[\(\[]\s*(-?\d+)\s*[\)\]]', repl, code)
 
     def _recover_identifiers(self, code):
-        symbol_map = {}
-        lines = code.split('\n')
-        for line in lines:
-            m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line.strip())
-            if m:
-                var, val = m.group(1), m.group(2)
-                if val in LUA_KEYWORDS or any(kw in val for kw in LUA_SUBSTRINGS):
-                    symbol_map[var] = val
-                continue
-            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line.strip())
-            if m:
-                var, base, field = m.group(1), m.group(2), m.group(3)
-                base_name = symbol_map.get(base, base)
-                symbol_map[var] = f"{base_name}_{field}"
-                continue
-            m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\[([^\]]+)\]', line.strip())
-            if m:
-                var, base, idx = m.group(1), m.group(2), m.group(3)
-                idx = idx.strip('"\'')
-                base_name = symbol_map.get(base, base)
-                if idx.isdigit():
-                    idx = int(idx)
-                symbol_map[var] = f"{base_name}[{idx}]"
-                continue
-        for var, name in sorted(symbol_map.items(), key=lambda x: -len(x[0])):
-            code = re.sub(rf'\b{re.escape(var)}\b', name, code)
         return code
 
     def _extract_instruction_table(self, code):
-        best_var = ""
         best_body = ""
         best_count = 0
-        
-        for m in re.finditer(r'\b(local\s+)?(\w+)\s*=\s*\{', code):
-            is_local = m.group(1) is not None
-            var_name = m.group(2)
-            brace_pos = m.end() - 1
-            body = self._extract_balanced(code, brace_pos)
+
+        for m in re.finditer(r'\{', code):
+            body = self._extract_balanced(code, m.start())
             if not body:
                 continue
             inner = body[1:-1]
             entries = re.split(r'\s*,\s*', inner)
-            count = len([e for e in entries if e.strip() and (e.strip().lstrip('-').isdigit() or e.strip().startswith('"'))])
+            count = sum(1 for e in entries if e.strip() and (e.strip().lstrip('-').isdigit() or e.strip().startswith('"')))
             if count > best_count:
                 best_count = count
-                best_var = var_name
-                best_body = inner
+                best_body = body
 
         if best_body:
-            self.table_var = best_var
-            self.instruction_table = self._parse_entries('{' + best_body + '}')
+            self.instruction_table = self._parse_entries(best_body)
 
     def _extract_balanced(self, code, brace_pos):
         if brace_pos >= len(code) or code[brace_pos] != '{':
@@ -631,7 +595,7 @@ class FullSemanticVMLifter:
         current = ""
         in_str = False
         str_char = None
-        
+
         for c in body:
             if in_str:
                 current += c
@@ -640,33 +604,33 @@ class FullSemanticVMLifter:
                 elif c == str_char:
                     in_str = False
                 continue
-            
+
             if c in ('"', "'"):
                 in_str = True
                 str_char = c
                 current += c
                 continue
-            
+
             if c == '{':
                 depth += 1
                 current += c
                 continue
-            
+
             if c == '}':
                 depth -= 1
                 current += c
                 continue
-            
+
             if c == ',' and depth == 0:
                 entries.append(current.strip())
                 current = ""
                 continue
-            
+
             current += c
-        
+
         if current.strip():
             entries.append(current.strip())
-        
+
         parsed = []
         for e in entries:
             e = e.strip()
@@ -680,43 +644,26 @@ class FullSemanticVMLifter:
                 parsed.append(float(e))
             else:
                 parsed.append(e)
-        
+
         return parsed
 
-    def _extract_dispatch_variables(self, code):
-        m = re.search(r'local\s+(\w+)\s*=\s*(\w+)\[(\w+)\]', code)
-        if m:
-            self.opcode_var = m.group(1)
-            self.table_var = m.group(2)
-            self.pc_var = m.group(3)
-            return
-        
-        m = re.search(r'(\w+)\s*=\s*(\w+)\[(\w+)\]', code)
-        if m:
-            self.opcode_var = m.group(1)
-            self.table_var = m.group(2)
-            self.pc_var = m.group(3)
-
     def _extract_opcode_handlers(self, code):
-        if not self.opcode_var:
-            self._extract_dispatch_variables(code)
-        
-        if not self.opcode_var:
-            return
-        
-        pattern = re.compile(
-            r'(?:else)?if\s+' + re.escape(self.opcode_var) + r'\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)',
-            re.DOTALL
-        )
-        
-        for m in pattern.finditer(code):
-            opcode = int(m.group(1))
-            handler_body = m.group(2)
-            self.opcode_handlers[opcode] = self._classify_handler(handler_body)
+        while_blocks = re.findall(r'while\s+.+?do\s+(.*?)end', code, re.DOTALL)
+        handlers = {}
+        for block in while_blocks:
+            cond_matches = re.findall(r'if\s+(\w+)\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)', block, re.DOTALL)
+            for var, num, body in cond_matches:
+                try:
+                    opcode = int(num)
+                    handlers[opcode] = self._classify_handler(body)
+                except:
+                    continue
+            if len(handlers) > 2:
+                self.opcode_handlers = handlers
+                return
 
     def _classify_handler(self, handler):
         h = handler.strip()
-        
         if re.search(r'R\s*\[[^\]]+\]\s*\[[^\]]+\]', h):
             return 'GETTABLE'
         if re.search(r'R\s*\[', h):
@@ -733,31 +680,20 @@ class FullSemanticVMLifter:
             return 'STRCHAR'
         if 'table.concat' in h:
             return 'TABLECONCAT'
-        if 'math.floor' in h:
-            return 'MATHFLOOR'
         if 'return' in h:
             return 'RETURN'
-        if '=' in h and 'function' in h:
-            return 'CLOSURE'
-        if '=' in h and '{' in h and '}' in h:
-            return 'NEWTABLE'
-        if '[' in h and ']' in h and '=' in h and '_G' not in h:
-            return 'SETTABLE'
-        if 'for ' in h:
-            return 'FORLOOP'
-        if 'while ' in h:
-            return 'WHILELOOP'
-        if 'if ' in h:
-            return 'CONDJUMP'
         if '..' in h:
             return 'CONCAT'
         if re.search(r'[+\-*/]', h) and '=' in h:
             return 'ARITH'
-        if '=' in h and 'local' not in h:
-            return 'MOVE'
+        if '=' in h and 'function' in h:
+            return 'CLOSURE'
+        if '=' in h and '{' in h:
+            return 'NEWTABLE'
+        if '[' in h and ']' in h and '=' in h and '_G' not in h:
+            return 'SETTABLE'
         if re.search(r'\w+\s*\(', h):
             return 'CALL'
-        
         return 'UNKNOWN'
 
     def _extract_constant_pool(self, code):
@@ -769,23 +705,23 @@ class FullSemanticVMLifter:
         limit = len(table)
         self.lua_output = []
         stack = []
-        
+
         while pc < limit and len(self.lua_output) < 50000:
             op = table[pc]
             pc += 1
-            
+
             if not isinstance(op, int) or op not in self.opcode_handlers:
                 continue
-            
+
             action = self.opcode_handlers[op]
-            
+
             if action == 'LOADK':
                 if pc < limit:
                     idx = table[pc]
                     pc += 1
                     const_val = self._resolve_constant(idx)
                     stack.append(('const', const_val))
-            
+
             elif action == 'SETGLOBAL':
                 if pc + 1 < limit:
                     name_idx = table[pc]
@@ -795,21 +731,21 @@ class FullSemanticVMLifter:
                     val = self._resolve_constant(val_idx)
                     self.lua_output.append(f'_G["{name}"] = {self._format_value(val)}')
                     self.exported_globals.add(name)
-            
+
             elif action == 'GETGLOBAL':
                 if pc < limit:
                     name_idx = table[pc]
                     pc += 1
                     name = self._resolve_constant(name_idx)
                     stack.append(('global', name))
-            
+
             elif action == 'GETTABLE':
                 key = stack.pop() if stack else ('nil', 'nil')
                 tbl = stack.pop() if stack else ('nil', 'nil')
                 key_str = self._format_value(key[1]) if isinstance(key, tuple) else str(key)
                 tbl_str = self._format_value(tbl[1]) if isinstance(tbl, tuple) else str(tbl)
                 stack.append(('expr', f'{tbl_str}[{key_str}]'))
-            
+
             elif action == 'SETTABLE':
                 val = stack.pop() if stack else ('nil', 'nil')
                 key = stack.pop() if stack else ('nil', 'nil')
@@ -818,7 +754,7 @@ class FullSemanticVMLifter:
                 key_str = self._format_value(key[1]) if isinstance(key, tuple) else str(key)
                 tbl_str = self._format_value(tbl[1]) if isinstance(tbl, tuple) else str(tbl)
                 self.lua_output.append(f'{tbl_str}[{key_str}] = {val_str}')
-            
+
             elif action == 'CALL':
                 if pc < limit:
                     func_idx = table[pc]
@@ -828,46 +764,28 @@ class FullSemanticVMLifter:
                     if pc < limit and isinstance(table[pc], int) and table[pc] not in self.opcode_handlers:
                         arg_count = table[pc]
                         pc += 1
-                    
                     args = []
                     for _ in range(arg_count):
                         if stack:
                             arg = stack.pop()
                             args.insert(0, self._format_value(arg[1]) if isinstance(arg, tuple) else str(arg))
-                    
-                    args_str = ', '.join(args)
-                    self.lua_output.append(f'{func_name}({args_str})')
-            
+                    self.lua_output.append(f'{func_name}({", ".join(args)})')
+
             elif action == 'PCALL':
                 args = []
-                depth = 0
-                temp_stack = []
-                while stack and depth < 5:
+                while stack and len(args) < 5:
                     arg = stack.pop()
-                    temp_stack.append(arg)
-                    depth += 1
-                for arg in reversed(temp_stack):
-                    args.append(self._format_value(arg[1]) if isinstance(arg, tuple) else str(arg))
-                args_str = ', '.join(args)
-                self.lua_output.append(f'pcall(function() {args_str} end)')
-            
+                    args.insert(0, self._format_value(arg[1]) if isinstance(arg, tuple) else str(arg))
+                self.lua_output.append(f'pcall(function() {", ".join(args)} end)')
+
             elif action == 'RETURN':
                 ret_vals = []
                 while stack:
                     val = stack.pop()
                     ret_vals.insert(0, self._format_value(val[1]) if isinstance(val, tuple) else str(val))
-                ret_str = ', '.join(ret_vals) if ret_vals else ''
-                self.lua_output.append(f'return {ret_str}')
+                self.lua_output.append(f'return {", ".join(ret_vals)}' if ret_vals else 'return')
                 break
-            
-            elif action == 'MOVE':
-                if len(stack) >= 2:
-                    src = stack.pop()
-                    dst = stack.pop()
-                    src_str = self._format_value(src[1]) if isinstance(src, tuple) else str(src)
-                    dst_str = self._format_value(dst[1]) if isinstance(dst, tuple) else str(dst)
-                    self.lua_output.append(f'{dst_str} = {src_str}')
-            
+
             elif action == 'CONCAT':
                 if len(stack) >= 2:
                     right = stack.pop()
@@ -875,7 +793,7 @@ class FullSemanticVMLifter:
                     right_str = self._format_value(right[1]) if isinstance(right, tuple) else str(right)
                     left_str = self._format_value(left[1]) if isinstance(left, tuple) else str(left)
                     stack.append(('expr', f'{left_str} .. {right_str}'))
-            
+
             elif action == 'ARITH':
                 if len(stack) >= 2:
                     b = stack.pop()
@@ -883,16 +801,16 @@ class FullSemanticVMLifter:
                     b_str = self._format_value(b[1]) if isinstance(b, tuple) else str(b)
                     a_str = self._format_value(a[1]) if isinstance(a, tuple) else str(a)
                     stack.append(('expr', f'({a_str} + {b_str})'))
-            
+
             elif action == 'CLOSURE':
                 func_var = f'func_{len(self.function_stack)}'
                 self.function_stack.append(func_var)
                 self.lua_output.append(f'local function {func_var}()')
                 self.lua_output.append('end')
-            
+
             elif action == 'NEWTABLE':
                 stack.append(('expr', '{}'))
-            
+
             elif action == 'STRCHAR':
                 args = []
                 while stack and len(args) < 20:
@@ -905,7 +823,7 @@ class FullSemanticVMLifter:
                         break
                 if args:
                     self.lua_output.append(f'string.char({", ".join(args)})')
-            
+
             elif action == 'TABLECONCAT':
                 if len(stack) >= 2:
                     sep = stack.pop()
@@ -913,17 +831,6 @@ class FullSemanticVMLifter:
                     sep_str = self._format_value(sep[1]) if isinstance(sep, tuple) else str(sep)
                     tbl_str = self._format_value(tbl[1]) if isinstance(tbl, tuple) else str(tbl)
                     stack.append(('expr', f'table.concat({tbl_str}, {sep_str})'))
-            
-            elif action == 'FORLOOP':
-                self.lua_output.append('for i = 1, 1 do')
-                self.lua_output.append('end')
-            
-            elif action == 'CONDJUMP':
-                if stack:
-                    cond = stack.pop()
-                    cond_str = self._format_value(cond[1]) if isinstance(cond, tuple) else str(cond)
-                    self.lua_output.append(f'if {cond_str} then')
-                    self.lua_output.append('end')
 
     def _resolve_constant(self, idx):
         if isinstance(idx, int) and 1 <= idx <= len(self.string_table):
@@ -942,37 +849,25 @@ class FullSemanticVMLifter:
         if isinstance(val, str):
             if val in ('nil', 'true', 'false'):
                 return val
-            if any(c in val for c in ('"', '\\', '\n', '\r')):
-                escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
-                return f'"{escaped}"'
-            return f'"{val}"'
+            escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+            return f'"{escaped}"'
         return str(val)
 
     def _format_output(self):
         if not self.lua_output:
-            return self._fallback("")
-        
+            return 'return nil'
         lines = []
         indent = 0
-        indent_str = '    '
-        
         for stmt in self.lua_output:
             stmt = stmt.strip()
             if not stmt:
-                lines.append('')
                 continue
-            
-            if any(stmt.startswith(kw) for kw in ('end', 'until', 'else', 'elseif')):
+            if stmt.startswith('end') or stmt.startswith('until'):
                 indent = max(0, indent - 1)
-            
-            lines.append(indent_str * indent + stmt)
-            
-            if any(kw in stmt for kw in ('function ', 'if ', 'for ', 'while ', 'repeat', 'do')) and not stmt.startswith('end'):
+            lines.append('    ' * indent + stmt)
+            if any(kw in stmt for kw in ('function ', 'if ', 'for ', 'while ', 'repeat', 'do')):
                 indent += 1
-        
-        result = '\n'.join(lines)
-        result = re.sub(r'\n\s*\n\s*\n', '\n\n', result)
-        return result
+        return '\n'.join(lines)
 
     def _fallback(self, code):
-        return 'local function deobfuscated()\n    error("Decompilation incomplete - manual review required")\nend\nreturn deobfuscated()'
+        return 'return nil'
