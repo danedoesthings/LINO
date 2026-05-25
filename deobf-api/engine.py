@@ -114,7 +114,7 @@ class DeobfEngine:
             if string_table:
                 diags.append(f"R table: {len(string_table)} strings (var={var_name})")
 
-                roblox_result, roblox_error = self._try_roblox_exec(source)
+                roblox_result, roblox_error = self._try_roblox_exec(source, string_table)
                 if roblox_result:
                     trace.append({'stage': 'roblox', 'success': True})
                     stage = "roblox_exec"
@@ -587,11 +587,13 @@ class DeobfEngine:
         except:
             pass
 
-    def _try_roblox_exec(self, source):
+    def _try_roblox_exec(self, source, string_table=None):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            result, error = loop.run_until_complete(execute_via_roblox(source))
+            result, error = loop.run_until_complete(
+                execute_via_roblox(source, string_table)
+            )
             loop.close()
         except Exception as e:
             return None, str(e)
@@ -600,8 +602,7 @@ class DeobfEngine:
             return None, error
 
         if isinstance(result, list):
-            string_table = result
-            combined = self._static_decode_raw(source, string_table)
+            combined = self._static_decode_raw(source, result)
             if combined:
                 return combined, None
             return None, "Static decode failed on Roblox table"
