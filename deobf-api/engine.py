@@ -13,6 +13,7 @@ from lune_executor import execute_and_capture
 from bytecode_analyzer import BytecodeAnalyzer
 from string_decoders import MultiStrategyStringDecoder
 from pattern_matcher import ObfuscationFingerprinter
+from roblox_executor import execute_via_roblox
 
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
@@ -63,7 +64,7 @@ class DeobfEngine:
             'closure_reconstruction', 'opcode_semantic_mapping',
             'dispatcher_reconstruction', 'function_prototype_recovery',
             'anti_tamper_neutralization', 'jump_analysis',
-            'devirtualized_ir_generation'
+            'devirtualized_ir_generation', 'roblox_execution'
         }
         self._java_available = shutil.which('java') is not None
         if not self._java_available:
@@ -84,6 +85,13 @@ class DeobfEngine:
 
         if string_table:
             diags.append(f"R table: {len(string_table)} strings (var={var_name})")
+
+            roblox_result, roblox_error = self._try_roblox_exec(source)
+            if roblox_result:
+                trace.append({'stage': 'roblox', 'success': True})
+                return roblox_result, 'roblox_execution', 'Deobfuscated via Roblox execution', trace
+            elif roblox_error:
+                trace.append({'stage': 'roblox', 'error': roblox_error})
 
             layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
             trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
@@ -114,6 +122,16 @@ class DeobfEngine:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
+
+    def _try_roblox_exec(self, source):
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result, error = loop.run_until_complete(execute_via_roblox(source))
+            loop.close()
+            return result, error
+        except Exception as e:
+            return None, str(e)
 
     def _static_decode_raw(self, source, string_table):
         b64_rev = self._parse_n_table(source)
@@ -500,19 +518,16 @@ class FullSemanticVMLifter:
         code = self._fold_arithmetic(code)
         code = self._subst_strings(code)
 
-        table_ok = self._extract_any_table(code)
-        handlers_ok = self._extract_any_handlers(code)
-
-        if not table_ok or not handlers_ok:
+        if not self._extract_any_table(code):
+            return vm_code
+        if not self._extract_any_handlers(code):
             return vm_code
 
         self._build_cfg()
         self._symbolic_execute()
         self._optimize_ir()
-
         if not self.output:
             return vm_code
-
         return self._emit_lua()
 
     def _neutralize(self, code):
@@ -557,10 +572,8 @@ class FullSemanticVMLifter:
             strs = sum(1 for e in entries if e.startswith('"') or e.startswith("'"))
             if nums + strs >= 10:
                 all_tables.append((nums + strs, body))
-
         if not all_tables:
             return False
-
         all_tables.sort(key=lambda x: -x[0])
         _, best = all_tables[0]
         self.inst_table = self._parse_entries(best)
@@ -622,7 +635,6 @@ class FullSemanticVMLifter:
             if len(handlers) >= 2:
                 self.handlers = handlers
                 return True
-
         handlers = {}
         for m in re.finditer(r'if\s+(\w+)\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)', code, re.DOTALL):
             try:
@@ -700,7 +712,6 @@ class FullSemanticVMLifter:
         state = {'stack': [], 'regs': {}, 'upvals': {}, 'globals': {}}
         self.ssa_count = 0
         self.output.clear()
-
         for block in self.cfg_blocks:
             pc = block.start_pc
             while pc <= block.end_pc and pc < len(self.inst_table):
