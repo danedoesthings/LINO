@@ -56,6 +56,9 @@ BAD_PATTERNS = [
     r'if\s+then\s+end',
 ]
 
+# ----------------------------------------------------------------------
+# AST node classes (inlined from ast_nodes.py)
+# ----------------------------------------------------------------------
 class ASTNode:
     pass
 
@@ -127,6 +130,9 @@ class ReturnNode(ASTNode):
 class TableNode(ASTNode):
     fields: List[tuple] = field(default_factory=list)
 
+# ----------------------------------------------------------------------
+# Lua emitter (inlined from lua_emitter.py)
+# ----------------------------------------------------------------------
 class LuaEmitter:
     def __init__(self):
         self.indent = 0
@@ -209,6 +215,9 @@ class LuaEmitter:
     def indent_str(self):
         return "    " * self.indent
 
+# ----------------------------------------------------------------------
+# VM State / Symbolic execution (inlined)
+# ----------------------------------------------------------------------
 @dataclass
 class SymbolicValue:
     kind: str
@@ -371,6 +380,9 @@ class SymbolicExecutor:
         return self.emitter.emit(self.ast_nodes)
 
 
+# ----------------------------------------------------------------------
+# Helper functions (inlined from dispatcher / instruction_decoder)
+# ----------------------------------------------------------------------
 def find_dispatch_loop(code):
     m = re.search(r'while\s+.+?do\s+(.*?)end\s*end', code, re.DOTALL)
     if not m:
@@ -499,6 +511,9 @@ def decode_instruction_stream(inst_table, handlers):
     return stream
 
 
+# ----------------------------------------------------------------------
+# Main DeobfEngine (with fixes)
+# ----------------------------------------------------------------------
 class DeobfEngine:
     def __init__(self):
         self.lifters = [
@@ -563,9 +578,9 @@ class DeobfEngine:
                 if roblox_result:
                     trace.append({'stage': 'roblox', 'success': True})
                     stage = "roblox_exec"
-                    pipeline_validate_stage(roblox_result, stage)
-                    validated = self._beautify(roblox_result)
-                    return validated, 'roblox_execution', 'Deobfuscated via Roblox execution', trace
+                    beautified = self._beautify(roblox_result)
+                    pipeline_validate_stage(beautified, stage, strict=True)
+                    return beautified, 'roblox_execution', 'Deobfuscated via Roblox execution', trace
                 elif roblox_error:
                     trace.append({'stage': 'roblox', 'error': roblox_error})
 
@@ -576,21 +591,26 @@ class DeobfEngine:
                     for i, item in enumerate(layers):
                         result = self._process_layer(item, i, string_table, var_name)
                         if result:
-                            pipeline_validate_stage(result, f"sandbox_layer_{i}")
-                            validated = self._beautify(result)
-                            return validated, 'sandbox_source', f'Layer {i} source captured', trace
+                            beautified = self._beautify(result)
+                            pipeline_validate_stage(beautified, f"sandbox_layer_{i}", strict=True)
+                            return beautified, 'sandbox_source', f'Layer {i} source captured', trace
 
                 combined = self._static_decode_raw(source, string_table)
                 if combined:
                     stage = "static_decode"
-                    pipeline_validate_stage(combined, stage)
+                    # No validation here – combined is raw bytes
 
                     lifted_code = self._vm_lift(combined, string_table, var_name)
                     if lifted_code:
                         stage = "vm_lift"
-                        pipeline_validate_stage(lifted_code, stage)
                         beautified = self._beautify(lifted_code)
+                        pipeline_validate_stage(beautified, stage, strict=True)
                         return beautified, 'semantic_full', f'Semantically reconstructed ({len(beautified)} chars)', trace
+                    else:
+                        # fallback: use beautified raw combined if it looks like Lua
+                        beautified = self._beautify(combined)
+                        if self._is_valid_lua(beautified):
+                            return beautified, 'static_decode', 'Direct static decode', trace
 
             layers, caps, diag = execute_sandbox(source, timeout=120)
             if layers:
@@ -598,9 +618,9 @@ class DeobfEngine:
                 for i, item in enumerate(layers):
                     result = self._process_layer(item, i, None, None)
                     if result:
-                        pipeline_validate_stage(result, f"sandbox_fallback_layer_{i}")
-                        validated = self._beautify(result)
-                        return validated, 'sandbox_source', f'Layer {i} source captured', trace
+                        beautified = self._beautify(result)
+                        pipeline_validate_stage(beautified, f"sandbox_fallback_layer_{i}", strict=True)
+                        return beautified, 'sandbox_source', f'Layer {i} source captured', trace
 
         except LinoError as e:
             log_structured_error(e)
@@ -631,7 +651,7 @@ class DeobfEngine:
         repaired = auto_fix_lua(lino_err.code_snippet) if lino_err.code_snippet else ""
         if repaired:
             try:
-                pipeline_validate_stage(repaired, f"recovery_{stage}")
+                pipeline_validate_stage(repaired, f"recovery_{stage}", strict=True)
                 return self._beautify(repaired), 'recovered', f"Recovered from {stage} failure", []
             except:
                 pass
@@ -733,10 +753,14 @@ class DeobfEngine:
         combined = b''.join(decoded)
         for enc in ('utf-8', 'latin-1'):
             try:
-                return combined.decode(enc)
+                result = combined.decode(enc)
+                result = ''.join(ch for ch in result if ch.isprintable() or ch in '\n\r\t')
+                return result
             except:
                 pass
-        return combined.decode('latin-1', errors='replace')
+        result = combined.decode('latin-1', errors='replace')
+        result = ''.join(ch for ch in result if ch.isprintable() or ch in '\n\r\t')
+        return result
 
     def _process_layer(self, item, i, string_table, var_name):
         if isinstance(item, bytes) and len(item) >= 12:
