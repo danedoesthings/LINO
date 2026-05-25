@@ -1,5 +1,4 @@
 import re, os, time, json
-from errors import LinoError
 
 try:
     from luaparser import ast as lua_ast
@@ -12,6 +11,8 @@ try:
     HAS_PYGMENTS = True
 except ImportError:
     HAS_PYGMENTS = False
+
+from errors import LinoError
 
 BAD_PATTERNS = [
     (r'(\d+)\s+end', 'missing_newline_number_end'),
@@ -184,3 +185,20 @@ def pipeline_validate_stage(code, stage_name):
                 confidence=confidence_score(code)
             )
     return True
+
+def run_transformer_isolated(transformer, code):
+    before = code
+    try:
+        after = transformer.lift(code)
+        after_str = "\n".join(str(x) for x in after) if isinstance(after, list) else str(after)
+        pipeline_validate_stage(after_str if after_str else "", f"transform:{transformer.name}")
+        return after
+    except LinoError:
+        raise
+    except Exception as e:
+        save_crash_snapshot(transformer.name, before, "", e)
+        raise LinoError(
+            stage=f"transform:{transformer.name}",
+            message=str(e),
+            original_exception=e
+        )
