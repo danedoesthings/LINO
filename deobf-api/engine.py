@@ -467,100 +467,73 @@ class DeobfEngine:
         return (printable / max(len(code), 1)) >= 0.70
 
 
-class Opcode(enum.Enum):
-    LOADK = 1; MOVE = 2; CALL = 3; GETGLOBAL = 4; SETGLOBAL = 5
-    GETTABLE = 6; SETTABLE = 7; ADD = 8; SUB = 9; MUL = 10; DIV = 11
-    CONCAT = 12; JMP = 13; EQ = 14; LT = 15; LE = 16; TEST = 17
-    TESTSET = 18; NOT = 19; LEN = 20; RETURN = 21; CLOSURE = 22
-    NEWTABLE = 23; SETLIST = 24; FORPREP = 25; FORLOOP = 26
-    TFORLOOP = 27; SELF = 28; VARARG = 29
-
 @dataclass
-class Instruction:
-    opcode: Opcode
-    operands: List[int] = field(default_factory=list)
-    line: int = 0
+class VMInstruction:
+    opcode: int
+    operands: List[Union[int, str]] = field(default_factory=list)
+    handler_code: str = ""
+    action: str = "UNKNOWN"
 
-@dataclass
-class BasicBlock:
-    label: int
-    instructions: List[Instruction] = field(default_factory=list)
-    successors: List['BasicBlock'] = field(default_factory=list)
-    predecessors: List['BasicBlock'] = field(default_factory=list)
-    is_entry: bool = False
-    is_exit: bool = False
-
-@dataclass
+@dataclass 
 class SymbolicValue:
     kind: str
     value: Any = None
-    expr: Optional[str] = None
-    reg: Optional[int] = None
-
-class ExecutionState:
-    def __init__(self):
-        self.registers: Dict[int, SymbolicValue] = {}
-        self.stack: List[SymbolicValue] = []
-        self.pc: int = 0
-        self.upvalues: Dict[int, SymbolicValue] = {}
-        self.constants: List[str] = []
-        self.functions: Dict[str, Any] = {}
-        self.globals: Dict[str, SymbolicValue] = {}
-        self.memory: Dict[int, SymbolicValue] = {}
-        self.return_value: Optional[SymbolicValue] = None
-        self.call_stack: List[Dict] = []
-        self.vm_pc: int = 0
-        self.vm_state: str = 'normal'
+    expr: str = ""
+    const_idx: int = -1
+    reg_name: str = ""
 
 class FullSemanticVMLifter:
     def __init__(self, string_table, var_name):
         self.string_table = string_table
         self.var_name = var_name
-        self.output = []
         self.constants = []
-        self.symbols = {}
-        self.reg_map = {}
-        self.block_counter = 0
-        self.cfg = []
-        self.ssa_vars = {}
-        self.state = ExecutionState()
-        self.dispatch_targets = {}
-        self.handler_cache = {}
+        self.vm_instructions = []
+        self.vm_table_var = ""
+        self.vm_pc_var = ""
+        self.vm_opcode_var = ""
+        self.vm_dispatch_block = ""
+        self.opcode_map = {}
+        self.symbolic_stack = []
+        self.symbolic_regs = {}
+        self.symbolic_upvals = {}
+        self.symbolic_globals = {}
+        self.ir_statements = []
         self.function_protos = []
-        self.call_graph = {}
-        self.expression_trees = []
-        self.antitamper_patterns = [
-            r'Tamper\s*Detected',
-            r'checkcaller',
-            r'getfenv\s*\(\s*0\s*\)',
-            r'debug\.\w+',
-            r'getmetatable\s*\(\s*_G\s*\)',
-            r'rawequal\s*\(',
-        ]
+        self.temp_counter = 0
+        self.current_function = None
+        self.label_counter = 0
+        self.function_registry = {}
 
-    def lift(self, code):
-        code = self._neutralize_antitamper(code)
+    def lift(self, vm_code):
+        code = self._neutralize_antitamper(vm_code)
         code = self._apply_arithmetic_folding(code)
         code = self._substitute_strings(code)
         code = self._recover_identifiers(code)
-        self._extract_constants(code)
-        self._parse_vm_structure(code)
-        self._build_control_flow_graph()
+
+        self._extract_vm_components(code)
+        if not self.vm_instructions or not self.opcode_map:
+            return self._emit_fallback(code)
+
         self._symbolic_execute()
-        self._optimize_ir()
-        self._eliminate_dead_code()
-        self._eliminate_temporaries()
         self._reconstruct_expressions()
         self._reconstruct_calls()
-        self._reconstruct_closures()
         self._reconstruct_functions()
         self._reconstruct_loops()
-        self._emit_lua()
-        return '\n'.join(self.output)
+        self._eliminate_dead_code()
+        self._eliminate_temporaries()
+        return self._emit_lua()
 
     def _neutralize_antitamper(self, code):
-        for pattern in self.antitamper_patterns:
-            code = re.sub(pattern, '-- [neutralized]', code, flags=re.IGNORECASE)
+        for pattern in [
+            r'if\s+not\s+pcall\s*\(\s*function\s*\(\)[^)]*end\s*\)\s*then\s*error\s*\(\s*"[^"]*"[^)]*\)\s*end',
+            r'error\s*\(\s*"[^"]*Tamper[^"]*"[^)]*\)',
+            r'checkcaller\s*\(\s*\)',
+            r'getfenv\s*\(\s*0\s*\)\s*==\s*getfenv\s*\(\s*\)',
+            r'getmetatable\s*\(\s*_G\s*\)\s*==\s*nil',
+            r'rawequal\s*\(\s*getfenv\s*\(\s*\)',
+        ]:
+            code = re.sub(pattern, 'true', code, flags=re.IGNORECASE)
+        code = re.sub(r'error\s*\(\s*"[^"]*Tamper\s*Detected[^"]*"[^)]*\)', 'do return end', code)
         return code
 
     def _apply_arithmetic_folding(self, code):
@@ -568,13 +541,15 @@ class FullSemanticVMLifter:
             expr = m.group(1)
             try:
                 val = eval(expr)
-                if isinstance(val, int) and -100000 < val < 100000:
+                if isinstance(val, (int, float)) and -100000 < val < 100000:
+                    if isinstance(val, float) and val == int(val):
+                        return str(int(val))
                     return str(val)
             except:
                 pass
             return m.group(0)
-        code = re.sub(r'\((-?[\d+\-*/() ]+)\)', fold_match, code)
-        code = re.sub(r'(-?\d+)\s*([+\-])\s*(-?\d+)', lambda m: str(eval(m.group(0))), code)
+        code = re.sub(r'\(\s*(-?[\d+\-*/.() ]+)\s*\)', fold_match, code)
+        code = re.sub(r'(-?\d+(?:\.\d+)?)\s*([+\-])\s*(-?\d+(?:\.\d+)?)', lambda m: str(eval(m.group(0))), code)
         return code
 
     def _substitute_strings(self, code):
@@ -583,7 +558,7 @@ class FullSemanticVMLifter:
                 idx = int(m.group(1)) - 1
                 if 0 <= idx < len(self.string_table):
                     val = self.string_table[idx]
-                    val = val.replace('\\', '\\\\').replace('"', '\\"')
+                    val = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
                     return f'"{val}"'
             except:
                 pass
@@ -598,7 +573,7 @@ class FullSemanticVMLifter:
             m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line.strip())
             if m:
                 var, val = m.group(1), m.group(2)
-                if val in LUA_KEYWORDS or val in LUA_SUBSTRINGS:
+                if val in LUA_KEYWORDS or any(kw in val for kw in LUA_SUBSTRINGS):
                     symbol_map[var] = val
                 continue
             m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line.strip())
@@ -620,163 +595,301 @@ class FullSemanticVMLifter:
             code = re.sub(rf'\b{re.escape(var)}\b', name, code)
         return code
 
-    def _extract_constants(self, code):
-        self.constants = []
-        seen = set()
-        for m in re.finditer(r'"([^"]+)"', code):
-            val = m.group(1)
-            if val not in seen and len(val) > 0:
-                seen.add(val)
-                self.constants.append(val)
-        self.state.constants = self.constants
+    def _extract_vm_components(self, code):
+        table_match = re.search(r'local\s+(\w+)\s*=\s*\{((?:\s*[^,{}]+(?:,|$))*)\}', code, re.DOTALL)
+        if not table_match:
+            table_match = re.search(r'(\w+)\s*=\s*\{((?:\s*[^,{}]+(?:,|$))*)\}', code, re.DOTALL)
+        if table_match:
+            self.vm_table_var = table_match.group(1)
+            body = table_match.group(2)
+            self._parse_vm_instruction_table(body)
 
-    def _parse_vm_structure(self, code):
-        lines = code.split('\n')
-        dispatch_found = False
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped or stripped.startswith('--'):
-                continue
-            if 'while' in stripped and ('n' in stripped or 'l' in stripped):
-                if 'do' in stripped and any(k in stripped for k in ['if', '<', '>', '==']):
-                    dispatch_found = True
-                    self._extract_dispatch_table(lines, i)
-                    break
-            if stripped.startswith('local ') and '=' in stripped:
-                self._parse_local_decl(stripped)
+        dispatch_match = re.search(
+            r'(local\s+(\w+)\s*=\s*(\w+)\[(\w+)\][^\n]*\n(?:\s*[^\n]*\n)*?\s*end\s*end)',
+            code, re.DOTALL
+        )
+        if dispatch_match:
+            self.vm_dispatch_block = dispatch_match.group(1)
+            self._parse_dispatch_block()
 
-    def _parse_local_decl(self, line):
-        m = re.match(r'local\s+(\w+)\s*=\s*"([^"]+)"', line)
-        if m:
-            var, val = m.group(1), m.group(2)
-            self.symbols[var] = SymbolicValue('constant', val)
-        m = re.match(r'local\s+(\w+)\s*=\s*(\w+)\.(\w+)', line)
-        if m:
-            var, base, field = m.group(1), m.group(2), m.group(3)
-            self.symbols[var] = SymbolicValue('field_access', f'{base}.{field}')
-
-    def _extract_dispatch_table(self, lines, start_idx):
-        depth = 0
-        i = start_idx
-        dispatch_lines = []
-        while i < len(lines):
-            line = lines[i].strip()
-            if line.startswith('while ') or line.startswith('if ') or line.startswith('for '):
-                depth += 1
-            elif line == 'end':
-                depth -= 1
-                dispatch_lines.append(line)
-                if depth == 0:
-                    break
-            dispatch_lines.append(line)
-            i += 1
-        self._analyze_dispatch(dispatch_lines)
-
-    def _analyze_dispatch(self, lines):
-        blocks = []
-        current_block = None
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith('if ') or stripped.startswith('elseif '):
-                if current_block:
-                    blocks.append(current_block)
-                current_block = BasicBlock(len(blocks))
-                cond = stripped[3:] if stripped.startswith('if ') else stripped[7:]
-                current_block.cond_text = cond
-            elif stripped == 'else':
-                pass
-            elif stripped == 'end':
-                pass
+    def _parse_vm_instruction_table(self, body):
+        entries = []
+        for tok in re.finditer(r'(-?\d+(?:\.\d+)?|"[^"]*"|\'[^\']*\')', body):
+            val = tok.group(1)
+            if val.startswith('"') or val.startswith("'"):
+                entries.append(val[1:-1])
             else:
-                if current_block:
-                    instr = self._decode_instruction(stripped)
-                    if instr:
-                        current_block.instructions.append(instr)
-        if current_block:
-            blocks.append(current_block)
-        self.cfg = blocks
+                try:
+                    entries.append(int(val))
+                except ValueError:
+                    try:
+                        entries.append(float(val))
+                    except ValueError:
+                        entries.append(val)
+        if len(entries) > 20:
+            self.vm_instructions = entries
 
-    def _decode_instruction(self, line):
-        if 'pcall' in line:
-            return Instruction(Opcode.CALL, [line])
-        if 'string.char' in line or 'table.concat' in line:
-            return Instruction(Opcode.CONCAT, [line])
-        if 'math.floor' in line:
-            return Instruction(Opcode.DIV, [line])
-        if 'return' in line:
-            return Instruction(Opcode.RETURN, [line])
-        if '=' in line and 'local' not in line:
-            return Instruction(Opcode.MOVE, [line])
-        return Instruction(Opcode.LOADK, [line])
+    def _parse_dispatch_block(self):
+        pc_match = re.search(r'local\s+(\w+)\s*=\s*(\w+)\[(\w+)\]', self.vm_dispatch_block)
+        if pc_match:
+            self.vm_opcode_var = pc_match.group(1)
+            self.vm_table_var = pc_match.group(2)
+            self.vm_pc_var = pc_match.group(3)
 
-    def _build_control_flow_graph(self):
-        for i, block in enumerate(self.cfg):
-            if i + 1 < len(self.cfg):
-                block.successors.append(self.cfg[i + 1])
-                self.cfg[i + 1].predecessors.append(block)
-            if 'else' not in getattr(block, 'cond_text', '') and 'elseif' not in getattr(block, 'cond_text', ''):
-                pass
+        for match in re.finditer(
+            r'(?:else)?if\s+' + re.escape(self.vm_opcode_var) + r'\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end\b))',
+            self.vm_dispatch_block, re.DOTALL
+        ):
+            opcode = int(match.group(1))
+            handler = match.group(2)
+            self.opcode_map[opcode] = self._classify_handler(handler)
+
+    def _classify_handler(self, handler_code):
+        classification = {'action': 'UNKNOWN', 'handler': handler_code}
+
+        if re.search(r'R\s*\[[^\]]+\]\s*\[[^\]]+\]', handler_code):
+            classification['action'] = 'GETTABLE'
+        elif re.search(r'R\s*\[', handler_code):
+            classification['action'] = 'LOADK'
+            idx_match = re.search(r'R\s*\[([^\]]+)\]', handler_code)
+            if idx_match:
+                classification['index_expr'] = idx_match.group(1)
+        elif re.search(r'_G\s*\[[^\]]+\]\s*=', handler_code):
+            classification['action'] = 'SETGLOBAL'
+            name_match = re.search(r'_G\s*\[([^\]]+)\]', handler_code)
+            if name_match:
+                classification['name_expr'] = name_match.group(1)
+        elif re.search(r'=\s*_G\s*\[', handler_code):
+            classification['action'] = 'GETGLOBAL'
+            name_match = re.search(r'_G\s*\[([^\]]+)\]', handler_code)
+            if name_match:
+                classification['name_expr'] = name_match.group(1)
+        elif re.search(r'pcall\s*\(', handler_code):
+            classification['action'] = 'PCALL'
+            func_match = re.search(r'pcall\s*\(([^,)]+)', handler_code)
+            if func_match:
+                classification['func_expr'] = func_match.group(1)
+        elif re.search(r'loadstring\s*\(', handler_code):
+            classification['action'] = 'LOADSTRING'
+        elif re.search(r'string\.char\s*\(', handler_code):
+            classification['action'] = 'STRCHAR'
+        elif re.search(r'table\.concat\s*\(', handler_code):
+            classification['action'] = 'TABLECONCAT'
+        elif re.search(r'math\.floor\s*\(', handler_code):
+            classification['action'] = 'MATHFLOOR'
+        elif re.search(r'return\b', handler_code):
+            classification['action'] = 'RETURN'
+        elif re.search(r'=\s*function\s*\(', handler_code):
+            classification['action'] = 'CLOSURE'
+        elif re.search(r'=\s*\{', handler_code):
+            classification['action'] = 'NEWTABLE'
+        elif re.search(r'\[[^\]]+\]\s*=', handler_code) and '_G' not in handler_code:
+            classification['action'] = 'SETTABLE'
+        elif re.search(r'for\s+\w+\s*=', handler_code):
+            classification['action'] = 'FORLOOP'
+        elif re.search(r'if\s+', handler_code):
+            classification['action'] = 'CONDJUMP'
+        elif '+' in handler_code or '-' in handler_code or '*' in handler_code or '/' in handler_code:
+            classification['action'] = 'ARITH'
+        elif '..' in handler_code:
+            classification['action'] = 'CONCAT'
+        elif '=' in handler_code and 'local' not in handler_code:
+            classification['action'] = 'MOVE'
+        elif re.search(r'\w+\s*\(', handler_code):
+            classification['action'] = 'CALL'
+            func_match = re.search(r'(\w+)\s*\(', handler_code)
+            if func_match:
+                classification['func_name'] = func_match.group(1)
+
+        return classification
 
     def _symbolic_execute(self):
-        self.state.registers = {}
-        self.state.stack = []
-        for block in self.cfg:
-            for instr in block.instructions:
-                self._execute_instruction(instr)
+        pc = 0
+        instructions = self.vm_instructions
+        instruction_limit = len(instructions)
 
-    def _execute_instruction(self, instr):
-        if instr.opcode == Opcode.LOADK:
-            if instr.operands and isinstance(instr.operands[0], str):
-                self.state.stack.append(SymbolicValue('constant', instr.operands[0]))
-        elif instr.opcode == Opcode.MOVE:
-            self.state.stack.append(SymbolicValue('move', None))
-        elif instr.opcode == Opcode.CALL:
-            self.state.stack.append(SymbolicValue('call', None))
-        elif instr.opcode == Opcode.RETURN:
-            self.state.return_value = self.state.stack[-1] if self.state.stack else None
-        elif instr.opcode == Opcode.CONCAT:
-            self.state.stack.append(SymbolicValue('concat', None))
+        while pc < instruction_limit and len(self.ir_statements) < 10000:
+            op = instructions[pc]
+            pc += 1
 
-    def _optimize_ir(self):
-        self.output = []
-        for const in self.constants[:20]:
-            self.output.append(f'local c{len(self.output)} = "{const}"')
+            if not isinstance(op, int) or op not in self.opcode_map:
+                continue
 
-    def _eliminate_dead_code(self):
-        pass
+            handler = self.opcode_map[op]
+            action = handler['action']
 
-    def _eliminate_temporaries(self):
-        pass
+            if action == 'LOADK':
+                if pc < instruction_limit:
+                    const_idx = instructions[pc]
+                    pc += 1
+                    if isinstance(const_idx, int) and 0 <= const_idx - 1 < len(self.string_table):
+                        val = self.string_table[const_idx - 1]
+                        self.symbolic_stack.append(SymbolicValue('const', val, f'"{val}"', const_idx))
+                    else:
+                        self.symbolic_stack.append(SymbolicValue('unknown', const_idx, str(const_idx)))
+
+            elif action == 'GETGLOBAL':
+                name_expr = handler.get('name_expr', '')
+                self.symbolic_stack.append(SymbolicValue('global', name_expr, f'_G[{name_expr}]'))
+
+            elif action == 'SETGLOBAL':
+                name_expr = handler.get('name_expr', '')
+                val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                self.ir_statements.append(f'_G[{name_expr}] = {val.expr}')
+
+            elif action == 'GETTABLE':
+                key = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                tbl = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                self.symbolic_stack.append(SymbolicValue('gettable', None, f'{tbl.expr}[{key.expr}]'))
+
+            elif action == 'SETTABLE':
+                val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                key = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                tbl = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                self.ir_statements.append(f'{tbl.expr}[{key.expr}] = {val.expr}')
+
+            elif action == 'CALL':
+                func_name = handler.get('func_name', 'unknown')
+                args = []
+                for _ in range(min(3, len(self.symbolic_stack))):
+                    args.insert(0, self.symbolic_stack.pop().expr)
+                args_str = ', '.join(args)
+                self.ir_statements.append(f'{func_name}({args_str})')
+                self.symbolic_stack.append(SymbolicValue('call_result', None, f'{func_name}_result'))
+
+            elif action == 'PCALL':
+                func_expr = handler.get('func_expr', 'function() end')
+                args = []
+                for _ in range(min(2, len(self.symbolic_stack))):
+                    args.insert(0, self.symbolic_stack.pop().expr)
+                args_str = ', '.join(args)
+                self.ir_statements.append(f'pcall({func_expr}, {args_str})')
+
+            elif action == 'RETURN':
+                ret_vals = []
+                while self.symbolic_stack:
+                    ret_vals.insert(0, self.symbolic_stack.pop().expr)
+                ret_str = ', '.join(ret_vals) if ret_vals else ''
+                self.ir_statements.append(f'return {ret_str}')
+
+            elif action == 'MOVE':
+                if self.symbolic_stack:
+                    val = self.symbolic_stack.pop()
+                    dest = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('temp', None, f'temp_{self.temp_counter}')
+                    self.ir_statements.append(f'{dest.expr} = {val.expr}')
+                    self.symbolic_stack.append(val)
+
+            elif action == 'ARITH':
+                b = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                a = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'nil')
+                result = SymbolicValue('arith', None, f'({a.expr} + {b.expr})')
+                self.symbolic_stack.append(result)
+
+            elif action == 'CONCAT':
+                b = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, '""')
+                a = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, '""')
+                result = SymbolicValue('concat', None, f'({a.expr} .. {b.expr})')
+                self.symbolic_stack.append(result)
+
+            elif action == 'CLOSURE':
+                func_body = handler.get('handler', '')
+                func_name = f'func_{len(self.function_protos)}'
+                self.function_protos.append({'name': func_name, 'body': func_body})
+                self.symbolic_stack.append(SymbolicValue('function', None, func_name))
+
+            elif action == 'NEWTABLE':
+                self.symbolic_stack.append(SymbolicValue('table', None, '{}'))
+
+            elif action == 'LOADSTRING':
+                code_val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('const', '', '""')
+                self.ir_statements.append(f'loadstring({code_val.expr})()')
+
+            elif action == 'STRCHAR':
+                args = []
+                while self.symbolic_stack and isinstance(self.symbolic_stack[-1].value, int):
+                    args.insert(0, str(self.symbolic_stack.pop().value))
+                char_str = f'string.char({", ".join(args)})'
+                self.symbolic_stack.append(SymbolicValue('expr', None, char_str))
+
+            elif action == 'TABLECONCAT':
+                tbl = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('table', None, '{}')
+                sep = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('const', ' ', '" "')
+                self.symbolic_stack.append(SymbolicValue('concat', None, f'table.concat({tbl.expr}, {sep.expr})'))
+
+            elif action == 'MATHFLOOR':
+                val = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, '0')
+                self.symbolic_stack.append(SymbolicValue('expr', None, f'math.floor({val.expr})'))
+
+            elif action == 'FORLOOP':
+                self.ir_statements.append('for i = 1, 1 do')
+                self.ir_statements.append('end')
+
+            elif action == 'CONDJUMP':
+                cond = self.symbolic_stack.pop() if self.symbolic_stack else SymbolicValue('nil', None, 'false')
+                self.ir_statements.append(f'if {cond.expr} then')
+
+            else:
+                pass
 
     def _reconstruct_expressions(self):
-        pass
+        reconstructed = []
+        for stmt in self.ir_statements:
+            stmt = re.sub(r'temp_\d+', lambda m: f'v{self.temp_counter}', stmt)
+            self.temp_counter += 1
+            stmt = re.sub(r'"([^"]*)"', lambda m: f'"{m.group(1)}"', stmt)
+            reconstructed.append(stmt)
+        self.ir_statements = reconstructed
 
     def _reconstruct_calls(self):
-        for block in self.cfg:
-            for instr in block.instructions:
-                if instr.opcode == Opcode.CALL and instr.operands:
-                    call_text = instr.operands[0]
-                    if 'pcall' in call_text:
-                        self.output.append('pcall(function(...) end)')
-                    elif 'print' in call_text:
-                        self.output.append('print("Tamper Detected!")')
-                    else:
-                        self.output.append(call_text)
-
-    def _reconstruct_closures(self):
-        pass
+        call_pattern = re.compile(r'(\w+)_result')
+        def replace_call_result(m):
+            return f'{m.group(1)}()'
+        self.ir_statements = [call_pattern.sub(replace_call_result, s) for s in self.ir_statements]
 
     def _reconstruct_functions(self):
-        pass
+        for proto in self.function_protos:
+            self.ir_statements.append(f'local function {proto["name"]}()')
+            self.ir_statements.append('end')
 
     def _reconstruct_loops(self):
         pass
 
+    def _eliminate_dead_code(self):
+        filtered = []
+        for stmt in self.ir_statements:
+            if 'nil = nil' in stmt:
+                continue
+            if stmt.strip() in ('do', 'then') and not filtered:
+                continue
+            filtered.append(stmt)
+        self.ir_statements = filtered
+
+    def _eliminate_temporaries(self):
+        cleaned = []
+        for stmt in self.ir_statements:
+            if re.match(r'^v\d+\s*=\s*v\d+$', stmt.strip()):
+                continue
+            cleaned.append(stmt)
+        self.ir_statements = cleaned
+
     def _emit_lua(self):
-        if not self.output:
-            self.output.append('local function deobfuscated()')
-            self.output.append('    error("Tamper Detected!")')
-            self.output.append('end')
-            self.output.append('return deobfuscated()')
+        if not self.ir_statements:
+            return self._emit_fallback("")
+        lines = []
+        indent = 0
+        for stmt in self.ir_statements:
+            stmt = stmt.strip()
+            if not stmt:
+                lines.append('')
+                continue
+            if any(stmt.startswith(kw) for kw in ('end', 'until', 'else', 'elseif')):
+                indent = max(0, indent - 1)
+            lines.append('    ' * indent + stmt)
+            if any(kw in stmt for kw in ('function ', 'if ', 'for ', 'while ', 'repeat', 'do')):
+                indent += 1
+        return '\n'.join(lines)
+
+    def _emit_fallback(self, code):
+        if self.ir_statements:
+            return '\n'.join(self.ir_statements)
+        return 'local function deobfuscated()\n    error("VM lifting incomplete - manual review required")\nend\nreturn deobfuscated()'
