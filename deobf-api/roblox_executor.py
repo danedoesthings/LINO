@@ -9,44 +9,39 @@ CREATE_TASK_URL = f"{BASE_URL}/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLA
 
 HOOK_TEMPLATE = r"""
 local HttpService = game:GetService("HttpService")
-local originalLoadstring = loadstring
 
-local capturedSources = {}
-local hookLoadstring = function(code, chunkname)
+local realLoadstring = loadstring
+local captured = {}
+
+_G.loadstring = function(code, chunkname)
     if type(code) == "string" then
-        table.insert(capturedSources, code)
+        table.insert(captured, code)
     end
-    return originalLoadstring(code, chunkname)
+    return realLoadstring(code, chunkname)
 end
-
-_G.loadstring = hookLoadstring
-_G.load = hookLoadstring
+_G.load = _G.loadstring
 
 local scriptContent = [[{}]]
+local func, compileErr = realLoadstring(scriptContent)
 
-local wrappedFunc, compileErr = originalLoadstring([[
-    local __scriptFunc = loadstring([[__SCRIPT_PLACEHOLDER__]])
-    return __scriptFunc()
-]]:gsub("__SCRIPT_PLACEHOLDER__", scriptContent:gsub("\\", "\\\\"):gsub('"', '\\"')))
-
-if not wrappedFunc then
-    return HttpService:JSONEncode({error = "Wrapper compile error: " .. tostring(compileErr)})
+if not func then
+    _G.loadstring = realLoadstring
+    _G.load = realLoadstring
+    return HttpService:JSONEncode({error = "Compile error: " .. tostring(compileErr)})
 end
 
-local env = setmetatable({}, {__index = getfenv(), __newindex = function(t, k, v)
-    rawset(t, k, v)
-end})
+local success, result = pcall(func)
 
-setfenv(wrappedFunc, env)
-local success, result = pcall(wrappedFunc)
+_G.loadstring = realLoadstring
+_G.load = realLoadstring
 
-if #capturedSources > 0 then
-    return HttpService:JSONEncode({output = table.concat(capturedSources, "\n")})
+if #captured > 0 then
+    return HttpService:JSONEncode({output = table.concat(captured, "\n")})
 end
 
 local foundTable = nil
-for k, v in pairs(getfenv()) do
-    if type(v) == "table" and #v > 10 then
+for k, v in pairs(getfenv(0)) do
+    if type(v) == "table" and #v > 10 and k ~= "shared" and k ~= "syn" and k ~= "_G" and k ~= "package" then
         local stringCount = 0
         for i, entry in ipairs(v) do
             if type(entry) == "string" then
@@ -56,23 +51,6 @@ for k, v in pairs(getfenv()) do
         if stringCount > 10 then
             foundTable = v
             break
-        end
-    end
-end
-
-if not foundTable then
-    for k, v in pairs(env) do
-        if type(v) == "table" and #v > 10 then
-            local stringCount = 0
-            for i, entry in ipairs(v) do
-                if type(entry) == "string" then
-                    stringCount = stringCount + 1
-                end
-            end
-            if stringCount > 10 then
-                foundTable = v
-                break
-            end
         end
     end
 end
