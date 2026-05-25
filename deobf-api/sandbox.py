@@ -48,25 +48,7 @@ local function CreateProxy(name, path)
             if k == "JobId" then return "deadbeef-1234-5678-9abc-def012345678" end
             if k == "StarterGui" then return CreateProxy("StarterGui", "game.StarterGui") end
             if k == "CoreGui" then return CreateProxy("CoreGui", "game.CoreGui") end
-            if k == "Players" then
-                local players = CreateProxy("Players", "game.Players")
-                local mt = getmetatable(players)
-                mt.__index = function(t, k)
-                    if k == "LocalPlayer" then
-                        local player = CreateProxy("LocalPlayer", "game.Players.LocalPlayer")
-                        local player_mt = getmetatable(player)
-                        player_mt.__index = function(pt, pk)
-                            if pk == "Name" then return "LocalPlayer" end
-                            if pk == "UserId" then return 1 end
-                            if pk == "Character" then return CreateProxy("Character", "game.Players.LocalPlayer.Character") end
-                            return CreateProxy(pk, "game.Players.LocalPlayer." .. pk)
-                        end
-                        return player
-                    end
-                    return CreateProxy(k, "game.Players." .. k)
-                end
-                return players
-            end
+            if k == "Players" then return CreatePlayersProxy("game.Players") end
             if k == "HttpGet" or k == "HttpGetAsync" then
                 return function(self, url)
                     Log(string.format('game:HttpGet("%s")', tostring(url)))
@@ -76,37 +58,8 @@ local function CreateProxy(name, path)
             if k == "GetService" then
                 return function(self, serviceName)
                     Log(string.format('game:GetService("%s")', tostring(serviceName)))
-                    if serviceName == "Players" then
-                        local players = CreateProxy(serviceName, "game." .. tostring(serviceName))
-                        local mt = getmetatable(players)
-                        mt.__index = function(t, k)
-                            if k == "LocalPlayer" then
-                                local player = CreateProxy("LocalPlayer", "game.Players.LocalPlayer")
-                                local player_mt = getmetatable(player)
-                                player_mt.__index = function(pt, pk)
-                                    if pk == "Name" then return "LocalPlayer" end
-                                    if pk == "UserId" then return 1 end
-                                    if pk == "Character" then return CreateProxy("Character", "game.Players.LocalPlayer.Character") end
-                                    return CreateProxy(pk, "game.Players.LocalPlayer." .. pk)
-                                end
-                                return player
-                            end
-                            return CreateProxy(k, "game.Players." .. k)
-                        end
-                        return players
-                    end
-                    if serviceName == "HttpService" then
-                        local http = CreateProxy("HttpService", "game.HttpService")
-                        local mt = getmetatable(http)
-                        local old_idx = mt.__index
-                        mt.__index = function(t, k)
-                            if k == "JSONDecode" then return function(self, str) return {} end end
-                            if k == "JSONEncode" then return function(self, tbl) return "{}" end end
-                            if k == "GenerateGUID" then return function(self) return "dead-beef-1234-5678" end end
-                            return old_idx(t, k)
-                        end
-                        return http
-                    end
+                    if serviceName == "Players" then return CreatePlayersProxy("game.Players") end
+                    if serviceName == "HttpService" then return CreateHttpServiceProxy("game.HttpService") end
                     return CreateProxy(serviceName, "game." .. tostring(serviceName))
                 end
             end
@@ -174,6 +127,39 @@ local function CreateProxy(name, path)
 
     meta.__tostring = function() return name end
     return proxy
+end
+
+function CreatePlayersProxy(path)
+    local players = CreateProxy("Players", path)
+    local mt = getmetatable(players)
+    mt.__index = function(t, k)
+        if k == "LocalPlayer" then
+            local player = CreateProxy("LocalPlayer", path .. ".LocalPlayer")
+            local player_mt = getmetatable(player)
+            player_mt.__index = function(pt, pk)
+                if pk == "Name" then return "LocalPlayer" end
+                if pk == "UserId" then return 1 end
+                if pk == "Character" then return CreateProxy("Character", path .. ".LocalPlayer.Character") end
+                return CreateProxy(pk, path .. ".LocalPlayer." .. pk)
+            end
+            return player
+        end
+        return CreateProxy(k, path .. "." .. k)
+    end
+    return players
+end
+
+function CreateHttpServiceProxy(path)
+    local http = CreateProxy("HttpService", path)
+    local mt = getmetatable(http)
+    local old_idx = mt.__index
+    mt.__index = function(t, k)
+        if k == "JSONDecode" then return function(self, str) return {} end end
+        if k == "JSONEncode" then return function(self, tbl) return "{}" end end
+        if k == "GenerateGUID" then return function(self) return "dead-beef-1234-5678" end end
+        return old_idx(t, k)
+    end
+    return http
 end
 
 local function MakeSafeObject(name, props, metafuncs)
