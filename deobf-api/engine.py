@@ -72,74 +72,28 @@ class DeobfEngine:
         if string_table:
             diags.append(f"R table: {len(string_table)} strings (var={var_name})")
 
+            # Try sandbox first
             layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
             trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
-            if diag:
-                reasons['sandbox'] = self._sanitize_diag(diag[:2000])
-
             if layers:
                 for i, item in enumerate(layers):
                     result = self._process_layer(item, i, string_table, var_name)
                     if result:
                         return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-            result = self._static_wearedevs_extract(source, diags, string_table, var_name)
-            if result:
-                if isinstance(result, bytes):
-                    dc, err = self._run_unluac(result)
-                    if dc and self._is_valid_lua(dc):
-                        return self._beautify(dc), 'static_unluac', f'Static decompile ({len(dc)} chars)', trace
-                    return base64.b64encode(result).decode('ascii'), 'bytecode', f'Bytecode ({len(result)}B)', trace
-                else:
-                    beautified = self._beautify(result)
-                    if string_table and var_name:
-                        beautified = self._substitute_strings(beautified, string_table, var_name)
-                    return beautified, 'static_source', f'Static source ({len(result)} chars)', trace
-
+            # Static extraction - always produce an output
             combined = self._static_decode_raw(source, string_table)
             if combined:
                 beautified = self._beautify(combined)
                 return beautified, 'static_raw', f'Decoded VM source ({len(combined)} chars)', trace
 
+        # Fallback for scripts without recognizable string table
         layers, caps, diag = execute_sandbox(source, timeout=120)
-        trace.append({'stage': 'sandbox', 'layers': len(layers)})
-        if diag:
-            reasons['sandbox'] = self._sanitize_diag(diag[:2000])
         if layers:
             for i, item in enumerate(layers):
                 result = self._process_layer(item, i, None, None)
                 if result:
                     return result, 'sandbox_source', f'Layer {i} source captured', trace
-
-        for lifter in self.lifters:
-            try:
-                chunks = lifter.lift(source)
-                if chunks:
-                    for chunk in chunks:
-                        if isinstance(chunk, bytes):
-                            bc = self.bytecode_harvester.extract(chunk)
-                            if bc:
-                                dc, err = self._run_unluac(bc)
-                                if dc and self._is_valid_lua(dc):
-                                    return self._beautify(dc), 'lifter_unluac', f'Lifter ({len(dc)} chars)', trace
-                        elif isinstance(chunk, str) and len(chunk) > 5 and self._has_lua_keywords(chunk):
-                            return self._beautify(chunk), 'lifter_source', f'Lifter source ({len(chunk)} chars)', trace
-            except:
-                pass
-
-        lune_data, _ = self._run_lune(source)
-        if lune_data and isinstance(lune_data, bytes) and len(lune_data) >= 12:
-            bc = self.bytecode_harvester.extract(lune_data)
-            if bc:
-                dc, err = self._run_unluac(bc)
-                if dc and self._is_valid_lua(dc):
-                    return self._beautify(dc), 'lune_unluac', f'Lune ({len(dc)} chars)', trace
-
-        raw_bc = self.bytecode_harvester.deep_scan(source)
-        if raw_bc:
-            dc, err = self._run_unluac(raw_bc)
-            if dc and self._is_valid_lua(dc):
-                return self._beautify(dc), 'deep_scan_unluac', f'Deep scan ({len(dc)} chars)', trace
 
         parts = [f'Steps: {"; ".join(diags[:3])}']
         if reasons:
@@ -174,18 +128,10 @@ class DeobfEngine:
         combined = b''.join(decoded)
         for enc in ('utf-8', 'latin-1'):
             try:
-                text = combined.decode(enc)
-                if self._has_lua_keywords(text):
-                    return text
+                return combined.decode(enc)
             except:
                 pass
-        try:
-            return combined.decode('latin-1')
-        except:
-            return None
-
-    def _sanitize_diag(self, text):
-        return ''.join(c for c in text if c.isprintable() or c in '\n\t')
+        return combined.decode('latin-1', errors='replace')
 
     def _process_layer(self, item, i, string_table, var_name):
         if isinstance(item, bytes) and len(item) >= 12:
@@ -245,112 +191,6 @@ class DeobfEngine:
         if len(strings) < 10:
             return None, None
         return strings, var_name
-
-    def _static_wearedevs_extract(self, source, diags, string_table=None, var_name=None):
-        m = re.search(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source, re.DOTALL)
-        if not m:
-            return None
-        brace_start = m.end() - 1
-        body = self._extract_balanced_table(source, brace_start)
-        if not body:
-            return None
-        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
-        if len(strings) < 10:
-            return None
-
-        b64_rev = self._parse_n_table(source)
-        shuffle = self._parse_shuffle_ranges(source)
-        diags.append(f"R={len(strings)} N={len(b64_rev)} shuff={len(shuffle)}")
-
-        def try_decode(pairs, label):
-            working = list(strings)
-            for lo, hi in pairs:
-                lo_idx, hi_idx = lo - 1, hi - 1
-                while lo_idx < hi_idx:
-                    working[lo_idx], working[hi_idx] = working[hi_idx], working[lo_idx]
-                    lo_idx += 1
-                    hi_idx -= 1
-            decoded = []
-            for s in working:
-                if not s:
-                    continue
-                raw = self._lua_escapes_to_bytes(s)
-                if not raw:
-                    continue
-                dec = self._decode_custom_b64(raw, b64_rev)
-                if dec:
-                    decoded.append(dec)
-            if not decoded:
-                return None
-            combined = b''.join(decoded)
-
-            bc = self.bytecode_harvester.extract(combined)
-            if bc:
-                return bc
-
-            for enc in ('utf-8', 'latin-1'):
-                try:
-                    text = combined.decode(enc)
-                    if self._has_lua_keywords(text):
-                        if string_table and var_name:
-                            text = self._substitute_strings(text, string_table, var_name)
-                        return text
-                except:
-                    pass
-            return None
-
-        result = try_decode(shuffle, "orig")
-        if result:
-            return result
-        result = try_decode(list(reversed(shuffle)), "rev")
-        if result:
-            return result
-        return None
-
-    @staticmethod
-    def _extract_balanced_table(source, start):
-        if start >= len(source) or source[start] != '{':
-            return None
-        depth = 0
-        in_str = False
-        str_char = None
-        i = start
-        while i < len(source):
-            c = source[i]
-            if in_str:
-                if c == '\\':
-                    i += 2
-                    continue
-                if c == str_char:
-                    in_str = False
-            else:
-                if c in ('"', "'"):
-                    in_str = True
-                    str_char = c
-                elif c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return source[start + 1:i]
-            i += 1
-        return None
-
-    @staticmethod
-    def _has_lua_keywords(text):
-        if not text or len(text) < 5:
-            return False
-        printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
-        if (printable / len(text)) < 0.50:
-            return False
-        lower_text = text.lower()
-        count = 0
-        for kw in LUA_SUBSTRINGS:
-            if kw in lower_text:
-                count += 1
-                if count >= 1:
-                    return True
-        return False
 
     def _beautify(self, code):
         if not code or len(code) < 5:
@@ -479,6 +319,35 @@ class DeobfEngine:
             if ranges:
                 return ranges
         return ranges
+
+    @staticmethod
+    def _extract_balanced_table(source, start):
+        if start >= len(source) or source[start] != '{':
+            return None
+        depth = 0
+        in_str = False
+        str_char = None
+        i = start
+        while i < len(source):
+            c = source[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == str_char:
+                    in_str = False
+            else:
+                if c in ('"', "'"):
+                    in_str = True
+                    str_char = c
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return source[start + 1:i]
+            i += 1
+        return None
 
     @staticmethod
     def _lua_escapes_to_bytes(s):
@@ -619,16 +488,8 @@ class DeobfEngine:
     def _is_valid_lua(code):
         if not code or len(code) < 50:
             return False
-        lines = code.split('\n')
-        if len(lines) > 5:
-            proxy_pattern = re.compile(r'^\s*[\w.]+ = [A-Z]\w+$')
-            if sum(1 for l in lines if proxy_pattern.match(l.strip())) > len(lines) * 0.4:
-                return False
         words = set(re.findall(r'\b\w+\b', code[:10000]))
-        threshold = max(2, min(5, len(code) // 500))
-        if len(words & LUA_KEYWORDS) < threshold:
-            return False
-        if not ('function' in words and 'end' in words or 'local' in words):
+        if len(words & LUA_KEYWORDS) < 2:
             return False
         printable = sum(1 for c in code if c.isprintable() or c in '\n\r\t')
         return (printable / max(len(code), 1)) >= 0.70
