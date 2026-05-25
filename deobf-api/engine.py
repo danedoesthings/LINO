@@ -72,7 +72,6 @@ class DeobfEngine:
         if string_table:
             diags.append(f"R table: {len(string_table)} strings (var={var_name})")
 
-            # Try sandbox first
             layers, caps, diag = execute_sandbox(source, timeout=120, varargs=string_table)
             trace.append({'stage': 'sandbox', 'layers': len(layers), 'caps': len(caps)})
             if layers:
@@ -81,13 +80,15 @@ class DeobfEngine:
                     if result:
                         return result, 'sandbox_source', f'Layer {i} source captured', trace
 
-            # Static extraction - always produce an output
             combined = self._static_decode_raw(source, string_table)
             if combined:
+                devirtualized = self._devirtualize(combined, string_table, var_name)
+                if devirtualized and self._is_valid_lua(devirtualized):
+                    return self._beautify(devirtualized), 'devirtualized', f'De-virtualized source ({len(devirtualized)} chars)', trace
+
                 beautified = self._beautify(combined)
                 return beautified, 'static_raw', f'Decoded VM source ({len(combined)} chars)', trace
 
-        # Fallback for scripts without recognizable string table
         layers, caps, diag = execute_sandbox(source, timeout=120)
         if layers:
             for i, item in enumerate(layers):
@@ -100,6 +101,84 @@ class DeobfEngine:
             parts.append('Info: ' + '; '.join(f"{k}: {v[:300]}" for k, v in reasons.items()))
         reason = '\n'.join(parts) if parts else 'All stages exhausted'
         return '', 'unable', reason, trace
+
+    def _devirtualize(self, vm_source, string_table, var_name):
+        payload = None
+        decoder = None
+
+        big_strings = re.findall(r'"((?:[^"\\]|\\.){50,})"', vm_source)
+        for s in big_strings:
+            decoded = self._lua_escapes_to_bytes(s)
+            if len(decoded) > 50 and self._has_lua_keywords(decoded.decode('latin-1', errors='replace')):
+                payload = s
+                break
+
+        if not payload:
+            number_table = re.search(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', vm_source)
+            if number_table:
+                nums = [int(n.strip()) for n in number_table.group(1).split(',') if n.strip().isdigit()]
+                if len(nums) > 20:
+                    for key in range(256):
+                        decoded = bytes([b ^ key for b in nums])
+                        try:
+                            text = decoded.decode('utf-8')
+                            if self._has_lua_keywords(text):
+                                return text
+                        except:
+                            try:
+                                text = decoded.decode('latin-1')
+                                if self._has_lua_keywords(text):
+                                    return text
+                            except:
+                                pass
+
+        xor_key = None
+        xor_match = re.search(r'local\s+\w+\s*=\s*(\d+)\s*;?\s*for', vm_source)
+        if xor_match:
+            xor_key = int(xor_match.group(1))
+        else:
+            xor_keys = re.findall(r'(\d+)\s*\)\s*;?\s*for', vm_source)
+            if xor_keys:
+                xor_key = int(xor_keys[0])
+
+        if xor_key and payload:
+            raw = self._lua_escapes_to_bytes(payload)
+            decoded = bytes([b ^ xor_key for b in raw])
+            try:
+                text = decoded.decode('utf-8')
+                if self._has_lua_keywords(text):
+                    return text
+            except:
+                try:
+                    text = decoded.decode('latin-1')
+                    if self._has_lua_keywords(text):
+                        return text
+                except:
+                    pass
+
+        if payload:
+            base64_variants = [
+                payload.strip('"'),
+                payload.replace('\\n', '').replace('\\r', '').replace('\\t', ''),
+            ]
+            for variant in base64_variants:
+                try:
+                    raw = base64.b64decode(variant)
+                    try:
+                        text = raw.decode('utf-8')
+                        if self._has_lua_keywords(text):
+                            return text
+                    except:
+                        try:
+                            text = raw.decode('latin-1')
+                            if self._has_lua_keywords(text):
+                                return text
+                        except:
+                            pass
+                except:
+                    pass
+
+        return None
 
     def _static_decode_raw(self, source, string_table):
         b64_rev = self._parse_n_table(source)
@@ -399,6 +478,22 @@ class DeobfEngine:
                 result.append(ord(s[i]) if ord(s[i]) < 256 else ord('?'))
                 i += 1
         return bytes(result)
+
+    @staticmethod
+    def _has_lua_keywords(text):
+        if not text or len(text) < 5:
+            return False
+        printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
+        if (printable / len(text)) < 0.50:
+            return False
+        lower_text = text.lower()
+        count = 0
+        for kw in LUA_SUBSTRINGS:
+            if kw in lower_text:
+                count += 1
+                if count >= 1:
+                    return True
+        return False
 
     @staticmethod
     def _lua_escape_to_int(esc):
