@@ -21,9 +21,6 @@ from diagnostics import (
     save_crash_snapshot, log_structured_error, pipeline_validate_stage,
     detect_bad_patterns
 )
-from dispatcher import find_dispatch_loop, extract_handlers, extract_instruction_table
-from instruction_decoder import decode_instruction_stream
-from symbolic_executor import SymbolicExecutor
 
 try:
     from luaparser import ast as lua_ast
@@ -58,6 +55,449 @@ BAD_PATTERNS = [
     r'function\s+end',
     r'if\s+then\s+end',
 ]
+
+class ASTNode:
+    pass
+
+@dataclass
+class ConstNode(ASTNode):
+    value: Any
+
+@dataclass
+class VarNode(ASTNode):
+    name: str
+
+@dataclass
+class IndexNode(ASTNode):
+    table: ASTNode
+    key: ASTNode
+
+@dataclass
+class BinaryOpNode(ASTNode):
+    op: str
+    left: ASTNode
+    right: ASTNode
+
+@dataclass
+class UnaryOpNode(ASTNode):
+    op: str
+    operand: ASTNode
+
+@dataclass
+class CallNode(ASTNode):
+    func: ASTNode
+    args: List[ASTNode] = field(default_factory=list)
+
+@dataclass
+class AssignNode(ASTNode):
+    target: ASTNode
+    value: ASTNode
+    local: bool = True
+
+@dataclass
+class IfNode(ASTNode):
+    condition: ASTNode
+    body: List[ASTNode] = field(default_factory=list)
+    else_body: List[ASTNode] = field(default_factory=list)
+
+@dataclass
+class WhileNode(ASTNode):
+    condition: ASTNode
+    body: List[ASTNode] = field(default_factory=list)
+
+@dataclass
+class ForNode(ASTNode):
+    var: str
+    start: ASTNode
+    end: ASTNode
+    step: Optional[ASTNode]
+    body: List[ASTNode] = field(default_factory=list)
+
+@dataclass
+class FunctionNode(ASTNode):
+    name: Optional[str]
+    params: List[str] = field(default_factory=list)
+    body: List[ASTNode] = field(default_factory=list)
+
+@dataclass
+class ReturnNode(ASTNode):
+    values: List[ASTNode] = field(default_factory=list)
+
+@dataclass
+class TableNode(ASTNode):
+    fields: List[tuple] = field(default_factory=list)
+
+class LuaEmitter:
+    def __init__(self):
+        self.indent = 0
+
+    def emit(self, node):
+        if isinstance(node, list):
+            return "\n".join(self.emit(n) for n in node)
+        method = getattr(self, f"emit_{type(node).__name__}", None)
+        if method:
+            return method(node)
+        return str(node)
+
+    def emit_ConstNode(self, node):
+        if isinstance(node.value, str):
+            return f'"{node.value}"'
+        return str(node.value)
+
+    def emit_VarNode(self, node):
+        return node.name
+
+    def emit_IndexNode(self, node):
+        return f"{self.emit(node.table)}[{self.emit(node.key)}]"
+
+    def emit_BinaryOpNode(self, node):
+        return f"({self.emit(node.left)} {node.op} {self.emit(node.right)})"
+
+    def emit_UnaryOpNode(self, node):
+        return f"{node.op}{self.emit(node.operand)}"
+
+    def emit_CallNode(self, node):
+        args = ", ".join(self.emit(a) for a in node.args)
+        return f"{self.emit(node.func)}({args})"
+
+    def emit_AssignNode(self, node):
+        local = "local " if node.local else ""
+        return f"{local}{self.emit(node.target)} = {self.emit(node.value)}"
+
+    def emit_IfNode(self, node):
+        cond = self.emit(node.condition)
+        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
+        result = f"if {cond} then\n{body}"
+        if node.else_body:
+            else_body = "\n".join(self.indent_str() + self.emit(s) for s in node.else_body)
+            result += f"\nelse\n{else_body}"
+        result += "\nend"
+        return result
+
+    def emit_WhileNode(self, node):
+        cond = self.emit(node.condition)
+        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
+        return f"while {cond} do\n{body}\nend"
+
+    def emit_ForNode(self, node):
+        step = f", {self.emit(node.step)}" if node.step else ""
+        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
+        return f"for {node.var} = {self.emit(node.start)}, {self.emit(node.end)}{step} do\n{body}\nend"
+
+    def emit_FunctionNode(self, node):
+        name = node.name or ""
+        params = ", ".join(node.params)
+        body = "\n".join(self.indent_str() + self.emit(s) for s in node.body)
+        self.indent += 1
+        out = f"function {name}({params})\n{body}\nend"
+        self.indent -= 1
+        return out
+
+    def emit_ReturnNode(self, node):
+        vals = ", ".join(self.emit(v) for v in node.values)
+        return f"return {vals}"
+
+    def emit_TableNode(self, node):
+        fields = []
+        for k, v in node.fields:
+            if isinstance(k, int) and k == len(fields)+1:
+                fields.append(self.emit(v))
+            else:
+                fields.append(f"[{self.emit(k)}] = {self.emit(v)}")
+        return "{" + ", ".join(fields) + "}"
+
+    def indent_str(self):
+        return "    " * self.indent
+
+@dataclass
+class SymbolicValue:
+    kind: str
+    value: Any = None
+    expr: Optional[ASTNode] = None
+    reg: Optional[int] = None
+
+@dataclass
+class Instruction:
+    opcode: int
+    operands: List[Union[int, str]] = field(default_factory=list)
+    pc: int = 0
+
+@dataclass
+class BasicBlock:
+    id: int
+    instructions: List[Instruction] = field(default_factory=list)
+    successors: List['BasicBlock'] = field(default_factory=list)
+    predecessors: List['BasicBlock'] = field(default_factory=list)
+
+@dataclass
+class VMState:
+    registers: Dict[int, SymbolicValue] = field(default_factory=dict)
+    stack: List[SymbolicValue] = field(default_factory=list)
+    constants: List[str] = field(default_factory=list)
+    upvalues: Dict[str, SymbolicValue] = field(default_factory=dict)
+    globals: Dict[str, SymbolicValue] = field(default_factory=dict)
+    ip: int = 0
+    instructions: List[Instruction] = field(default_factory=list)
+    blocks: List[BasicBlock] = field(default_factory=list)
+    current_block: Optional[BasicBlock] = None
+
+class SymbolicExecutor:
+    def __init__(self, string_table):
+        self.state = VMState()
+        self.state.constants = string_table
+        self.ast_nodes = []
+        self.emitter = LuaEmitter()
+        self.label_counter = 0
+
+    def execute(self, instructions, handlers):
+        self.state.instructions = instructions
+        while self.state.ip < len(instructions):
+            instr = instructions[self.state.ip]
+            action = handlers.get(instr.opcode, 'UNKNOWN')
+            getattr(self, f'op_{action}', self.op_UNKNOWN)(instr)
+            self.state.ip += 1
+
+    def op_LOADK(self, instr):
+        idx = instr.operands[0] if instr.operands else 0
+        if isinstance(idx, int) and 1 <= idx <= len(self.state.constants):
+            val = self.state.constants[idx-1]
+        else:
+            val = str(idx)
+        self.state.stack.append(SymbolicValue('const', val, ConstNode(val)))
+
+    def op_SETGLOBAL(self, instr):
+        name = self._resolve_name(instr.operands[0] if instr.operands else "")
+        val = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        self.state.globals[name] = val
+        self.ast_nodes.append(AssignNode(target=IndexNode(VarNode('_G'), ConstNode(name)), value=val.expr, local=False))
+
+    def op_GETGLOBAL(self, instr):
+        name = self._resolve_name(instr.operands[0] if instr.operands else "")
+        node = IndexNode(VarNode('_G'), ConstNode(name))
+        self.state.stack.append(SymbolicValue('global', name, node))
+
+    def op_CALL(self, instr):
+        func_name = self._resolve_name(instr.operands[0] if instr.operands else "unknown")
+        arg_count = instr.operands[1] if len(instr.operands) > 1 else 0
+        args = []
+        for _ in range(arg_count):
+            if self.state.stack:
+                arg = self.state.stack.pop()
+                args.insert(0, arg.expr if arg.expr else ConstNode(None))
+        node = CallNode(VarNode(func_name), args)
+        self.ast_nodes.append(node)
+
+    def op_RETURN(self, instr):
+        vals = []
+        while self.state.stack:
+            sv = self.state.stack.pop()
+            vals.insert(0, sv.expr if sv.expr else ConstNode(None))
+        self.ast_nodes.append(ReturnNode(vals))
+
+    def op_CONCAT(self, instr):
+        right = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        left = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        node = BinaryOpNode('..', left.expr or ConstNode(None), right.expr or ConstNode(None))
+        self.state.stack.append(SymbolicValue('concat', None, node))
+
+    def op_ARITH(self, instr):
+        right = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        left = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        node = BinaryOpNode('+', left.expr or ConstNode(None), right.expr or ConstNode(None))
+        self.state.stack.append(SymbolicValue('arith', None, node))
+
+    def op_STRCHAR(self, instr):
+        args = []
+        while self.state.stack and isinstance(self.state.stack[-1].value, int):
+            sv = self.state.stack.pop()
+            args.insert(0, sv.expr if sv.expr else ConstNode(sv.value))
+        if args:
+            node = CallNode(VarNode('string.char'), args)
+            self.ast_nodes.append(node)
+
+    def op_TABLECONCAT(self, instr):
+        sep = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        tbl = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        node = CallNode(VarNode('table.concat'), [tbl.expr or ConstNode(None), sep.expr or ConstNode(None)])
+        self.state.stack.append(SymbolicValue('call', None, node))
+
+    def op_CLOSURE(self, instr):
+        name = f"f_{len(self.state.registers)}"
+        self.ast_nodes.append(FunctionNode(name, [], []))
+        self.state.stack.append(SymbolicValue('closure', name, VarNode(name)))
+
+    def op_NEWTABLE(self, instr):
+        self.state.stack.append(SymbolicValue('table', None, TableNode()))
+
+    def op_SETTABLE(self, instr):
+        val = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        key = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        tbl = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        node = AssignNode(
+            target=IndexNode(tbl.expr or ConstNode(None), key.expr or ConstNode(None)),
+            value=val.expr or ConstNode(None),
+            local=False
+        )
+        self.ast_nodes.append(node)
+
+    def op_GETTABLE(self, instr):
+        key = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        tbl = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(None))
+        node = IndexNode(tbl.expr or ConstNode(None), key.expr or ConstNode(None))
+        self.state.stack.append(SymbolicValue('gettable', None, node))
+
+    def op_PCALL(self, instr):
+        args = []
+        while self.state.stack and len(args) < 5:
+            sv = self.state.stack.pop()
+            args.insert(0, sv.expr if sv.expr else ConstNode(None))
+        node = CallNode(VarNode('pcall'), args)
+        self.ast_nodes.append(node)
+
+    def op_LOADSTRING(self, instr):
+        code = self.state.stack.pop() if self.state.stack else SymbolicValue('nil', None, ConstNode(""))
+        node = CallNode(VarNode('loadstring'), [code.expr or ConstNode(None)])
+        self.ast_nodes.append(node)
+
+    def op_UNKNOWN(self, instr):
+        pass
+
+    def _resolve_name(self, arg):
+        if isinstance(arg, int) and 1 <= arg <= len(self.state.constants):
+            return self.state.constants[arg-1]
+        return str(arg)
+
+    def emit_lua(self):
+        return self.emitter.emit(self.ast_nodes)
+
+
+def find_dispatch_loop(code):
+    m = re.search(r'while\s+.+?do\s+(.*?)end\s*end', code, re.DOTALL)
+    if not m:
+        return None
+    return m.group(1)
+
+
+def classify_handler(code):
+    if 'R[' in code:
+        return 'LOADK'
+    if '_G[' in code and '=' in code and code.index('_G') > code.index('='):
+        return 'SETGLOBAL'
+    if '=' in code and '_G[' in code:
+        return 'GETGLOBAL'
+    if 'pcall' in code:
+        return 'PCALL'
+    if 'loadstring' in code:
+        return 'LOADSTRING'
+    if 'return' in code:
+        return 'RETURN'
+    if 'string.char' in code:
+        return 'STRCHAR'
+    if 'table.concat' in code:
+        return 'TABLECONCAT'
+    if '..' in code:
+        return 'CONCAT'
+    if re.search(r'[+\-*/]', code) and '=' in code:
+        return 'ARITH'
+    if 'function' in code and '=' in code:
+        return 'CLOSURE'
+    if '{' in code and '=' in code:
+        return 'NEWTABLE'
+    if re.search(r'\w+\s*\(', code):
+        return 'CALL'
+    return 'UNKNOWN'
+
+
+def extract_handlers(dispatch_body):
+    handlers = {}
+    for m in re.finditer(r'if\s+(\w+)\s*==\s*(\d+)\s+then\s+(.*?)(?=\s*(?:elseif|else|end)\b)', dispatch_body, re.DOTALL):
+        opcode = int(m.group(2))
+        handlers[opcode] = classify_handler(m.group(3))
+    return handlers
+
+
+def extract_balanced(code, start):
+    if start >= len(code) or code[start] != '{':
+        return None
+    depth = 0
+    in_str = False
+    quote = None
+    i = start
+    while i < len(code):
+        c = code[i]
+        if in_str:
+            if c == '\\':
+                i += 2
+                continue
+            if c == quote:
+                in_str = False
+        else:
+            if c in ('"', "'"):
+                in_str = True
+                quote = c
+            elif c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return code[start:i+1]
+        i += 1
+    return None
+
+
+def parse_table_entries(body):
+    inner = body[1:-1]
+    entries = [e.strip() for e in re.split(r'\s*,\s*', inner) if e.strip()]
+    parsed = []
+    for e in entries:
+        if (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
+            parsed.append(e[1:-1])
+        elif e.lstrip('-').isdigit():
+            parsed.append(int(e))
+        else:
+            parsed.append(e)
+    return parsed
+
+
+def extract_instruction_table(code):
+    best = []
+    for m in re.finditer(r'local\s+\w+\s*=\s*\{', code):
+        body = extract_balanced(code, m.end()-1)
+        if body:
+            entries = parse_table_entries(body)
+            if len(entries) > len(best):
+                best = entries
+    return best
+
+
+def decode_instruction_stream(inst_table, handlers):
+    stream = []
+    pc = 0
+    limit = len(inst_table)
+    while pc < limit:
+        op = inst_table[pc]
+        if isinstance(op, int) and op in handlers:
+            instr = Instruction(opcode=op, pc=pc)
+            action = handlers[op]
+            if action == 'LOADK':
+                if pc+1 < limit:
+                    instr.operands.append(inst_table[pc+1])
+                    pc += 1
+            elif action in ('SETGLOBAL', 'GETGLOBAL'):
+                if pc+1 < limit:
+                    instr.operands.append(inst_table[pc+1])
+                    pc += 1
+            elif action == 'CALL':
+                if pc+1 < limit:
+                    instr.operands.append(inst_table[pc+1])
+                    pc += 1
+                if pc+1 < limit and isinstance(inst_table[pc+1], int):
+                    instr.operands.append(inst_table[pc+1])
+                    pc += 1
+            stream.append(instr)
+        pc += 1
+    return stream
+
 
 class DeobfEngine:
     def __init__(self):
