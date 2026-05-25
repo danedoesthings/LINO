@@ -9,37 +9,84 @@ CREATE_TASK_URL = f"{BASE_URL}/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLA
 
 HOOK_TEMPLATE = r"""
 local HttpService = game:GetService("HttpService")
-local capturedTable = nil
+local originalLoadstring = loadstring
 
-local function captureStringTable(name, value)
-    if type(value) == "table" and #value > 10 then
-        capturedTable = value
+local capturedSources = {}
+local hookLoadstring = function(code, chunkname)
+    if type(code) == "string" then
+        table.insert(capturedSources, code)
     end
+    return originalLoadstring(code, chunkname)
+end
+
+_G.loadstring = hookLoadstring
+_G.load = hookLoadstring
+
+local scriptContent = [[{}]]
+
+local wrappedFunc, compileErr = originalLoadstring([[
+    local __scriptFunc = loadstring([[__SCRIPT_PLACEHOLDER__]])
+    return __scriptFunc()
+]]:gsub("__SCRIPT_PLACEHOLDER__", scriptContent:gsub("\\", "\\\\"):gsub('"', '\\"')))
+
+if not wrappedFunc then
+    return HttpService:JSONEncode({error = "Wrapper compile error: " .. tostring(compileErr)})
 end
 
 local env = setmetatable({}, {__index = getfenv(), __newindex = function(t, k, v)
     rawset(t, k, v)
-    captureStringTable(k, v)
 end})
 
-local scriptContent = [[{}]]
-local func, compileErr = loadstring(scriptContent)
-if not func then
-    return HttpService:JSONEncode({error = "Compile error: " .. tostring(compileErr)})
+setfenv(wrappedFunc, env)
+local success, result = pcall(wrappedFunc)
+
+if #capturedSources > 0 then
+    return HttpService:JSONEncode({output = table.concat(capturedSources, "\n")})
 end
 
-setfenv(func, env)
-local success, result = pcall(func)
-if not success then
-    return HttpService:JSONEncode({error = "Runtime error: " .. tostring(result)})
+local foundTable = nil
+for k, v in pairs(getfenv()) do
+    if type(v) == "table" and #v > 10 then
+        local stringCount = 0
+        for i, entry in ipairs(v) do
+            if type(entry) == "string" then
+                stringCount = stringCount + 1
+            end
+        end
+        if stringCount > 10 then
+            foundTable = v
+            break
+        end
+    end
 end
 
-if capturedTable then
+if not foundTable then
+    for k, v in pairs(env) do
+        if type(v) == "table" and #v > 10 then
+            local stringCount = 0
+            for i, entry in ipairs(v) do
+                if type(entry) == "string" then
+                    stringCount = stringCount + 1
+                end
+            end
+            if stringCount > 10 then
+                foundTable = v
+                break
+            end
+        end
+    end
+end
+
+if foundTable then
     local encodedStrings = {}
-    for i, str in ipairs(capturedTable) do
+    for i, str in ipairs(foundTable) do
         encodedStrings[i] = str
     end
     return HttpService:JSONEncode({stringTable = encodedStrings})
+end
+
+if not success then
+    return HttpService:JSONEncode({error = "Runtime error: " .. tostring(result)})
 end
 
 return HttpService:JSONEncode({output = tostring(result)})
