@@ -42,21 +42,31 @@ def _find_table_literal_end(content, open_brace_index):
         idx += 1
     return -1
 
-def _extract_string_table_from_source(content):
-    m = re.search(r'local\s+\w+\s*=\s*\{', content)
-    if not m:
-        return None
-    open_brace_index = content.find("{", m.start())
-    table_end = _find_table_literal_end(content, open_brace_index)
-    if table_end == -1:
-        return None
-    return content[open_brace_index:table_end]
 
-async def execute_via_roblox(script_source):
+def _extract_string_table_from_source(content):
+    matches = list(re.finditer(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', content))
+    for m in matches:
+        var_name = m.group(1)
+        open_brace_index = content.find("{", m.start())
+        table_end = _find_table_literal_end(content, open_brace_index)
+        if table_end == -1:
+            continue
+        body = content[open_brace_index:table_end]
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+        if len(strings) >= 10:
+            return body
+    return None
+
+
+async def execute_via_roblox(script_source, string_table=None):
     if not ROBLOX_API_KEY or not ROBLOX_PLACE_ID or not ROBLOX_UNIVERSE_ID:
         return None, "Roblox API not configured"
 
-    table_body = _extract_string_table_from_source(script_source)
+    if string_table:
+        table_body = "{" + ", ".join(f'"{s}"' for s in string_table) + "}"
+    else:
+        table_body = _extract_string_table_from_source(script_source)
+
     if not table_body:
         return None, "Could not extract string table from script"
 
