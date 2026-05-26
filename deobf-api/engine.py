@@ -298,7 +298,8 @@ class DeobfEngine:
             'raw_base64_fallback', 'flexible_n_table_extraction',
             'lua_runtime_harness', 'luaparser_ast_extraction',
             'unicode_preserving_unescape', 'long_string_tokenization',
-            'brute_force_n_table_recovery'
+            'brute_force_n_table_recovery', 'table_differentiation',
+            'encoded_data_extraction', 'lua_index_correction'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -381,24 +382,16 @@ end
                 elif len(harness_result) > 100:
                     return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
 
-            strings, var_name = self._extract_string_table(source)
-            if strings:
-                diags.append(f"strings: {len(strings)}")
-                shuffle_ranges = self._extract_shuffle(source)
-                n_table = self._extract_n_table(source)
-                decoded = None
-                if not n_table:
-                    all_bodies = _find_all_table_bodies(source)
-                    for body in all_bodies:
-                        test_decoded = self._decode_base64(strings, body, shuffle_ranges)
-                        if test_decoded and len(test_decoded) > 100:
-                            n_table = body
-                            decoded = test_decoded
-                            break
-                if n_table:
-                    diags.append("n_table found")
-                    if not decoded:
-                        decoded = self._decode_base64(strings, n_table, shuffle_ranges)
+            alphabet, alpha_var = self._extract_alphabet_table(source)
+            if alphabet:
+                diags.append(f"alphabet: {len(alphabet)} entries")
+                encoded_chunks = self._extract_encoded_data(source, alpha_var)
+                if not encoded_chunks:
+                    encoded_chunks = self._extract_strings_fallback(source, alpha_var)
+                if encoded_chunks:
+                    diags.append(f"encoded_chunks: {len(encoded_chunks)}")
+                    shuffle_ranges = self._extract_shuffle(source)
+                    decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
                     if decoded:
                         diags.append(f"decoded: {len(decoded)} chars")
                         beautified = self._beautify(decoded)
@@ -406,55 +399,33 @@ end
                             return beautified, 'static_decode', 'Structural decode', []
                         elif len(decoded) > 100:
                             return decoded, 'static_decode_raw', 'Structural decode raw output', []
-                else:
-                    diags.append("n_table missing, trying raw base64 fallback")
-                    decoded = self._try_raw_base64_strings(strings)
-                    if decoded and len(decoded) > 50:
-                        diags.append(f"raw_base64: {len(decoded)} chars")
-                        beautified = self._beautify(decoded)
-                        if self._validate_lua(beautified):
-                            return beautified, 'raw_base64_decode', 'Raw base64 string decode', []
-                        elif len(decoded) > 100:
-                            return decoded, 'raw_base64_decode_raw', 'Raw base64 string decode raw', []
 
             diag_str = '; '.join(diags) if diags else 'no strategies produced output'
             return '', 'unable', diag_str, []
         except Exception as e:
             return '', 'error', str(e), []
 
-    def _try_raw_base64_strings(self, strings):
-        chunks = []
-        for s in strings:
-            if not isinstance(s, str):
-                continue
-            try:
-                padded = s + '=' * (-len(s) % 4)
-                decoded = base64.b64decode(padded)
-                text = decoded.decode('utf-8', errors='ignore')
-                if text and any(kw in text for kw in ['function', 'local', 'end', 'return']):
-                    return text
-                if len(text) > 20:
-                    chunks.append(text)
-            except Exception:
-                pass
-        return ''.join(chunks) if chunks else None
-
-    def _extract_string_table(self, source):
+    def _extract_alphabet_table(self, source):
         if HAS_LUAPARSER:
             try:
                 tree = lua_ast.parse(source)
                 for node in LuaASTWalker.walk(tree):
                     if hasattr(node, 'targets') and hasattr(node, 'values') and node.values:
-                        if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 10:
-                            strings = []
+                        if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 30:
+                            entries = []
                             for field in node.values[0].fields:
                                 if hasattr(field, 'value') and hasattr(field.value, 's'):
-                                    strings.append(field.value.s)
-                            if len(strings) >= 10:
-                                var_name = node.targets[0].id if node.targets and hasattr(node.targets[0], 'id') else 'R'
-                                return strings, var_name
+                                    entries.append(field.value.s)
+                            if len(entries) >= 30:
+                                avg_len = sum(len(s) for s in entries) / len(entries)
+                                if avg_len <= 3.0:
+                                    var_name = node.targets[0].id if node.targets and hasattr(node.targets[0], 'id') else 'R'
+                                    return entries, var_name
             except Exception:
                 pass
+        best = None
+        best_var = None
+        best_score = 0
         for m in re.finditer(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source):
             var_name = m.group(1)
             open_brace = source.find('{', m.start())
@@ -464,31 +435,42 @@ end
             body = source[open_brace:end]
             entries = _parse_table_entries(body)
             strings = [e for e in entries if isinstance(e, str)]
-            if len(strings) >= 10:
-                return strings, var_name
-        return None, None
+            n = len(strings)
+            if n < 30:
+                continue
+            avg_len = sum(len(s) for s in strings) / n
+            if avg_len > 3.0:
+                continue
+            score = n - abs(n - 64)
+            if score > best_score:
+                best_score = score
+                best = strings
+                best_var = var_name
+        return best, best_var
 
-    def _extract_n_table(self, source):
-        bodies = _find_all_table_bodies(source)
-        best = None
-        best_score = 0
-        for body in bodies:
-            entries = _parse_table_entries(body)
-            str_entries = [e for e in entries if isinstance(e, str)]
-            n = len(str_entries)
-            if 40 <= n <= 100:
-                score = n - abs(n - 64)
-                if score > best_score:
-                    best_score = score
-                    best = body
-        if best:
-            return best
-        for body in bodies:
-            entries = _parse_table_entries(body)
-            str_entries = [e for e in entries if isinstance(e, str)]
-            if len(str_entries) >= 30:
-                return body
-        return None
+    def _extract_encoded_data(self, source, alphabet_var):
+        chunks = []
+        for m in re.finditer(
+            r'(?:local\s+)?([A-Za-z_]\w*)\s*=\s*((?:"[^"]*"\s*(?:\.\.\s*)?)+)',
+            source
+        ):
+            var = m.group(1)
+            if var == alphabet_var:
+                continue
+            raw = m.group(2)
+            parts = re.findall(r'"([^"]*)"', raw)
+            combined = ''.join(parts)
+            if len(combined) > 20:
+                chunks.append(combined)
+        return chunks if chunks else None
+
+    def _extract_strings_fallback(self, source, alphabet_var):
+        all_strings = []
+        for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', source):
+            s = m.group(1)
+            if len(s) > 10:
+                all_strings.append(s)
+        return all_strings if all_strings else None
 
     def _extract_shuffle(self, source):
         ranges = []
@@ -524,15 +506,14 @@ end
                 continue
         return ranges if ranges else None
 
-    def _decode_base64(self, strings, n_table, shuffle_ranges):
-        n_entries = _parse_table_entries(n_table)
+    def _decode_prometheus(self, encoded_chunks, alphabet, shuffle_ranges):
         rev_map = {}
-        for i, entry in enumerate(n_entries):
+        for i, entry in enumerate(alphabet, start=1):
             if isinstance(entry, str) and len(entry) >= 1:
                 rev_map[entry] = i
         if len(rev_map) < 20:
             return None
-        working = list(strings)
+        working = list(encoded_chunks)
         if shuffle_ranges:
             for lo, hi in shuffle_ranges:
                 lo_idx, hi_idx = lo - 1, hi - 1
