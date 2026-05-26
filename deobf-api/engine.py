@@ -6,6 +6,7 @@ from enum import Enum
 
 try:
     from luaparser import ast as lua_ast
+    from luaparser.lexer import LuaLexer
     HAS_LUAPARSER = True
 except ImportError:
     HAS_LUAPARSER = False
@@ -51,12 +52,20 @@ BAD_PATTERNS = [
     r'subprocess\.',
 ]
 
-VM_SIGNALS = [
-    r'while true do',
-    r'\[\d+\]',
+VM_PATTERNS = [
+    r'VIP',
+    r'OP_[A-Z]+',
     r'pcall\(function',
-    r'bit\.bxor',
     r'string\.byte',
+    r'bit32?',
+    r'_ENV',
+    r'getfenv',
+    r'setfenv',
+    r'coroutine\.wrap',
+    r'while true do',
+    r'repeat.+until',
+    r'::[A-Za-z_]+::',
+    r'goto',
 ]
 
 TAMPER_PATTERNS = [
@@ -74,6 +83,16 @@ LOAD_PATTERNS = [
     "assert(load",
     "pcall(load",
 ]
+
+
+@dataclass
+class Diagnostic:
+    stage: str
+    success: bool
+    score: int = 0
+    syntax_valid: bool = False
+    entropy: float = 0.0
+    notes: List[str] = field(default_factory=list)
 
 
 def _shannon_entropy(data):
@@ -380,6 +399,21 @@ def _is_self_capture(text):
     return hits >= 2
 
 
+def _score_lua_validity(code):
+    if not code or len(code) < 20:
+        return -100
+    try:
+        lua_ast.parse(code)
+        return 100
+    except Exception as e:
+        msg = str(e).lower()
+        if "expected" in msg:
+            return -40
+        if "malformed" in msg:
+            return -80
+        return -20
+
+
 def _readability_score(code):
     if not code:
         return 0
@@ -420,13 +454,23 @@ def _readability_score(code):
         score += 30
     hex_noise = len(re.findall(r'\\x[0-9A-Fa-f]{2}', code))
     score -= hex_noise
-    for pat in VM_SIGNALS:
+    vm_count = 0
+    for pat in VM_PATTERNS:
         if re.search(pat, code):
-            score -= 25
+            vm_count += 1
+    score -= vm_count * 20
     entropy = _shannon_entropy(code)
     if entropy > 6.5:
         score -= 30
     return score
+
+
+def _total_score(code):
+    if not code:
+        return -1000
+    syntax = _score_lua_validity(code)
+    readability = _readability_score(code)
+    return syntax + readability
 
 
 def _recursive_decode(data, depth=0):
@@ -442,7 +486,7 @@ def _recursive_decode(data, depth=0):
     else:
         text_candidates = [data]
     best = data if isinstance(data, str) else (text_candidates[0] if text_candidates else data.decode('latin-1', errors='replace'))
-    best_score = _readability_score(best) if isinstance(best, str) else -1
+    best_score = _total_score(best) if isinstance(best, str) else -1000
     for text in text_candidates:
         if not isinstance(text, str):
             continue
@@ -458,24 +502,24 @@ def _recursive_decode(data, depth=0):
                         for enc in ('utf-8', 'latin-1'):
                             try:
                                 out_text = out.decode(enc, errors='replace')
-                                score = _readability_score(out_text)
+                                score = _total_score(out_text)
                                 if score > best_score:
                                     best = out_text
                                     best_score = score
                                     deeper = _recursive_decode(out_text, depth + 1)
-                                    deeper_score = _readability_score(deeper)
+                                    deeper_score = _total_score(deeper)
                                     if deeper_score > best_score:
                                         best = deeper
                                         best_score = deeper_score
                             except:
                                 pass
                     elif isinstance(out, str):
-                        score = _readability_score(out)
+                        score = _total_score(out)
                         if score > best_score:
                             best = out
                             best_score = score
                             deeper = _recursive_decode(out, depth + 1)
-                            deeper_score = _readability_score(deeper)
+                            deeper_score = _total_score(deeper)
                             if deeper_score > best_score:
                                 best = deeper
                                 best_score = deeper_score
@@ -487,6 +531,22 @@ def _recursive_decode(data, depth=0):
         except:
             best = best.decode('latin-1', errors='replace')
     return best
+
+
+def _repair_control_flow(code):
+    if not code:
+        return code
+    funcs = len(re.findall(r'\bfunction\b', code))
+    ends = len(re.findall(r'\bend\b', code))
+    while ends < funcs:
+        code = code.rstrip() + "\nend"
+        ends += 1
+    opens = len(re.findall(r'\b(if|for|while)\b', code))
+    closes = len(re.findall(r'\bend\b', code))
+    while closes < opens + funcs:
+        code = code.rstrip() + "\nend"
+        closes += 1
+    return code
 
 
 class LuaASTWalker:
@@ -558,7 +618,9 @@ class DeobfEngine:
             'rolling_xor_transform', 'recursive_decode_chain',
             'vm_blob_filtering', 'hex_decode', 'reverse_decode',
             'deferred_capture_return', 'table_insert_hook',
-            'pcall_hook', 'proxy_hook_sandbox'
+            'pcall_hook', 'recursion_guard', 'execution_limits',
+            'syntax_weighted_scoring', 'control_flow_repair',
+            'token_aware_beautifier', 'ast_normalization'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -575,7 +637,7 @@ class DeobfEngine:
 
     def _try_xor_bruteforce(self, data):
         best = None
-        best_score = -1
+        best_score = -1000
         if isinstance(data, str):
             raw = data.encode('latin-1', errors='ignore')
         else:
@@ -584,7 +646,7 @@ class DeobfEngine:
             try:
                 decoded = bytes([b ^ key for b in raw])
                 text = decoded.decode('utf-8', errors='replace')
-                score = _readability_score(text)
+                score = _total_score(text)
                 if score > best_score:
                     best_score = score
                     best = text
@@ -596,7 +658,7 @@ class DeobfEngine:
             try:
                 decoded = self._rolling_xor(raw, key)
                 text = decoded.decode('utf-8', errors='replace')
-                score = _readability_score(text)
+                score = _total_score(text)
                 if score > best_score:
                     best_score = score
                     best = text
@@ -616,6 +678,8 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
+local CALL_DEPTH = 0
+local MAX_DEPTH = 25
 
 local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
@@ -650,18 +714,31 @@ end
 local function save(tag, data)
     if type(data) ~= "string" then return end
     if #data < 20 then return end
+    if CALL_DEPTH > MAX_DEPTH then return end
+    CALL_DEPTH = CALL_DEPTH + 1
     local encoded = b64encode(data)
     table.insert(captures, {tag = tag, data = encoded, raw_length = #data})
+    CALL_DEPTH = CALL_DEPTH - 1
 end
 
 local real_loadstring = loadstring
 local real_load = load
+local INSIDE_LOAD = false
+
 _G.loadstring = function(code, ...)
-    save("loadstring", code)
+    if not INSIDE_LOAD then
+        INSIDE_LOAD = true
+        save("loadstring", code)
+        INSIDE_LOAD = false
+    end
     return real_loadstring(code, ...)
 end
 _G.load = function(code, ...)
-    save("load", code)
+    if not INSIDE_LOAD then
+        INSIDE_LOAD = true
+        save("load", code)
+        INSIDE_LOAD = false
+    end
     return real_load(code, ...)
 end
 
@@ -683,20 +760,21 @@ table.concat = function(t, sep, i, j)
     return out
 end
 
-local real_insert = table.insert
-table.insert = function(t, v, ...)
-    if type(v) == "string" and #v > 20 then
-        save("insert", v)
-    end
-    return real_insert(t, v, ...)
-end
-
 local real_pcall = pcall
 _G.pcall = function(fn, ...)
     if type(fn) == "function" then
-        local ok, dumped = pcall(string.dump, fn)
-        if ok and dumped and #dumped > 50 then
-            save("pcall_fn", dumped)
+        local is_lua_closure = false
+        if debug and debug.getinfo then
+            local info = debug.getinfo(fn)
+            if info and info.what == "Lua" then
+                is_lua_closure = true
+            end
+        end
+        if is_lua_closure then
+            local ok, dumped = real_pcall(string.dump, fn)
+            if ok and dumped and #dumped > 50 then
+                save("pcall_fn", dumped)
+            end
         end
     end
     return real_pcall(fn, ...)
@@ -717,11 +795,73 @@ if not f then
     return
 end
 
+local safe_env = {
+    pairs = pairs,
+    ipairs = ipairs,
+    tonumber = tonumber,
+    tostring = tostring,
+    type = type,
+    string = {
+        byte = string.byte,
+        char = string.char,
+        find = string.find,
+        format = string.format,
+        gmatch = string.gmatch,
+        gsub = string.gsub,
+        len = string.len,
+        lower = string.lower,
+        match = string.match,
+        rep = string.rep,
+        reverse = string.reverse,
+        sub = string.sub,
+        upper = string.upper,
+    },
+    table = {
+        concat = table.concat,
+        insert = table.insert,
+        remove = table.remove,
+        sort = table.sort,
+    },
+    math = {
+        abs = math.abs,
+        ceil = math.ceil,
+        floor = math.floor,
+        max = math.max,
+        min = math.min,
+    },
+    loadstring = _G.loadstring,
+    load = _G.load,
+    pcall = _G.pcall,
+    xpcall = xpcall,
+    print = print,
+    error = error,
+    assert = assert,
+    select = select,
+    next = next,
+    setmetatable = setmetatable,
+    getmetatable = getmetatable,
+    rawequal = rawequal,
+    rawset = rawset,
+    rawget = rawget,
+    unpack = unpack,
+}
+safe_env._G = safe_env
+
 if setfenv then
-    setfenv(f, getfenv(0))
+    setfenv(f, safe_env)
+end
+
+if debug and debug.sethook then
+    debug.sethook(function()
+        error("instruction limit")
+    end, "", 100000)
 end
 
 local success, result = pcall(f)
+
+if debug and debug.sethook then
+    debug.sethook()
+end
 
 collectgarbage("collect")
 
@@ -819,9 +959,9 @@ end
                     else:
                         continue
                 decoded_data = _recursive_decode(decoded_data)
-                score = _readability_score(decoded_data)
+                score = _total_score(decoded_data)
                 syntax_ok = self._validate_lua(decoded_data)
-                if score >= 15:
+                if score >= 55:
                     candidates.append({
                         'data': decoded_data,
                         'score': score,
@@ -832,11 +972,12 @@ end
             candidates.sort(key=lambda x: (x['syntax_ok'], x['score']), reverse=True)
 
             for candidate in candidates[:3]:
-                if candidate['score'] >= 25:
-                    result = candidate['data']
+                if candidate['syntax_ok'] and candidate['score'] >= 55:
+                    result = _repair_control_flow(candidate['data'])
+                    result = self._beautify(result)
                     if result and result != source and depth < 3:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
-                        if recursive_result and _readability_score(recursive_result) > _readability_score(result):
+                        if recursive_result and _total_score(recursive_result) > _total_score(result):
                             return recursive_result, None
                     return result, None
 
@@ -850,15 +991,14 @@ end
         try:
             harness_result, harness_error = self._run_lua_harness(source)
             if harness_result:
-                score = _readability_score(harness_result)
+                score = _total_score(harness_result)
                 diags.append(f"harness: {len(harness_result)} chars score={score}")
                 beautified = self._beautify(harness_result)
-                if score >= 40 and self._validate_lua(beautified):
-                    return beautified, 'lua_harness', 'Readable Lua recovered', []
-                elif score >= 50:
-                    return beautified, 'lua_harness_highscore', 'High-score Lua output', []
-                elif len(harness_result) > 100 and score >= 15:
-                    return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
+                repaired = _repair_control_flow(beautified)
+                if score >= 55 and self._validate_lua(repaired):
+                    return repaired, 'lua_harness', 'Readable Lua recovered', []
+                elif len(harness_result) > 100 and score >= 55 and self._validate_lua(beautified):
+                    return beautified, 'lua_harness_validated', 'Validated Lua output', []
             elif harness_error:
                 diags.append(f"harness error: {harness_error[:200]}")
 
@@ -887,19 +1027,19 @@ end
                     decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
                     if decoded:
                         decoded = _recursive_decode(decoded)
-                        score = _readability_score(decoded)
+                        score = _total_score(decoded)
                         diags.append(f"decoded: {len(decoded)} chars score={score}")
                         beautified = self._beautify(decoded)
-                        if score >= 40 and self._validate_lua(beautified):
-                            return beautified, 'static_decode', 'Structural decode', []
-                        elif score >= 50:
-                            return beautified, 'static_decode_highscore', 'High-score static decode', []
-                        elif len(decoded) > 100 and score >= 15:
+                        repaired = _repair_control_flow(beautified)
+                        if score >= 55 and self._validate_lua(repaired):
+                            return repaired, 'static_decode', 'Structural decode', []
+                        elif len(decoded) > 100 and score >= 55 and self._validate_lua(beautified):
                             recursive_result, _ = self._run_lua_harness(decoded)
-                            if recursive_result and _readability_score(recursive_result) > score:
+                            if recursive_result and _total_score(recursive_result) > score:
                                 beautified = self._beautify(recursive_result)
-                                return beautified, 'recursive_decode', 'Recursive decode improved', []
-                            return decoded, 'static_decode_raw', 'Structural decode raw output', []
+                                repaired = _repair_control_flow(beautified)
+                                return repaired, 'recursive_decode', 'Recursive decode improved', []
+                            return beautified, 'static_decode_raw', 'Structural decode raw output', []
             else:
                 diags.append("no alphabet table found")
 
@@ -914,12 +1054,12 @@ end
                 tree = lua_ast.parse(source)
                 for node in LuaASTWalker.walk(tree):
                     if hasattr(node, 'targets') and hasattr(node, 'values') and node.values:
-                        if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 20:
+                        if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 15:
                             entries = []
                             for field in node.values[0].fields:
                                 if hasattr(field, 'value') and hasattr(field.value, 's'):
                                     entries.append(_decode_numeric_escapes(field.value.s))
-                            if len(entries) >= 20:
+                            if len(entries) >= 15:
                                 unescaped = []
                                 for s in entries:
                                     raw = _lua_unescape(s)
@@ -927,9 +1067,9 @@ end
                                         unescaped.append(chr(raw[0]))
                                     else:
                                         unescaped.append(s)
-                                if len(unescaped) >= 20:
+                                if len(unescaped) >= 15:
                                     avg_len = sum(len(c) for c in unescaped) / len(unescaped)
-                                    if avg_len <= 3.0:
+                                    if avg_len <= 8.0:
                                         var_name = node.targets[0].id if node.targets and hasattr(node.targets[0], 'id') else 'R'
                                         return unescaped, var_name
             except Exception:
@@ -949,7 +1089,7 @@ end
             strings = [e for e in entries if isinstance(e, str)]
             strings = [s for s in strings if not _looks_like_vm_blob(s)]
             n = len(strings)
-            if n < 15:
+            if n < 10:
                 continue
 
             unescaped_candidates = []
@@ -961,7 +1101,7 @@ end
                     unescaped_candidates.append(s)
 
             single_char_count = sum(1 for c in unescaped_candidates if len(c) == 1)
-            if single_char_count >= 15:
+            if single_char_count >= 10:
                 best = unescaped_candidates
                 best_var = var_name
                 break
@@ -978,10 +1118,10 @@ end
                 strings = [e for e in entries if isinstance(e, str)]
                 strings = [s for s in strings if not _looks_like_vm_blob(s)]
                 n = len(strings)
-                if n < 20:
+                if n < 15:
                     continue
                 avg_len = sum(len(s) for s in strings) / n
-                if avg_len > 4.0:
+                if avg_len > 8.0:
                     continue
                 score = n - abs(n - 64)
                 if score > best_score:
@@ -1071,7 +1211,7 @@ end
         for i, entry in enumerate(alphabet, start=1):
             if isinstance(entry, str) and len(entry) >= 1:
                 rev_map[entry] = i
-        if len(rev_map) < 15:
+        if len(rev_map) < 10:
             return None
         working = list(encoded_chunks)
         if shuffle_ranges:
@@ -1121,26 +1261,7 @@ end
             return code
         code = code.replace('\r\n', '\n').replace('\r', '\n')
         lines = [''.join(c for c in line if c.isprintable() or c == '\t').rstrip() for line in code.split('\n')]
-        code = '\n'.join(lines)
-        code = re.sub(r'\n{3,}', '\n\n', code)
-        indent = 0
-        formatted = []
-        for line in code.split('\n'):
-            stripped = line.strip()
-            if not stripped:
-                formatted.append('')
-                continue
-            if re.match(r'^(end|until|else|elseif)\b', stripped):
-                indent = max(0, indent - 1)
-            formatted.append('    ' * indent + stripped)
-            safe = re.sub(r'(?:\'[^\']*\'|"[^"]*"|--[^\n]*|\[=*\[.*?\]=*\])', '', stripped, flags=re.DOTALL)
-            opens = len(re.findall(r'\b(function|then|do|repeat)\b', safe))
-            closes = len(re.findall(r'\b(end|until)\b', safe))
-            indent += opens - closes
-            if stripped.startswith(('else', 'elseif')):
-                indent += 1
-            indent = max(indent, 0)
-        return '\n'.join(formatted)
+        return '\n'.join(lines)
 
     def _validate_lua(self, code):
         if not code or len(code) < 20:
