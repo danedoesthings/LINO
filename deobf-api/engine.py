@@ -297,7 +297,8 @@ class DeobfEngine:
             'custom_base64_decode', 'shuffle_range_recovery',
             'raw_base64_fallback', 'flexible_n_table_extraction',
             'lua_runtime_harness', 'luaparser_ast_extraction',
-            'unicode_preserving_unescape', 'long_string_tokenization'
+            'unicode_preserving_unescape', 'long_string_tokenization',
+            'brute_force_n_table_recovery'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -383,11 +384,21 @@ end
             strings, var_name = self._extract_string_table(source)
             if strings:
                 diags.append(f"strings: {len(strings)}")
+                shuffle_ranges = self._extract_shuffle(source)
                 n_table = self._extract_n_table(source)
+                decoded = None
+                if not n_table:
+                    all_bodies = _find_all_table_bodies(source)
+                    for body in all_bodies:
+                        test_decoded = self._decode_base64(strings, body, shuffle_ranges)
+                        if test_decoded and len(test_decoded) > 100:
+                            n_table = body
+                            decoded = test_decoded
+                            break
                 if n_table:
                     diags.append("n_table found")
-                    shuffle_ranges = self._extract_shuffle(source)
-                    decoded = self._decode_base64(strings, n_table, shuffle_ranges)
+                    if not decoded:
+                        decoded = self._decode_base64(strings, n_table, shuffle_ranges)
                     if decoded:
                         diags.append(f"decoded: {len(decoded)} chars")
                         beautified = self._beautify(decoded)
@@ -465,12 +476,19 @@ end
             entries = _parse_table_entries(body)
             str_entries = [e for e in entries if isinstance(e, str)]
             n = len(str_entries)
-            if 50 <= n <= 80:
+            if 40 <= n <= 100:
                 score = n - abs(n - 64)
                 if score > best_score:
                     best_score = score
                     best = body
-        return best
+        if best:
+            return best
+        for body in bodies:
+            entries = _parse_table_entries(body)
+            str_entries = [e for e in entries if isinstance(e, str)]
+            if len(str_entries) >= 30:
+                return body
+        return None
 
     def _extract_shuffle(self, source):
         ranges = []
@@ -490,6 +508,20 @@ end
                     ranges.append((start_val, end_val))
             except:
                 continue
+        for m in re.finditer(r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\w+\s*\)\s*do', source):
+            try:
+                body_start = source.find('do', m.end())
+                if body_start == -1:
+                    continue
+                end_pos = source.find('end', body_start)
+                if end_pos == -1:
+                    continue
+                inner = source[body_start+2:end_pos]
+                swaps = re.findall(r'\w+\[\w+\]\s*=\s*\w+\[\w+\]', inner)
+                if len(swaps) >= 1:
+                    ranges.append((1, len(swaps) * 2))
+            except:
+                continue
         return ranges if ranges else None
 
     def _decode_base64(self, strings, n_table, shuffle_ranges):
@@ -498,7 +530,7 @@ end
         for i, entry in enumerate(n_entries):
             if isinstance(entry, str) and len(entry) >= 1:
                 rev_map[entry] = i
-        if len(rev_map) < 30:
+        if len(rev_map) < 20:
             return None
         working = list(strings)
         if shuffle_ranges:
