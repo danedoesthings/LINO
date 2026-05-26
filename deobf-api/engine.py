@@ -67,6 +67,25 @@ LOAD_PATTERNS = [
 ]
 
 
+def _is_probably_text(data):
+    if not data:
+        return False
+    if isinstance(data, str):
+        data = data.encode('latin-1', errors='ignore')
+    if len(data) < 50:
+        return False
+    if data[:4] == b'\x1bLua':
+        return False
+    printable = sum(1 for b in data if 32 <= b <= 126 or b in (9, 10, 13))
+    ratio = printable / len(data)
+    if ratio < 0.70:
+        return False
+    null_bytes = data.count(b'\x00')
+    if null_bytes > len(data) * 0.10:
+        return False
+    return True
+
+
 def _find_balanced_end(content, open_brace_index):
     depth = 0
     quote = None
@@ -295,6 +314,14 @@ def _is_self_capture(text):
     return hits >= 2
 
 
+def _vm_penalty(code):
+    penalty = 0
+    for pat in VM_SIGNALS:
+        if re.search(pat, code):
+            penalty += 25
+    return penalty
+
+
 def _readability_score(code):
     if not code:
         return 0
@@ -329,12 +356,7 @@ def _readability_score(code):
         score += 40
     hex_noise = len(re.findall(r'\\x[0-9A-Fa-f]{2}', code))
     score -= hex_noise
-    vm_signal_count = 0
-    for pat in VM_SIGNALS:
-        if re.search(pat, code):
-            vm_signal_count += 1
-    if vm_signal_count >= 3:
-        score -= 30
+    score -= _vm_penalty(code)
     return score
 
 
@@ -388,24 +410,27 @@ class LuaASTWalker:
 class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
+        self.visited_hashes = set()
         self.capabilities = {
             'structural_parsing', 'balanced_brace_scanning',
             'custom_base64_decode', 'shuffle_range_recovery',
-            'raw_base64_fallback', 'flexible_alphabet_extraction',
             'lua_runtime_harness', 'luaparser_ast_extraction',
             'unicode_preserving_unescape', 'long_string_tokenization',
             'encoded_data_extraction', 'lua_index_correction',
             'table_diagnostics', 'escaped_alphabet_recovery',
-            'arithmetic_table_evaluation', 'harness_error_logging',
             'deep_runtime_hooks', 'readability_scoring',
             'recursive_execution', 'bytecode_interception',
-            'table_concat_hook', 'environment_deep_inspection',
-            'multi_candidate_scoring', 'unluac_integration',
             'self_capture_rejection', 'debug_hook_tracing',
             'sandboxed_execution', 'delayed_capture',
             'filtered_debug_hook', 'recursive_concat_fix',
             'roblox_stubs', 'vm_signal_detection',
-            'syntax_density_scoring', 'char_stream_accumulation'
+            'syntax_density_scoring', 'char_stream_accumulation',
+            'binary_safe_subprocess', 'base64_capture_encoding',
+            'vm_penalty_scoring', 'concat_cache_cap',
+            'binary_text_separation', 'instruction_limiter',
+            'memory_limiter', 'hash_recursion_prevention',
+            'binary_detection', 'xor_bruteforce_layer',
+            'multi_candidate_ranking'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -413,15 +438,64 @@ class DeobfEngine:
         return list(self.capabilities)
 
     def _run_lua_harness(self, source):
+        source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
+        if source_hash in self.visited_hashes:
+            return None, 'recursion detected'
+        self.visited_hashes.add(source_hash)
+
         harness = r'''
 local captures = {}
 local concat_cache = {}
 local char_cache = {}
+local instruction_count = 0
+
+local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+local function b64encode(data)
+    local result = {}
+    local padding = ""
+    for i = 1, #data, 3 do
+        local a, b, c = data:byte(i, i+2)
+        b = b or 0
+        c = c or 0
+        local n = a * 65536 + b * 256 + c
+        local c1 = math.floor(n / 262144) % 64
+        local c2 = math.floor(n / 4096) % 64
+        local c3 = math.floor(n / 64) % 64
+        local c4 = n % 64
+        table.insert(result, b64chars:sub(c1+1, c1+1))
+        table.insert(result, b64chars:sub(c2+1, c2+1))
+        if i + 1 > #data then
+            padding = "=="
+            break
+        end
+        table.insert(result, b64chars:sub(c3+1, c3+1))
+        if i + 2 > #data then
+            padding = "="
+            break
+        end
+        table.insert(result, b64chars:sub(c4+1, c4+1))
+    end
+    return table.concat(result) .. padding
+end
 
 local function save(tag, data)
     if type(data) ~= "string" then return end
     if #data < 20 then return end
-    table.insert(captures, {tag = tag, data = data})
+    local encoded = b64encode(data)
+    table.insert(captures, {tag = tag, data = encoded, raw_length = #data})
+end
+
+if debug and debug.sethook then
+    debug.sethook(function()
+        instruction_count = instruction_count + 1
+        if instruction_count > 100000 then
+            error("instruction limit")
+        end
+        if collectgarbage("count") > 50000 then
+            error("memory exceeded")
+        end
+    end, "", 1000)
 end
 
 local real_loadstring = loadstring
@@ -440,9 +514,8 @@ table.concat = function(tbl, sep, i, j)
     local result = real_concat(tbl, sep, i, j)
     if type(result) == "string" then
         table.insert(concat_cache, result)
-        local combined = real_concat(concat_cache)
-        if #combined > 500 then
-            save("concat_chain", combined)
+        if #concat_cache > 200 then
+            table.remove(concat_cache, 1)
         end
     end
     return result
@@ -455,21 +528,6 @@ if string.dump then
         save("bytecode", bc)
         return bc
     end
-end
-
-if debug and debug.sethook then
-    debug.sethook(function(event)
-        local info = debug.getinfo(2, "Slnfu")
-        if not info then return end
-        if info.what ~= "Lua" then return end
-        if info.short_src and info.short_src:find("tmp") then return end
-        if info.func then
-            local ok, dumped = pcall(string.dump, info.func)
-            if ok and dumped and #dumped > 50 then
-                save("hookdump", dumped)
-            end
-        end
-    end, "c")
 end
 
 local real_char = string.char
@@ -504,7 +562,13 @@ local safe_env = {
     assert = assert,
     select = select,
     next = next,
-    setmetatable = setmetatable,
+    setmetatable = function(t, mt)
+        if mt then
+            mt.__gc = nil
+            mt.__metatable = "locked"
+        end
+        return setmetatable(t, mt)
+    end,
     getmetatable = getmetatable,
     rawequal = rawequal,
     rawset = rawset,
@@ -512,8 +576,11 @@ local safe_env = {
     bit = bit,
     bit32 = bit32,
     utf8 = utf8,
-    coroutine = coroutine,
-    debug = debug,
+    coroutine = {
+        create = coroutine.create,
+        resume = coroutine.resume,
+        status = coroutine.status,
+    },
     os = {
         clock = os.clock,
         time = os.time,
@@ -525,7 +592,7 @@ local safe_env = {
     checkcaller = function() return false end,
     islclosure = function() return true end,
 }
-safe_env._G = safe_env
+safe_env._G = {}
 
 local f, err = loadfile("_SRCFILE_")
 if not f then
@@ -539,7 +606,11 @@ end
 
 local success, result = pcall(f)
 
-for _ = 1, 5000000 do end
+if debug and debug.sethook then
+    debug.sethook()
+end
+
+collectgarbage("collect")
 
 pcall(function()
     for k, v in pairs(_G) do
@@ -548,10 +619,6 @@ pcall(function()
         end
     end
 end)
-
-if debug and debug.sethook then
-    debug.sethook()
-end
 
 if #captures > 0 then
     for _, cap in ipairs(captures) do
@@ -583,14 +650,17 @@ print("ERR:NO_OUTPUT")
                 try:
                     result = subprocess.run(
                         [lua_bin, tmp_path],
-                        capture_output=True, text=True, timeout=30
+                        capture_output=True,
+                        timeout=30
                     )
-                    for line in result.stdout.splitlines():
+                    stdout = result.stdout.decode('latin-1', errors='replace')
+                    stderr = result.stderr.decode('latin-1', errors='replace')
+                    for line in stdout.splitlines():
                         if line.startswith('CAP:'):
                             captures.append(line[4:])
                         elif line.startswith('ERR:'):
                             errors.append(line[4:])
-                    for line in result.stderr.splitlines():
+                    for line in stderr.splitlines():
                         if line.strip():
                             errors.append(line.strip())
                     if captures:
@@ -614,30 +684,43 @@ print("ERR:NO_OUTPUT")
                 pass
 
         if captures:
-            best = None
-            best_score = -1
+            candidates = []
             for cap in captures:
                 if ':' in cap:
                     tag, data = cap.split(':', 1)
                 else:
                     tag, data = 'unknown', cap
-                if _is_self_capture(data):
+                try:
+                    decoded_data = base64.b64decode(data).decode('latin-1', errors='replace')
+                except Exception:
+                    decoded_data = data
+                if _is_self_capture(decoded_data):
                     continue
-                if '\x1bLua' in data or '\\27Lua' in repr(data):
+                if not _is_probably_text(decoded_data):
+                    continue
+                raw_check = decoded_data.encode('latin-1', errors='ignore')
+                if raw_check[:4] == b'\x1bLua' and self._java_available:
                     try:
-                        raw = data.encode('latin-1')
-                        if raw[:4] == b'\x1bLua' and self._java_available:
-                            dec, _ = self._run_unluac(raw)
-                            if dec:
-                                data = dec
+                        dec, _ = self._run_unluac(raw_check)
+                        if dec:
+                            decoded_data = dec
                     except:
                         pass
-                score = _readability_score(data)
-                if score > best_score:
-                    best = data
-                    best_score = score
-            if best:
-                current = best
+                score = _readability_score(decoded_data)
+                syntax_ok = self._validate_lua(decoded_data)
+                vm_pen = _vm_penalty(decoded_data)
+                candidates.append({
+                    'data': decoded_data,
+                    'score': score,
+                    'syntax_ok': syntax_ok,
+                    'vm_penalty': vm_pen,
+                    'tag': tag
+                })
+
+            candidates.sort(key=lambda x: (x['syntax_ok'], x['score'] - x['vm_penalty']), reverse=True)
+
+            for candidate in candidates[:5]:
+                current = candidate['data']
                 for _ in range(3):
                     should_recurse = False
                     for pat in LOAD_PATTERNS:
@@ -656,7 +739,11 @@ print("ERR:NO_OUTPUT")
                             break
                     else:
                         break
-                return current, None
+                if current and _is_probably_text(current) and not _is_self_capture(current):
+                    return current, None
+
+            if candidates:
+                return candidates[0]['data'], None
             return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
@@ -830,6 +917,27 @@ print("ERR:NO_OUTPUT")
 
         return chunks if chunks else None
 
+    def _try_xor_bruteforce(self, data):
+        best = None
+        best_score = -1
+        if isinstance(data, str):
+            raw = data.encode('latin-1', errors='ignore')
+        else:
+            raw = data
+        for key in range(1, 256):
+            try:
+                decoded = bytes([b ^ key for b in raw])
+                text = decoded.decode('utf-8', errors='replace')
+                score = _readability_score(text)
+                if score > best_score:
+                    best_score = score
+                    best = text
+            except:
+                continue
+        if best and best_score > 20:
+            return best
+        return None
+
     def _extract_strings_fallback(self, source, alphabet_var):
         all_strings = []
         for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', source):
@@ -916,7 +1024,11 @@ print("ERR:NO_OUTPUT")
                     return text
             except:
                 continue
-        return combined.decode('latin-1', errors='replace')
+        decoded = combined.decode('latin-1', errors='replace')
+        xor_result = self._try_xor_bruteforce(decoded)
+        if xor_result:
+            return xor_result
+        return decoded if len(decoded) > 50 else None
 
     def _beautify(self, code):
         if not code:
@@ -955,7 +1067,8 @@ print("ERR:NO_OUTPUT")
                 try:
                     result = subprocess.run(
                         [lua_bin, '-p', tmp_path],
-                        capture_output=True, text=True, timeout=10
+                        capture_output=True,
+                        timeout=10
                     )
                     if result.returncode == 0:
                         return True
@@ -990,15 +1103,27 @@ print("ERR:NO_OUTPUT")
             tmp.write(bytecode)
             tmp_path = tmp.name
         try:
-            r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, text=True, timeout=30)
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout, None
-            if r.stderr and 'version' in r.stderr.lower():
-                r2 = subprocess.run(['java', '-jar', self.unluac_path, tmp_path], capture_output=True, text=True, timeout=30)
-                if r2.returncode == 0 and r2.stdout.strip():
-                    return r2.stdout, None
-                return None, r2.stderr[:300]
-            return None, r.stderr[:200] if r.stderr else 'no output'
+            r = subprocess.run(
+                ['java', '-jar', self.unluac_path, '--rawstring', tmp_path],
+                capture_output=True,
+                timeout=30
+            )
+            stdout = r.stdout.decode('latin-1', errors='replace')
+            stderr = r.stderr.decode('latin-1', errors='replace')
+            if r.returncode == 0 and stdout.strip():
+                return stdout, None
+            if stderr and 'version' in stderr.lower():
+                r2 = subprocess.run(
+                    ['java', '-jar', self.unluac_path, tmp_path],
+                    capture_output=True,
+                    timeout=30
+                )
+                stdout2 = r2.stdout.decode('latin-1', errors='replace')
+                stderr2 = r2.stderr.decode('latin-1', errors='replace')
+                if r2.returncode == 0 and stdout2.strip():
+                    return stdout2, None
+                return None, stderr2[:300]
+            return None, stderr[:200] if stderr else 'no output'
         except subprocess.TimeoutExpired:
             return None, "timeout"
         except Exception as e:
