@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-RUN apt-get update && apt-get install -y default-jre-headless curl unzip git && \
+RUN apt-get update && apt-get install -y default-jre-headless curl unzip git lua5.1 && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -L https://github.com/lune-org/lune/releases/download/v0.8.0/lune-0.8.0-linux-x86_64.zip \
