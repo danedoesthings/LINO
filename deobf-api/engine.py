@@ -295,12 +295,12 @@ class DeobfEngine:
         self.capabilities = {
             'structural_parsing', 'balanced_brace_scanning',
             'custom_base64_decode', 'shuffle_range_recovery',
-            'raw_base64_fallback', 'flexible_n_table_extraction',
+            'raw_base64_fallback', 'flexible_alphabet_extraction',
             'lua_runtime_harness', 'luaparser_ast_extraction',
             'unicode_preserving_unescape', 'long_string_tokenization',
-            'brute_force_n_table_recovery', 'table_differentiation',
             'encoded_data_extraction', 'lua_index_correction',
-            'table_diagnostics'
+            'table_diagnostics', 'escaped_alphabet_recovery',
+            'arithmetic_table_evaluation'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -397,12 +397,10 @@ end
             else:
                 diags.append("no tables with 10+ strings found")
 
-            alphabet, alpha_var = self._extract_alphabet_table(source)
+            alphabet, alpha_var = self._extract_alphabet_enhanced(source)
             if alphabet:
                 diags.append(f"alphabet: {len(alphabet)} entries")
-                encoded_chunks = self._extract_encoded_data(source, alpha_var)
-                if not encoded_chunks:
-                    encoded_chunks = self._extract_strings_fallback(source, alpha_var)
+                encoded_chunks = self._extract_encoded_data_enhanced(source, alpha_var, bodies)
                 if encoded_chunks:
                     diags.append(f"encoded_chunks: {len(encoded_chunks)}")
                     shuffle_ranges = self._extract_shuffle(source)
@@ -422,7 +420,7 @@ end
         except Exception as e:
             return '', 'error', str(e), []
 
-    def _extract_alphabet_table(self, source):
+    def _extract_alphabet_enhanced(self, source):
         if HAS_LUAPARSER:
             try:
                 tree = lua_ast.parse(source)
@@ -434,12 +432,21 @@ end
                                 if hasattr(field, 'value') and hasattr(field.value, 's'):
                                     entries.append(field.value.s)
                             if len(entries) >= 30:
-                                avg_len = sum(len(s) for s in entries) / len(entries)
-                                if avg_len <= 3.0:
-                                    var_name = node.targets[0].id if node.targets and hasattr(node.targets[0], 'id') else 'R'
-                                    return entries, var_name
+                                unescaped = []
+                                for s in entries:
+                                    raw = _lua_unescape(s)
+                                    if len(raw) == 1:
+                                        unescaped.append(chr(raw[0]))
+                                    else:
+                                        unescaped.append(s)
+                                if len(unescaped) >= 30:
+                                    avg_len = sum(len(c) for c in unescaped) / len(unescaped)
+                                    if avg_len <= 2.0:
+                                        var_name = node.targets[0].id if node.targets and hasattr(node.targets[0], 'id') else 'R'
+                                        return unescaped, var_name
             except Exception:
                 pass
+
         best = None
         best_var = None
         best_score = 0
@@ -453,19 +460,48 @@ end
             entries = _parse_table_entries(body)
             strings = [e for e in entries if isinstance(e, str)]
             n = len(strings)
-            if n < 30:
+            if n < 20:
                 continue
-            avg_len = sum(len(s) for s in strings) / n
-            if avg_len > 3.0:
-                continue
-            score = n - abs(n - 64)
-            if score > best_score:
-                best_score = score
-                best = strings
+
+            unescaped_candidates = []
+            for s in strings:
+                raw = _lua_unescape(s)
+                if len(raw) == 1:
+                    unescaped_candidates.append(chr(raw[0]))
+                else:
+                    unescaped_candidates.append(s)
+
+            single_char_count = sum(1 for c in unescaped_candidates if len(c) == 1)
+            if single_char_count >= 20:
+                best = unescaped_candidates
                 best_var = var_name
+                break
+
+        if not best:
+            for m in re.finditer(r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', source):
+                var_name = m.group(1)
+                open_brace = source.find('{', m.start())
+                end = _find_balanced_end(source, open_brace)
+                if end == -1:
+                    continue
+                body = source[open_brace:end]
+                entries = _parse_table_entries(body)
+                strings = [e for e in entries if isinstance(e, str)]
+                n = len(strings)
+                if n < 30:
+                    continue
+                avg_len = sum(len(s) for s in strings) / n
+                if avg_len > 3.0:
+                    continue
+                score = n - abs(n - 64)
+                if score > best_score:
+                    best_score = score
+                    best = strings
+                    best_var = var_name
+
         return best, best_var
 
-    def _extract_encoded_data(self, source, alphabet_var):
+    def _extract_encoded_data_enhanced(self, source, alphabet_var, all_table_bodies):
         chunks = []
         for m in re.finditer(
             r'(?:local\s+)?([A-Za-z_]\w*)\s*=\s*((?:"[^"]*"\s*(?:\.\.\s*)?)+)',
@@ -479,6 +515,22 @@ end
             combined = ''.join(parts)
             if len(combined) > 20:
                 chunks.append(combined)
+
+        if not chunks:
+            for body in all_table_bodies:
+                entries = _parse_table_entries(body)
+                strings = [e for e in entries if isinstance(e, str)]
+                if len(strings) < 10:
+                    continue
+                sample = strings[0]
+                if len(sample) > 10 and '\\' in sample:
+                    for s in strings:
+                        raw = _lua_unescape(s)
+                        if raw and len(raw) > 0:
+                            chunks.append(raw.decode('latin-1', errors='replace'))
+                    if chunks:
+                        break
+
         return chunks if chunks else None
 
     def _extract_strings_fallback(self, source, alphabet_var):
@@ -540,7 +592,7 @@ end
         for s in working:
             if not isinstance(s, str):
                 continue
-            raw = _lua_unescape(s)
+            raw = _lua_unescape(s) if isinstance(s, str) and '\\' in s else s.encode('latin-1', errors='replace')
             if not raw:
                 continue
             buf, bits, out = 0, 0, bytearray()
