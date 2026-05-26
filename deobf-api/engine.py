@@ -23,6 +23,49 @@ LUA_KEYWORDS = {
     'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
 }
 
+REJECT_SIGNATURES = [
+    "class DeobfEngine",
+    "_run_lua_harness",
+    "LuaASTWalker",
+    "def _beautify",
+    "import os, re",
+    "UNLUAC_JAR_URL",
+]
+
+GOOD_PATTERNS = [
+    r'game:GetService',
+    r'workspace',
+    r'Instance\.new',
+    r'Vector3',
+    r'UDim2',
+    r'Enum\.',
+    r'Players',
+    r'LocalPlayer',
+]
+
+BAD_PATTERNS = [
+    r'import\s+os',
+    r'from\s+collections',
+    r'class\s+\w+',
+    r'def\s+\w+',
+    r'subprocess\.',
+]
+
+VM_SIGNALS = [
+    r'while true do',
+    r'\[\d+\]',
+    r'pcall\(function',
+    r'bit\.bxor',
+    r'string\.byte',
+]
+
+LOAD_PATTERNS = [
+    "loadstring",
+    "load(",
+    "assert(load",
+    "pcall(load",
+]
+
 
 def _find_balanced_end(content, open_brace_index):
     depth = 0
@@ -242,6 +285,59 @@ def _lua_unescape(s):
     return bytes(result)
 
 
+def _is_self_capture(text):
+    if not text:
+        return False
+    hits = 0
+    for sig in REJECT_SIGNATURES:
+        if sig in text:
+            hits += 1
+    return hits >= 2
+
+
+def _readability_score(code):
+    if not code:
+        return 0
+    score = 0
+    keywords = [
+        'function', 'local', 'return', 'if', 'then',
+        'game', 'workspace', 'Instance', 'Vector3',
+        'pairs', 'ipairs', 'for', 'while'
+    ]
+    for kw in keywords:
+        score += code.count(kw) * 2
+    identifiers = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', code)
+    if identifiers:
+        avg_ident_len = sum(len(x) for x in identifiers) / len(identifiers)
+        if avg_ident_len > 3:
+            score += 20
+    gibberish = re.findall(r'[A-Za-z0-9]{20,}', code)
+    score -= len(gibberish) * 5
+    entropy_chars = len(set(code))
+    score += min(entropy_chars, 30)
+    for pat in GOOD_PATTERNS:
+        if re.search(pat, code):
+            score += 25
+    for pat in BAD_PATTERNS:
+        if re.search(pat, code):
+            score -= 40
+    lua_structures = len(re.findall(
+        r'\b(function|if|then|end|for|while|local|return)\b',
+        code
+    ))
+    if lua_structures >= 6:
+        score += 40
+    hex_noise = len(re.findall(r'\\x[0-9A-Fa-f]{2}', code))
+    score -= hex_noise
+    vm_signal_count = 0
+    for pat in VM_SIGNALS:
+        if re.search(pat, code):
+            vm_signal_count += 1
+    if vm_signal_count >= 3:
+        score -= 30
+    return score
+
+
 class LuaASTWalker:
     @staticmethod
     def walk(node):
@@ -301,7 +397,15 @@ class DeobfEngine:
             'encoded_data_extraction', 'lua_index_correction',
             'table_diagnostics', 'escaped_alphabet_recovery',
             'arithmetic_table_evaluation', 'harness_error_logging',
-            'long_bracket_harness_fix'
+            'deep_runtime_hooks', 'readability_scoring',
+            'recursive_execution', 'bytecode_interception',
+            'table_concat_hook', 'environment_deep_inspection',
+            'multi_candidate_scoring', 'unluac_integration',
+            'self_capture_rejection', 'debug_hook_tracing',
+            'sandboxed_execution', 'delayed_capture',
+            'filtered_debug_hook', 'recursive_concat_fix',
+            'roblox_stubs', 'vm_signal_detection',
+            'syntax_density_scoring', 'char_stream_accumulation'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -310,56 +414,169 @@ class DeobfEngine:
 
     def _run_lua_harness(self, source):
         harness = r'''
-local captured = {}
-local orig_loadstring = loadstring
-_G.loadstring = function(code, name)
-    if type(code) == "string" then
-        table.insert(captured, code)
-    end
-    return orig_loadstring(code, name)
-end
-_G.load = _G.loadstring
+local captures = {}
+local concat_cache = {}
+local char_cache = {}
 
-local f, err = loadstring([=[_SRC_]=])
+local function save(tag, data)
+    if type(data) ~= "string" then return end
+    if #data < 20 then return end
+    table.insert(captures, {tag = tag, data = data})
+end
+
+local real_loadstring = loadstring
+local real_load = load
+_G.loadstring = function(code, ...)
+    save("loadstring", code)
+    return real_loadstring(code, ...)
+end
+_G.load = function(code, ...)
+    save("load", code)
+    return real_load(code, ...)
+end
+
+local real_concat = table.concat
+table.concat = function(tbl, sep, i, j)
+    local result = real_concat(tbl, sep, i, j)
+    if type(result) == "string" then
+        table.insert(concat_cache, result)
+        local combined = real_concat(concat_cache)
+        if #combined > 500 then
+            save("concat_chain", combined)
+        end
+    end
+    return result
+end
+
+if string.dump then
+    local real_dump = string.dump
+    string.dump = function(fn, ...)
+        local bc = real_dump(fn, ...)
+        save("bytecode", bc)
+        return bc
+    end
+end
+
+if debug and debug.sethook then
+    debug.sethook(function(event)
+        local info = debug.getinfo(2, "Slnfu")
+        if not info then return end
+        if info.what ~= "Lua" then return end
+        if info.short_src and info.short_src:find("tmp") then return end
+        if info.func then
+            local ok, dumped = pcall(string.dump, info.func)
+            if ok and dumped and #dumped > 50 then
+                save("hookdump", dumped)
+            end
+        end
+    end, "c")
+end
+
+local real_char = string.char
+string.char = function(...)
+    local s = real_char(...)
+    char_cache[#char_cache+1] = s
+    if #char_cache > 50 then
+        save("charstream", table.concat(char_cache))
+    end
+    if #s > 20 then
+        save("char", s)
+    end
+    return s
+end
+
+local safe_env = {
+    string = string,
+    table = table,
+    math = math,
+    pairs = pairs,
+    ipairs = ipairs,
+    tonumber = tonumber,
+    tostring = tostring,
+    type = type,
+    unpack = unpack,
+    loadstring = _G.loadstring,
+    load = _G.load,
+    pcall = pcall,
+    xpcall = xpcall,
+    print = print,
+    error = error,
+    assert = assert,
+    select = select,
+    next = next,
+    setmetatable = setmetatable,
+    getmetatable = getmetatable,
+    rawequal = rawequal,
+    rawset = rawset,
+    rawget = rawget,
+    bit = bit,
+    bit32 = bit32,
+    utf8 = utf8,
+    coroutine = coroutine,
+    debug = debug,
+    os = {
+        clock = os.clock,
+        time = os.time,
+    },
+    getgenv = function() return safe_env end,
+    getrenv = function() return safe_env end,
+    hookfunction = function(a, b) return a end,
+    newcclosure = function(f) return f end,
+    checkcaller = function() return false end,
+    islclosure = function() return true end,
+}
+safe_env._G = safe_env
+
+local f, err = loadfile("_SRCFILE_")
 if not f then
     print("ERR:COMPILE:" .. tostring(err))
     return
 end
 
+if setfenv then
+    setfenv(f, safe_env)
+end
+
 local success, result = pcall(f)
+
+for _ = 1, 5000000 do end
+
+pcall(function()
+    for k, v in pairs(_G) do
+        if type(v) == "string" and #v > 100 then
+            save("env_string", v)
+        end
+    end
+end)
+
+if debug and debug.sethook then
+    debug.sethook()
+end
+
+if #captures > 0 then
+    for _, cap in ipairs(captures) do
+        print("CAP:" .. cap.tag .. ":" .. cap.data)
+    end
+    return
+end
+
 if not success then
     print("ERR:RUNTIME:" .. tostring(result))
     return
 end
 
-if #captured > 0 then
-    for _, src in ipairs(captured) do
-        print("CAP:" .. src)
-    end
-    return
-end
-
-local kw = {"function", "local", "end", "if", "then", "else", "return", "for", "while"}
-for k, v in pairs(_G) do
-    if type(v) == "string" and #v > 50 then
-        local c = 0
-        for _, w in ipairs(kw) do
-            if string.find(v, w) then c = c + 1 end
-        end
-        if c >= 3 then
-            print("CAP:" .. v)
-            return
-        end
-    end
-end
-
 print("ERR:NO_OUTPUT")
 '''
-        harness = harness.replace('_SRC_', source)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as src_tmp:
+            src_tmp.write(source)
+            src_path = src_tmp.name
+
+        harness = harness.replace('_SRCFILE_', src_path)
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
             tmp.write(harness)
             tmp_path = tmp.name
-        captured = []
+
+        captures = []
         errors = []
         try:
             for lua_bin in ['lua5.1', 'lua']:
@@ -370,13 +587,13 @@ print("ERR:NO_OUTPUT")
                     )
                     for line in result.stdout.splitlines():
                         if line.startswith('CAP:'):
-                            captured.append(line[4:])
+                            captures.append(line[4:])
                         elif line.startswith('ERR:'):
                             errors.append(line[4:])
                     for line in result.stderr.splitlines():
                         if line.strip():
                             errors.append(line.strip())
-                    if captured:
+                    if captures:
                         break
                     if errors:
                         break
@@ -391,8 +608,56 @@ print("ERR:NO_OUTPUT")
                 os.unlink(tmp_path)
             except OSError:
                 pass
-        if captured:
-            return '\n'.join(captured), None
+            try:
+                os.unlink(src_path)
+            except OSError:
+                pass
+
+        if captures:
+            best = None
+            best_score = -1
+            for cap in captures:
+                if ':' in cap:
+                    tag, data = cap.split(':', 1)
+                else:
+                    tag, data = 'unknown', cap
+                if _is_self_capture(data):
+                    continue
+                if '\x1bLua' in data or '\\27Lua' in repr(data):
+                    try:
+                        raw = data.encode('latin-1')
+                        if raw[:4] == b'\x1bLua' and self._java_available:
+                            dec, _ = self._run_unluac(raw)
+                            if dec:
+                                data = dec
+                    except:
+                        pass
+                score = _readability_score(data)
+                if score > best_score:
+                    best = data
+                    best_score = score
+            if best:
+                current = best
+                for _ in range(3):
+                    should_recurse = False
+                    for pat in LOAD_PATTERNS:
+                        if pat in current:
+                            should_recurse = True
+                            break
+                    if should_recurse:
+                        nested_result, _ = self._run_lua_harness(current)
+                        if nested_result:
+                            nested_score = _readability_score(nested_result)
+                            if nested_score > _readability_score(current):
+                                current = nested_result
+                            else:
+                                break
+                        else:
+                            break
+                    else:
+                        break
+                return current, None
+            return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
     def process(self, source):
@@ -400,10 +665,13 @@ print("ERR:NO_OUTPUT")
         try:
             harness_result, harness_error = self._run_lua_harness(source)
             if harness_result:
-                diags.append(f"harness: {len(harness_result)} chars")
+                score = _readability_score(harness_result)
+                diags.append(f"harness: {len(harness_result)} chars score={score}")
                 beautified = self._beautify(harness_result)
-                if self._validate_lua(beautified):
-                    return beautified, 'lua_harness', 'Direct Lua execution', []
+                if score >= 45 and self._validate_lua(beautified):
+                    return beautified, 'lua_harness', 'Readable Lua recovered', []
+                elif score >= 60:
+                    return beautified, 'lua_harness_highscore', 'High-score Lua output', []
                 elif len(harness_result) > 100:
                     return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
             elif harness_error:
@@ -432,10 +700,13 @@ print("ERR:NO_OUTPUT")
                     shuffle_ranges = self._extract_shuffle(source)
                     decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
                     if decoded:
-                        diags.append(f"decoded: {len(decoded)} chars")
+                        score = _readability_score(decoded)
+                        diags.append(f"decoded: {len(decoded)} chars score={score}")
                         beautified = self._beautify(decoded)
-                        if self._validate_lua(beautified):
+                        if score >= 45 and self._validate_lua(beautified):
                             return beautified, 'static_decode', 'Structural decode', []
+                        elif score >= 60:
+                            return beautified, 'static_decode_highscore', 'High-score static decode', []
                         elif len(decoded) > 100:
                             return decoded, 'static_decode_raw', 'Structural decode raw output', []
             else:
@@ -705,3 +976,43 @@ print("ERR:NO_OUTPUT")
             except Exception:
                 pass
         return False
+
+    def _run_unluac(self, bytecode):
+        if not self._java_available:
+            return None, "no java"
+        if not os.path.isfile(self.unluac_path):
+            self._ensure_unluac_jar()
+        if not os.path.isfile(self.unluac_path):
+            return None, "no unluac.jar"
+        if bytecode[:4] != b'\x1bLua':
+            return None, "not lua bytecode"
+        with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
+            tmp.write(bytecode)
+            tmp_path = tmp.name
+        try:
+            r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout, None
+            if r.stderr and 'version' in r.stderr.lower():
+                r2 = subprocess.run(['java', '-jar', self.unluac_path, tmp_path], capture_output=True, text=True, timeout=30)
+                if r2.returncode == 0 and r2.stdout.strip():
+                    return r2.stdout, None
+                return None, r2.stderr[:300]
+            return None, r.stderr[:200] if r.stderr else 'no output'
+        except subprocess.TimeoutExpired:
+            return None, "timeout"
+        except Exception as e:
+            return None, str(e)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+
+    def _ensure_unluac_jar(self):
+        try:
+            os.makedirs(os.path.dirname(self.unluac_path), exist_ok=True)
+            urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
+        except:
+            pass
