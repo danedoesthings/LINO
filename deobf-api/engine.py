@@ -1,5 +1,5 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys
-from collections import OrderedDict, defaultdict, deque, namedtuple
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math
+from collections import OrderedDict, defaultdict, deque, namedtuple, Counter
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
 from enum import Enum
@@ -59,6 +59,19 @@ VM_SIGNALS = [
     r'string\.byte',
 ]
 
+TAMPER_PATTERNS = [
+    "__metatable",
+    "concat",
+    "match:",
+    "hookfunction",
+    "newcclosure",
+    "checkcaller",
+    "islclosure",
+    "debug",
+    "sethook",
+    "Tamper Detected",
+]
+
 LOAD_PATTERNS = [
     "loadstring",
     "load(",
@@ -67,21 +80,38 @@ LOAD_PATTERNS = [
 ]
 
 
+def _shannon_entropy(data):
+    if not data:
+        return 0
+    counts = Counter(data)
+    length = len(data)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
+
 def _is_probably_text(data):
     if not data:
         return False
     if isinstance(data, str):
-        data = data.encode('latin-1', errors='ignore')
-    if len(data) < 50:
+        raw = data.encode('latin-1', errors='ignore')
+    else:
+        raw = data
+    if len(raw) < 50:
         return False
-    if data[:4] == b'\x1bLua':
+    if raw[:4] == b'\x1bLua':
         return False
-    printable = sum(1 for b in data if 32 <= b <= 126 or b in (9, 10, 13))
-    ratio = printable / len(data)
+    printable = sum(1 for b in raw if 32 <= b <= 126 or b in (9, 10, 13))
+    ratio = printable / len(raw)
     if ratio < 0.70:
         return False
-    null_bytes = data.count(b'\x00')
-    if null_bytes > len(data) * 0.10:
+    null_bytes = raw.count(b'\x00')
+    if null_bytes > len(raw) * 0.10:
+        return False
+    if isinstance(data, str):
+        long_tokens = re.findall(r'[A-Za-z0-9]{25,}', data)
+        if len(long_tokens) > 10:
+            return False
+    entropy = _shannon_entropy(raw)
+    if entropy > 5.8:
         return False
     return True
 
@@ -314,49 +344,54 @@ def _is_self_capture(text):
     return hits >= 2
 
 
-def _vm_penalty(code):
-    penalty = 0
-    for pat in VM_SIGNALS:
-        if re.search(pat, code):
-            penalty += 25
-    return penalty
-
-
 def _readability_score(code):
     if not code:
         return 0
     score = 0
-    keywords = [
-        'function', 'local', 'return', 'if', 'then',
-        'game', 'workspace', 'Instance', 'Vector3',
-        'pairs', 'ipairs', 'for', 'while'
-    ]
-    for kw in keywords:
-        score += code.count(kw) * 2
+    funcs = len(re.findall(r'\bfunction\b', code))
+    ends = len(re.findall(r'\bend\b', code))
+    if abs(funcs - ends) <= 2 and funcs > 0:
+        score += 30
+    locals_count = len(re.findall(r'\blocal\b', code))
+    if locals_count > 0:
+        score += locals_count * 3
     identifiers = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', code)
     if identifiers:
         avg_ident_len = sum(len(x) for x in identifiers) / len(identifiers)
         if avg_ident_len > 3:
             score += 20
+        words = re.findall(r'[A-Za-z_]{4,}', code)
+        if words:
+            unique_ratio = len(set(words)) / max(len(words), 1)
+            if unique_ratio < 0.25:
+                score -= 40
     gibberish = re.findall(r'[A-Za-z0-9]{20,}', code)
-    score -= len(gibberish) * 5
-    entropy_chars = len(set(code))
-    score += min(entropy_chars, 30)
+    score -= len(gibberish) * 8
     for pat in GOOD_PATTERNS:
         if re.search(pat, code):
-            score += 25
+            score += 35
     for pat in BAD_PATTERNS:
         if re.search(pat, code):
-            score -= 40
+            score -= 50
+    for pat in TAMPER_PATTERNS:
+        if pat in code:
+            score -= 80
     lua_structures = len(re.findall(
         r'\b(function|if|then|end|for|while|local|return)\b',
         code
     ))
     if lua_structures >= 6:
-        score += 40
+        score += 50
     hex_noise = len(re.findall(r'\\x[0-9A-Fa-f]{2}', code))
-    score -= hex_noise
-    score -= _vm_penalty(code)
+    score -= hex_noise * 2
+    for pat in VM_SIGNALS:
+        if re.search(pat, code):
+            score -= 30
+    entropy = _shannon_entropy(code)
+    if entropy > 5.5:
+        score -= 50
+    if entropy < 3.0:
+        score -= 20
     return score
 
 
@@ -418,19 +453,14 @@ class DeobfEngine:
             'unicode_preserving_unescape', 'long_string_tokenization',
             'encoded_data_extraction', 'lua_index_correction',
             'table_diagnostics', 'escaped_alphabet_recovery',
-            'deep_runtime_hooks', 'readability_scoring',
-            'recursive_execution', 'bytecode_interception',
-            'self_capture_rejection', 'debug_hook_tracing',
-            'sandboxed_execution', 'delayed_capture',
-            'filtered_debug_hook', 'recursive_concat_fix',
-            'roblox_stubs', 'vm_signal_detection',
-            'syntax_density_scoring', 'char_stream_accumulation',
+            'readability_scoring', 'bytecode_interception',
+            'self_capture_rejection', 'sandboxed_execution',
             'binary_safe_subprocess', 'base64_capture_encoding',
-            'vm_penalty_scoring', 'concat_cache_cap',
-            'binary_text_separation', 'instruction_limiter',
-            'memory_limiter', 'hash_recursion_prevention',
+            'vm_signal_detection', 'concat_cache_cap',
+            'binary_text_separation', 'hash_recursion_prevention',
             'binary_detection', 'xor_bruteforce_layer',
-            'multi_candidate_ranking'
+            'multi_candidate_ranking', 'entropy_scoring',
+            'tamper_pattern_detection', 'minimal_hook_sandbox'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -445,9 +475,6 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
-local concat_cache = {}
-local char_cache = {}
-local instruction_count = 0
 
 local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
@@ -486,18 +513,6 @@ local function save(tag, data)
     table.insert(captures, {tag = tag, data = encoded, raw_length = #data})
 end
 
-if debug and debug.sethook then
-    debug.sethook(function()
-        instruction_count = instruction_count + 1
-        if instruction_count > 100000 then
-            error("instruction limit")
-        end
-        if collectgarbage("count") > 50000 then
-            error("memory exceeded")
-        end
-    end, "", 1000)
-end
-
 local real_loadstring = loadstring
 local real_load = load
 _G.loadstring = function(code, ...)
@@ -509,18 +524,6 @@ _G.load = function(code, ...)
     return real_load(code, ...)
 end
 
-local real_concat = table.concat
-table.concat = function(tbl, sep, i, j)
-    local result = real_concat(tbl, sep, i, j)
-    if type(result) == "string" then
-        table.insert(concat_cache, result)
-        if #concat_cache > 200 then
-            table.remove(concat_cache, 1)
-        end
-    end
-    return result
-end
-
 if string.dump then
     local real_dump = string.dump
     string.dump = function(fn, ...)
@@ -530,70 +533,6 @@ if string.dump then
     end
 end
 
-local real_char = string.char
-string.char = function(...)
-    local s = real_char(...)
-    char_cache[#char_cache+1] = s
-    if #char_cache > 50 then
-        save("charstream", table.concat(char_cache))
-    end
-    if #s > 20 then
-        save("char", s)
-    end
-    return s
-end
-
-local safe_env = {
-    string = string,
-    table = table,
-    math = math,
-    pairs = pairs,
-    ipairs = ipairs,
-    tonumber = tonumber,
-    tostring = tostring,
-    type = type,
-    unpack = unpack,
-    loadstring = _G.loadstring,
-    load = _G.load,
-    pcall = pcall,
-    xpcall = xpcall,
-    print = print,
-    error = error,
-    assert = assert,
-    select = select,
-    next = next,
-    setmetatable = function(t, mt)
-        if mt then
-            mt.__gc = nil
-            mt.__metatable = "locked"
-        end
-        return setmetatable(t, mt)
-    end,
-    getmetatable = getmetatable,
-    rawequal = rawequal,
-    rawset = rawset,
-    rawget = rawget,
-    bit = bit,
-    bit32 = bit32,
-    utf8 = utf8,
-    coroutine = {
-        create = coroutine.create,
-        resume = coroutine.resume,
-        status = coroutine.status,
-    },
-    os = {
-        clock = os.clock,
-        time = os.time,
-    },
-    getgenv = function() return safe_env end,
-    getrenv = function() return safe_env end,
-    hookfunction = function(a, b) return a end,
-    newcclosure = function(f) return f end,
-    checkcaller = function() return false end,
-    islclosure = function() return true end,
-}
-safe_env._G = {}
-
 local f, err = loadfile("_SRCFILE_")
 if not f then
     print("ERR:COMPILE:" .. tostring(err))
@@ -601,14 +540,10 @@ if not f then
 end
 
 if setfenv then
-    setfenv(f, safe_env)
+    setfenv(f, getfenv(0))
 end
 
 local success, result = pcall(f)
-
-if debug and debug.sethook then
-    debug.sethook()
-end
 
 collectgarbage("collect")
 
@@ -708,39 +643,18 @@ print("ERR:NO_OUTPUT")
                         pass
                 score = _readability_score(decoded_data)
                 syntax_ok = self._validate_lua(decoded_data)
-                vm_pen = _vm_penalty(decoded_data)
                 candidates.append({
                     'data': decoded_data,
                     'score': score,
                     'syntax_ok': syntax_ok,
-                    'vm_penalty': vm_pen,
                     'tag': tag
                 })
 
-            candidates.sort(key=lambda x: (x['syntax_ok'], x['score'] - x['vm_penalty']), reverse=True)
+            candidates.sort(key=lambda x: (x['syntax_ok'], x['score']), reverse=True)
 
-            for candidate in candidates[:5]:
-                current = candidate['data']
-                for _ in range(3):
-                    should_recurse = False
-                    for pat in LOAD_PATTERNS:
-                        if pat in current:
-                            should_recurse = True
-                            break
-                    if should_recurse:
-                        nested_result, _ = self._run_lua_harness(current)
-                        if nested_result:
-                            nested_score = _readability_score(nested_result)
-                            if nested_score > _readability_score(current):
-                                current = nested_result
-                            else:
-                                break
-                        else:
-                            break
-                    else:
-                        break
-                if current and _is_probably_text(current) and not _is_self_capture(current):
-                    return current, None
+            for candidate in candidates[:3]:
+                if candidate['syntax_ok'] and candidate['score'] >= 30:
+                    return candidate['data'], None
 
             if candidates:
                 return candidates[0]['data'], None
