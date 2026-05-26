@@ -222,23 +222,23 @@ def _lua_unescape(s):
             else:
                 result.append(ord(nc) if ord(nc) < 256 else 0x3F)
                 i += 2
-        else:
-            b = ord(s[i])
-            if b <= 0x7F:
-                result.append(b)
-            elif b <= 0x7FF:
-                result.append(0xC0 | (b >> 6))
-                result.append(0x80 | (b & 0x3F))
-            elif b <= 0xFFFF:
-                result.append(0xE0 | (b >> 12))
-                result.append(0x80 | ((b >> 6) & 0x3F))
-                result.append(0x80 | (b & 0x3F))
             else:
-                result.append(0xF0 | (b >> 18))
-                result.append(0x80 | ((b >> 12) & 0x3F))
-                result.append(0x80 | ((b >> 6) & 0x3F))
-                result.append(0x80 | (b & 0x3F))
-            i += 1
+                b = ord(s[i])
+                if b <= 0x7F:
+                    result.append(b)
+                elif b <= 0x7FF:
+                    result.append(0xC0 | (b >> 6))
+                    result.append(0x80 | (b & 0x3F))
+                elif b <= 0xFFFF:
+                    result.append(0xE0 | (b >> 12))
+                    result.append(0x80 | ((b >> 6) & 0x3F))
+                    result.append(0x80 | (b & 0x3F))
+                else:
+                    result.append(0xF0 | (b >> 18))
+                    result.append(0x80 | ((b >> 12) & 0x3F))
+                    result.append(0x80 | ((b >> 6) & 0x3F))
+                    result.append(0x80 | (b & 0x3F))
+                i += 1
     return bytes(result)
 
 
@@ -299,7 +299,8 @@ class DeobfEngine:
             'lua_runtime_harness', 'luaparser_ast_extraction',
             'unicode_preserving_unescape', 'long_string_tokenization',
             'brute_force_n_table_recovery', 'table_differentiation',
-            'encoded_data_extraction', 'lua_index_correction'
+            'encoded_data_extraction', 'lua_index_correction',
+            'table_diagnostics'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -382,6 +383,20 @@ end
                 elif len(harness_result) > 100:
                     return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
 
+            bodies = _find_all_table_bodies(source)
+            table_stats = []
+            for body in bodies:
+                entries = _parse_table_entries(body)
+                strings = [e for e in entries if isinstance(e, str)]
+                if len(strings) >= 10:
+                    avg = sum(len(s) for s in strings) / len(strings)
+                    table_stats.append(f"n={len(strings)} avg={avg:.1f} sample={strings[0][:20]}")
+
+            if table_stats:
+                diags.append("tables: " + "; ".join(table_stats[:5]))
+            else:
+                diags.append("no tables with 10+ strings found")
+
             alphabet, alpha_var = self._extract_alphabet_table(source)
             if alphabet:
                 diags.append(f"alphabet: {len(alphabet)} entries")
@@ -399,6 +414,8 @@ end
                             return beautified, 'static_decode', 'Structural decode', []
                         elif len(decoded) > 100:
                             return decoded, 'static_decode_raw', 'Structural decode raw output', []
+            else:
+                diags.append("no alphabet table found")
 
             diag_str = '; '.join(diags) if diags else 'no strategies produced output'
             return '', 'unable', diag_str, []
