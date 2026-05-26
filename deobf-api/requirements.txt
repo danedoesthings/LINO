@@ -1,10 +1,5 @@
 flask
 gunicorn
 httpx
-luaparser
 discord.py
-lupa
-uncompyle6
-colorama
-regex
-pygments
+luaparser
