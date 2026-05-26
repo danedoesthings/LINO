@@ -300,7 +300,7 @@ class DeobfEngine:
             'unicode_preserving_unescape', 'long_string_tokenization',
             'encoded_data_extraction', 'lua_index_correction',
             'table_diagnostics', 'escaped_alphabet_recovery',
-            'arithmetic_table_evaluation'
+            'arithmetic_table_evaluation', 'harness_error_logging'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -320,7 +320,16 @@ end
 _G.load = _G.loadstring
 
 local f, err = loadstring([[_SRC_]])
-if f then pcall(f) end
+if not f then
+    print("ERR:COMPILE:" .. tostring(err))
+    return
+end
+
+local success, result = pcall(f)
+if not success then
+    print("ERR:RUNTIME:" .. tostring(result))
+    return
+end
 
 if #captured > 0 then
     for _, src in ipairs(captured) do
@@ -342,12 +351,15 @@ for k, v in pairs(_G) do
         end
     end
 end
+
+print("ERR:NO_OUTPUT")
 '''
         harness = harness.replace('_SRC_', source.replace('\\', '\\\\').replace('"', '\\"'))
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
             tmp.write(harness)
             tmp_path = tmp.name
         captured = []
+        errors = []
         try:
             for lua_bin in ['lua5.1', 'lua']:
                 try:
@@ -358,23 +370,34 @@ end
                     for line in result.stdout.splitlines():
                         if line.startswith('CAP:'):
                             captured.append(line[4:])
+                        elif line.startswith('ERR:'):
+                            errors.append(line[4:])
+                    for line in result.stderr.splitlines():
+                        if line.strip():
+                            errors.append(line.strip())
                     if captured:
                         break
+                    if errors:
+                        break
                 except FileNotFoundError:
+                    errors.append(f"{lua_bin} not found")
                     continue
                 except subprocess.TimeoutExpired:
+                    errors.append("timeout")
                     break
         finally:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
-        return '\n'.join(captured) if captured else None
+        if captured:
+            return '\n'.join(captured), None
+        return None, '; '.join(errors) if errors else 'no output'
 
     def process(self, source):
         diags = []
         try:
-            harness_result = self._run_lua_harness(source)
+            harness_result, harness_error = self._run_lua_harness(source)
             if harness_result:
                 diags.append(f"harness: {len(harness_result)} chars")
                 beautified = self._beautify(harness_result)
@@ -382,6 +405,8 @@ end
                     return beautified, 'lua_harness', 'Direct Lua execution', []
                 elif len(harness_result) > 100:
                     return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
+            elif harness_error:
+                diags.append(f"harness error: {harness_error[:200]}")
 
             bodies = _find_all_table_bodies(source)
             table_stats = []
