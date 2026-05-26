@@ -116,6 +116,22 @@ def _is_probably_text(data):
     return True
 
 
+def _decode_numeric_escapes(s):
+    return re.sub(
+        r'\\(\d{1,3})',
+        lambda m: chr(int(m.group(1)) % 256),
+        s
+    )
+
+
+def _looks_like_vm_blob(s):
+    if re.search(r'[A-Z]=\d+', s):
+        return True
+    if re.search(r'\d{5,}', s):
+        return True
+    return False
+
+
 def _find_balanced_end(content, open_brace_index):
     depth = 0
     quote = None
@@ -243,18 +259,19 @@ def _parse_table_entries(body):
     for e in entries:
         if not e:
             continue
-        if (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
-            parsed.append(e[1:-1])
-        elif e.startswith('[[') and e.endswith(']]'):
-            parsed.append(e[2:-2])
-        elif e.lstrip('-').isdigit():
-            parsed.append(int(e))
-        elif e.replace('.', '', 1).lstrip('-').isdigit():
-            parsed.append(float(e))
-        elif e in ('true', 'false', 'nil'):
-            parsed.append(e)
+        decoded = _decode_numeric_escapes(e)
+        if (decoded.startswith('"') and decoded.endswith('"')) or (decoded.startswith("'") and decoded.endswith("'")):
+            parsed.append(decoded[1:-1])
+        elif decoded.startswith('[[') and decoded.endswith(']]'):
+            parsed.append(decoded[2:-2])
+        elif decoded.lstrip('-').isdigit():
+            parsed.append(int(decoded))
+        elif decoded.replace('.', '', 1).lstrip('-').isdigit():
+            parsed.append(float(decoded))
+        elif decoded in ('true', 'false', 'nil'):
+            parsed.append(decoded)
         else:
-            parsed.append(e)
+            parsed.append(decoded)
     return parsed
 
 
@@ -452,7 +469,7 @@ class DeobfEngine:
             'lua_runtime_harness', 'luaparser_ast_extraction',
             'unicode_preserving_unescape', 'long_string_tokenization',
             'encoded_data_extraction', 'lua_index_correction',
-            'table_diagnostics', 'escaped_alphabet_recovery',
+            'table_diagnostics', 'numeric_escape_recovery',
             'readability_scoring', 'bytecode_interception',
             'self_capture_rejection', 'sandboxed_execution',
             'binary_safe_subprocess', 'base64_capture_encoding',
@@ -460,14 +477,59 @@ class DeobfEngine:
             'binary_text_separation', 'hash_recursion_prevention',
             'binary_detection', 'xor_bruteforce_layer',
             'multi_candidate_ranking', 'entropy_scoring',
-            'tamper_pattern_detection', 'minimal_hook_sandbox'
+            'tamper_pattern_detection', 'minimal_hook_sandbox',
+            'runtime_alphabet_recovery', 'rolling_xor_transform',
+            'recursive_decode_chain', 'vm_blob_filtering'
         }
         self._java_available = shutil.which('java') is not None
 
     def get_capabilities(self):
         return list(self.capabilities)
 
-    def _run_lua_harness(self, source):
+    def _rolling_xor(self, data, key):
+        out = bytearray()
+        k = key
+        for b in data:
+            out.append(b ^ k)
+            k = (k * 13 + 17) & 0xFF
+        return bytes(out)
+
+    def _try_xor_bruteforce(self, data):
+        best = None
+        best_score = -1
+        if isinstance(data, str):
+            raw = data.encode('latin-1', errors='ignore')
+        else:
+            raw = data
+        for key in range(1, 256):
+            try:
+                decoded = bytes([b ^ key for b in raw])
+                text = decoded.decode('utf-8', errors='replace')
+                score = _readability_score(text)
+                if score > best_score:
+                    best_score = score
+                    best = text
+            except:
+                continue
+        if best and best_score > 20:
+            return best
+        for key in range(1, 256):
+            try:
+                decoded = self._rolling_xor(raw, key)
+                text = decoded.decode('utf-8', errors='replace')
+                score = _readability_score(text)
+                if score > best_score:
+                    best_score = score
+                    best = text
+            except:
+                continue
+        if best and best_score > 25:
+            return best
+        return None
+
+    def _run_lua_harness(self, source, depth=0):
+        if depth > 3:
+            return None, 'max recursion depth'
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
         if source_hash in self.visited_hashes:
             return None, 'recursion detected'
@@ -522,6 +584,24 @@ end
 _G.load = function(code, ...)
     save("load", code)
     return real_load(code, ...)
+end
+
+local real_char = string.char
+string.char = function(...)
+    local out = real_char(...)
+    if #out > 40 then
+        save("string_char", out)
+    end
+    return out
+end
+
+local real_concat = table.concat
+table.concat = function(t, sep, i, j)
+    local out = real_concat(t, sep, i, j)
+    if type(out) == "string" and #out > 80 then
+        save("concat", out)
+    end
+    return out
 end
 
 if string.dump then
@@ -643,18 +723,24 @@ print("ERR:NO_OUTPUT")
                         pass
                 score = _readability_score(decoded_data)
                 syntax_ok = self._validate_lua(decoded_data)
-                candidates.append({
-                    'data': decoded_data,
-                    'score': score,
-                    'syntax_ok': syntax_ok,
-                    'tag': tag
-                })
+                if score >= 20:
+                    candidates.append({
+                        'data': decoded_data,
+                        'score': score,
+                        'syntax_ok': syntax_ok,
+                        'tag': tag
+                    })
 
             candidates.sort(key=lambda x: (x['syntax_ok'], x['score']), reverse=True)
 
             for candidate in candidates[:3]:
-                if candidate['syntax_ok'] and candidate['score'] >= 30:
-                    return candidate['data'], None
+                if candidate['score'] >= 30:
+                    result = candidate['data']
+                    if result and result != source and depth < 3:
+                        recursive_result, _ = self._run_lua_harness(result, depth + 1)
+                        if recursive_result and _readability_score(recursive_result) > _readability_score(result):
+                            return recursive_result, None
+                    return result, None
 
             if candidates:
                 return candidates[0]['data'], None
@@ -673,7 +759,7 @@ print("ERR:NO_OUTPUT")
                     return beautified, 'lua_harness', 'Readable Lua recovered', []
                 elif score >= 60:
                     return beautified, 'lua_harness_highscore', 'High-score Lua output', []
-                elif len(harness_result) > 100:
+                elif len(harness_result) > 100 and score >= 20:
                     return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
             elif harness_error:
                 diags.append(f"harness error: {harness_error[:200]}")
@@ -683,6 +769,7 @@ print("ERR:NO_OUTPUT")
             for body in bodies:
                 entries = _parse_table_entries(body)
                 strings = [e for e in entries if isinstance(e, str)]
+                strings = [s for s in strings if not _looks_like_vm_blob(s)]
                 if len(strings) >= 10:
                     avg = sum(len(s) for s in strings) / len(strings)
                     table_stats.append(f"n={len(strings)} avg={avg:.1f} sample={strings[0][:20]}")
@@ -708,7 +795,11 @@ print("ERR:NO_OUTPUT")
                             return beautified, 'static_decode', 'Structural decode', []
                         elif score >= 60:
                             return beautified, 'static_decode_highscore', 'High-score static decode', []
-                        elif len(decoded) > 100:
+                        elif len(decoded) > 100 and score >= 20:
+                            recursive_result, _ = self._run_lua_harness(decoded)
+                            if recursive_result and _readability_score(recursive_result) > score:
+                                beautified = self._beautify(recursive_result)
+                                return beautified, 'recursive_decode', 'Recursive decode improved', []
                             return decoded, 'static_decode_raw', 'Structural decode raw output', []
             else:
                 diags.append("no alphabet table found")
@@ -728,7 +819,7 @@ print("ERR:NO_OUTPUT")
                             entries = []
                             for field in node.values[0].fields:
                                 if hasattr(field, 'value') and hasattr(field.value, 's'):
-                                    entries.append(field.value.s)
+                                    entries.append(_decode_numeric_escapes(field.value.s))
                             if len(entries) >= 30:
                                 unescaped = []
                                 for s in entries:
@@ -757,6 +848,7 @@ print("ERR:NO_OUTPUT")
             body = source[open_brace:end]
             entries = _parse_table_entries(body)
             strings = [e for e in entries if isinstance(e, str)]
+            strings = [s for s in strings if not _looks_like_vm_blob(s)]
             n = len(strings)
             if n < 20:
                 continue
@@ -785,6 +877,7 @@ print("ERR:NO_OUTPUT")
                 body = source[open_brace:end]
                 entries = _parse_table_entries(body)
                 strings = [e for e in entries if isinstance(e, str)]
+                strings = [s for s in strings if not _looks_like_vm_blob(s)]
                 n = len(strings)
                 if n < 30:
                     continue
@@ -812,12 +905,13 @@ print("ERR:NO_OUTPUT")
             parts = re.findall(r'"([^"]*)"', raw)
             combined = ''.join(parts)
             if len(combined) > 20:
-                chunks.append(combined)
+                chunks.append(_decode_numeric_escapes(combined))
 
         if not chunks:
             for body in all_table_bodies:
                 entries = _parse_table_entries(body)
                 strings = [e for e in entries if isinstance(e, str)]
+                strings = [s for s in strings if not _looks_like_vm_blob(s)]
                 if len(strings) < 10:
                     continue
                 sample = strings[0]
@@ -831,33 +925,12 @@ print("ERR:NO_OUTPUT")
 
         return chunks if chunks else None
 
-    def _try_xor_bruteforce(self, data):
-        best = None
-        best_score = -1
-        if isinstance(data, str):
-            raw = data.encode('latin-1', errors='ignore')
-        else:
-            raw = data
-        for key in range(1, 256):
-            try:
-                decoded = bytes([b ^ key for b in raw])
-                text = decoded.decode('utf-8', errors='replace')
-                score = _readability_score(text)
-                if score > best_score:
-                    best_score = score
-                    best = text
-            except:
-                continue
-        if best and best_score > 20:
-            return best
-        return None
-
     def _extract_strings_fallback(self, source, alphabet_var):
         all_strings = []
         for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', source):
             s = m.group(1)
             if len(s) > 10:
-                all_strings.append(s)
+                all_strings.append(_decode_numeric_escapes(s))
         return all_strings if all_strings else None
 
     def _extract_shuffle(self, source):
