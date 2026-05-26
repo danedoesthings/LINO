@@ -387,15 +387,86 @@ class DeobfEngine:
             'merge_point_detection', 'loop_detection', 'phi_placement',
             'normalized_execution_backend', 'execution_result_abstraction',
             'deterministic_sandbox', 'luaparser_integration',
-            'sha256_verification', 'long_string_tokenization'
+            'sha256_verification', 'long_string_tokenization',
+            'lua_runtime_harness'
         }
         self._java_available = shutil.which('java') is not None
 
     def get_capabilities(self):
         return list(self.capabilities)
 
+    def _run_lua_harness(self, source):
+        harness = r'''
+local captured = {}
+local orig_loadstring = loadstring
+_G.loadstring = function(code, name)
+    if type(code) == "string" then
+        table.insert(captured, code)
+    end
+    return orig_loadstring(code, name)
+end
+_G.load = _G.loadstring
+
+local f, err = loadstring([[_SRC_]])
+if f then pcall(f) end
+
+if #captured > 0 then
+    for _, src in ipairs(captured) do
+        print("CAP:" .. src)
+    end
+    return
+end
+
+local kw = {"function", "local", "end", "if", "then", "else", "return", "for", "while"}
+for k, v in pairs(_G) do
+    if type(v) == "string" and #v > 50 then
+        local c = 0
+        for _, w in ipairs(kw) do
+            if string.find(v, w) then c = c + 1 end
+        end
+        if c >= 3 then
+            print("CAP:" .. v)
+            return
+        end
+    end
+end
+'''
+        harness = harness.replace('_SRC_', source.replace('\\', '\\\\').replace('"', '\\"'))
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
+            tmp.write(harness)
+            tmp_path = tmp.name
+        captured = []
+        try:
+            for lua_bin in ['lua5.1', 'lua']:
+                try:
+                    result = subprocess.run(
+                        [lua_bin, tmp_path],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    for line in result.stdout.splitlines():
+                        if line.startswith('CAP:'):
+                            captured.append(line[4:])
+                    if captured:
+                        break
+                except FileNotFoundError:
+                    continue
+                except subprocess.TimeoutExpired:
+                    break
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return '\n'.join(captured) if captured else None
+
     def process(self, source):
         try:
+            harness_result = self._run_lua_harness(source)
+            if harness_result:
+                beautified = self._beautify(harness_result)
+                if self._validate_lua(beautified):
+                    return beautified, 'lua_harness', 'Direct Lua execution', []
+
             fingerprint = self.fingerprinter.analyze(source)
             strings, var_name = self._extract_string_table(source)
             if strings and var_name:
