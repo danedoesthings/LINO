@@ -135,12 +135,10 @@ class CFGBuilder:
         self.block_map.clear()
         self.label_to_block.clear()
         self.next_block_id = 0
-
         label_map: Dict[str, int] = {}
         for instr in instructions:
             if instr.opcode == IROpcode.LABEL:
                 label_map[instr.args[0]] = instr.pc
-
         pc_to_block: Dict[int, CFGBlock] = {}
         leader_pcs: Set[int] = {0}
         for instr in instructions:
@@ -162,21 +160,17 @@ class CFGBuilder:
                         leader_pcs.add(label_map[target])
                     elif isinstance(target, int):
                         leader_pcs.add(target)
-
         sorted_leaders = sorted(leader_pcs)
-        pc_range_map: Dict[int, Tuple[int, int]] = {}
         for i, leader_pc in enumerate(sorted_leaders):
             start = leader_pc
             end = sorted_leaders[i + 1] - 1 if i + 1 < len(sorted_leaders) else len(instructions) - 1
             block = self._new_block()
-            pc_range_map[block.block_id] = (start, end)
             for pc in range(start, end + 1):
                 block.instructions.append(instructions[pc])
                 pc_to_block[pc] = block
             if start == 0:
                 self.blocks[0] = block
                 self.block_map[0] = block
-
         for block in self.blocks:
             if not block.instructions:
                 continue
@@ -208,11 +202,9 @@ class CFGBuilder:
                 fallthrough_pc = last.pc + 1
                 if fallthrough_pc in pc_to_block:
                     self._connect(block, pc_to_block[fallthrough_pc])
-
         for block in self.blocks:
             if len(block.predecessors) >= 2:
                 block.is_merge_point = True
-
         self._compute_loops()
         return self.blocks, self.block_map
 
@@ -388,7 +380,8 @@ class DeobfEngine:
             'normalized_execution_backend', 'execution_result_abstraction',
             'deterministic_sandbox', 'luaparser_integration',
             'sha256_verification', 'long_string_tokenization',
-            'lua_runtime_harness', 'raw_output_fallback'
+            'lua_runtime_harness', 'raw_output_fallback',
+            'flexible_n_table_extraction', 'raw_base64_fallback'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -473,7 +466,7 @@ end
 
             fingerprint = self.fingerprinter.analyze(source)
             strings, var_name = self._extract_string_table(source)
-            if strings and var_name:
+            if strings:
                 diags.append(f"strings: {len(strings)}")
                 n_table = self._extract_n_table(source)
                 if n_table:
@@ -487,6 +480,16 @@ end
                             return beautified, 'static_decode', 'Structural decode', []
                         elif len(decoded) > 100:
                             return decoded, 'static_decode_raw', 'Structural decode raw output', []
+                else:
+                    diags.append("n_table missing, trying raw base64 fallback")
+                    decoded = self._try_raw_base64_strings(strings)
+                    if decoded and len(decoded) > 50:
+                        diags.append(f"raw_base64: {len(decoded)} chars")
+                        beautified = self._beautify(decoded)
+                        if self._validate_lua(beautified):
+                            return beautified, 'raw_base64_decode', 'Raw base64 string decode', []
+                        elif len(decoded) > 100:
+                            return decoded, 'raw_base64_decode_raw', 'Raw base64 string decode raw', []
 
             sandbox_result, sandbox_errors = self._run_sandbox(source)
             if sandbox_result:
@@ -510,6 +513,23 @@ end
             return '', 'unable', diag_str, []
         except Exception as e:
             return '', 'error', str(e), []
+
+    def _try_raw_base64_strings(self, strings):
+        chunks = []
+        for s in strings:
+            if not isinstance(s, str):
+                continue
+            try:
+                padded = s + '=' * (-len(s) % 4)
+                decoded = base64.b64decode(padded)
+                text = decoded.decode('utf-8', errors='ignore')
+                if text and any(kw in text for kw in ['function', 'local', 'end', 'return']):
+                    return text
+                if len(text) > 20:
+                    chunks.append(text)
+            except Exception:
+                pass
+        return ''.join(chunks) if chunks else None
 
     def _extract_string_table(self, source):
         if HAS_LUAPARSER:
@@ -542,12 +562,18 @@ end
 
     def _extract_n_table(self, source):
         bodies = self._find_all_table_bodies(source)
+        best = None
+        best_score = 0
         for body in bodies:
             entries = self._parse_table_entries(body)
             str_entries = [e for e in entries if isinstance(e, str)]
-            if 60 <= len(str_entries) <= 70:
-                return body
-        return None
+            n = len(str_entries)
+            if 50 <= n <= 80:
+                score = n - abs(n - 64)
+                if score > best_score:
+                    best_score = score
+                    best = body
+        return best
 
     def _extract_shuffle(self, source):
         ranges = []
