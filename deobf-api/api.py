@@ -6,8 +6,6 @@ import hashlib
 import re
 from flask import Flask, request, jsonify
 from engine import DeobfEngine
-from errors import LinoError
-from diagnostics import validate_lua, detect_bad_patterns, log_structured_error
 
 try:
     from luaparser import ast as lua_ast
@@ -25,7 +23,7 @@ engine = DeobfEngine()
 def health():
     return jsonify({
         'ok': True,
-        'version': '6.0.0',
+        'version': '7.0.0',
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
@@ -40,10 +38,8 @@ def debug():
         with open(engine_path, 'r') as f:
             code = f.read()
         sha = hashlib.sha256(code.encode()).hexdigest()[:16]
-        has_extractor = '_extract_wearedevs_bytecode' in code
         return jsonify({
             'engine_sha': sha,
-            'has_wearedevs_extractor': has_extractor,
             'engine_size': len(code)
         })
     except Exception as e:
@@ -72,32 +68,10 @@ def deobf():
 
     try:
         result, obf_type, diag, trace = engine.process(source_str)
-    except LinoError as e:
-        log_structured_error(e)
-        return jsonify({
-            'error': 'Deobfuscation failed with diagnostic',
-            'diagnostic': e.to_dict()
-        }), 422
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Deobf failed: {e}\n{tb}")
         return jsonify({'error': str(e), 'traceback': tb[:4000]}), 500
-
-    valid_result = validate_lua(result) if result else {"valid": False, "error": "No output"}
-    is_valid = valid_result.get("valid", False)
-    validation_error = valid_result.get("error", "")
-
-    if not is_valid and result and len(result) > 50:
-        log.warning(f"Output failed validation: {validation_error}")
-        return jsonify({
-            'result': result[:5000],
-            'detected': obf_type,
-            'diagnostic': diag,
-            'trace': trace,
-            'result_length': len(result) if result else 0,
-            'warning': f'Output may contain syntax errors: {validation_error}',
-            'bad_patterns': detect_bad_patterns(result)
-        })
 
     return jsonify({
         'result': result,
