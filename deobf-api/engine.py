@@ -388,7 +388,7 @@ class DeobfEngine:
             'normalized_execution_backend', 'execution_result_abstraction',
             'deterministic_sandbox', 'luaparser_integration',
             'sha256_verification', 'long_string_tokenization',
-            'lua_runtime_harness'
+            'lua_runtime_harness', 'raw_output_fallback'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -460,38 +460,54 @@ end
         return '\n'.join(captured) if captured else None
 
     def process(self, source):
+        diags = []
         try:
             harness_result = self._run_lua_harness(source)
             if harness_result:
+                diags.append(f"harness: {len(harness_result)} chars")
                 beautified = self._beautify(harness_result)
                 if self._validate_lua(beautified):
                     return beautified, 'lua_harness', 'Direct Lua execution', []
+                elif len(harness_result) > 100:
+                    return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
 
             fingerprint = self.fingerprinter.analyze(source)
             strings, var_name = self._extract_string_table(source)
             if strings and var_name:
+                diags.append(f"strings: {len(strings)}")
                 n_table = self._extract_n_table(source)
                 if n_table:
+                    diags.append("n_table found")
                     shuffle_ranges = self._extract_shuffle(source)
                     decoded = self._decode_base64(strings, n_table, shuffle_ranges)
                     if decoded:
+                        diags.append(f"decoded: {len(decoded)} chars")
                         beautified = self._beautify(decoded)
                         if self._validate_lua(beautified):
                             return beautified, 'static_decode', 'Structural decode', []
+                        elif len(decoded) > 100:
+                            return decoded, 'static_decode_raw', 'Structural decode raw output', []
 
-            result = self.executor.execute_sandbox(source)
-            if result.value:
-                beautified = self._beautify(str(result.value))
+            sandbox_result, sandbox_errors = self._run_sandbox(source)
+            if sandbox_result:
+                diags.append(f"sandbox: {len(sandbox_result)} chars")
+                beautified = self._beautify(sandbox_result)
                 if self._validate_lua(beautified):
                     return beautified, 'runtime_execution', 'Sandbox execution', []
+                elif len(sandbox_result) > 100:
+                    return sandbox_result, 'sandbox_raw', 'Sandbox raw output', []
 
-            result = self.executor.execute_roblox(source)
-            if result.value:
-                beautified = self._beautify(str(result.value))
+            roblox_result, roblox_error = self._try_roblox_exec(source)
+            if roblox_result:
+                diags.append(f"roblox: {len(roblox_result)} chars")
+                beautified = self._beautify(roblox_result)
                 if self._validate_lua(beautified):
                     return beautified, 'roblox_execution', 'Roblox execution', []
+                elif len(roblox_result) > 100:
+                    return roblox_result, 'roblox_raw', 'Roblox raw output', []
 
-            return '', 'unable', 'All strategies exhausted', []
+            diag_str = '; '.join(diags) if diags else 'no strategies produced output'
+            return '', 'unable', diag_str, []
         except Exception as e:
             return '', 'error', str(e), []
 
