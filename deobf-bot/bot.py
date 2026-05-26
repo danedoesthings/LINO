@@ -31,6 +31,11 @@ SUCCESS_METHODS = (
     'recursive_sandbox_capture', 'recursive_lune_capture',
     'lifter_unluac', 'lifter_source',
     'roblox_execution', 'semantic_full', 'semantic_raw',
+    'static_decode', 'static_decode_raw',
+    'lua_harness', 'lua_harness_raw',
+    'raw_base64_decode', 'raw_base64_decode_raw',
+    'runtime_execution', 'sandbox_raw',
+    'roblox_raw', 'prometheus_execution',
 )
 
 async def call_api(source_b64):
@@ -219,7 +224,7 @@ async def deobf_error(ctx, error):
 
 @tree.command(name='deobf', description='Deobfuscate a Lua file')
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
+    if not file.filename.lower.endswith(ALLOWED_EXTENSIONS):
         return await interaction.response.send_message('Please attach a `.lua`, `.luau`, or `.txt` file.', ephemeral=True)
     if file.size > MAX_BYTES:
         return await interaction.response.send_message(f'File too large ({file.size} bytes, max {MAX_BYTES})', ephemeral=True)
