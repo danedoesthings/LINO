@@ -222,23 +222,23 @@ def _lua_unescape(s):
             else:
                 result.append(ord(nc) if ord(nc) < 256 else 0x3F)
                 i += 2
+        else:
+            b = ord(s[i])
+            if b <= 0x7F:
+                result.append(b)
+            elif b <= 0x7FF:
+                result.append(0xC0 | (b >> 6))
+                result.append(0x80 | (b & 0x3F))
+            elif b <= 0xFFFF:
+                result.append(0xE0 | (b >> 12))
+                result.append(0x80 | ((b >> 6) & 0x3F))
+                result.append(0x80 | (b & 0x3F))
             else:
-                b = ord(s[i])
-                if b <= 0x7F:
-                    result.append(b)
-                elif b <= 0x7FF:
-                    result.append(0xC0 | (b >> 6))
-                    result.append(0x80 | (b & 0x3F))
-                elif b <= 0xFFFF:
-                    result.append(0xE0 | (b >> 12))
-                    result.append(0x80 | ((b >> 6) & 0x3F))
-                    result.append(0x80 | (b & 0x3F))
-                else:
-                    result.append(0xF0 | (b >> 18))
-                    result.append(0x80 | ((b >> 12) & 0x3F))
-                    result.append(0x80 | ((b >> 6) & 0x3F))
-                    result.append(0x80 | (b & 0x3F))
-                i += 1
+                result.append(0xF0 | (b >> 18))
+                result.append(0x80 | ((b >> 12) & 0x3F))
+                result.append(0x80 | ((b >> 6) & 0x3F))
+                result.append(0x80 | (b & 0x3F))
+            i += 1
     return bytes(result)
 
 
