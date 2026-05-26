@@ -61,14 +61,10 @@ VM_SIGNALS = [
 
 TAMPER_PATTERNS = [
     "__metatable",
-    "concat",
-    "match:",
     "hookfunction",
     "newcclosure",
     "checkcaller",
     "islclosure",
-    "debug",
-    "sethook",
     "Tamper Detected",
 ]
 
@@ -88,6 +84,10 @@ def _shannon_entropy(data):
     return -sum((c / length) * math.log2(c / length) for c in counts.values())
 
 
+def _is_lua_bytecode(raw):
+    return raw[:4] == b'\x1bLua'
+
+
 def _is_probably_text(data):
     if not data:
         return False
@@ -97,21 +97,17 @@ def _is_probably_text(data):
         raw = data
     if len(raw) < 50:
         return False
-    if raw[:4] == b'\x1bLua':
+    if _is_lua_bytecode(raw):
         return False
     printable = sum(1 for b in raw if 32 <= b <= 126 or b in (9, 10, 13))
     ratio = printable / len(raw)
-    if ratio < 0.70:
+    if ratio < 0.60:
         return False
     null_bytes = raw.count(b'\x00')
-    if null_bytes > len(raw) * 0.10:
+    if null_bytes > len(raw) * 0.15:
         return False
-    if isinstance(data, str):
-        long_tokens = re.findall(r'[A-Za-z0-9]{25,}', data)
-        if len(long_tokens) > 10:
-            return False
     entropy = _shannon_entropy(raw)
-    if entropy > 5.8:
+    if entropy > 7.2:
         return False
     return True
 
@@ -124,10 +120,33 @@ def _decode_numeric_escapes(s):
     )
 
 
+def _decode_hex_blob(s):
+    if re.fullmatch(r'[0-9A-Fa-f]+', s) and len(s) >= 4 and len(s) % 2 == 0:
+        try:
+            return bytes.fromhex(s)
+        except:
+            pass
+    return None
+
+
+def _try_reverse(s):
+    if isinstance(s, str):
+        return s[::-1]
+    return s
+
+
+def _try_base64_decode(s):
+    try:
+        padded = s + '=' * (-len(s) % 4)
+        return base64.b64decode(padded)
+    except:
+        return None
+
+
 def _looks_like_vm_blob(s):
     if re.search(r'[A-Z]=\d+', s):
         return True
-    if re.search(r'\d{5,}', s):
+    if len(re.findall(r'\d{5,}', s)) > 8:
         return True
     return False
 
@@ -371,19 +390,19 @@ def _readability_score(code):
         score += 30
     locals_count = len(re.findall(r'\blocal\b', code))
     if locals_count > 0:
-        score += locals_count * 3
+        score += locals_count * 2
     identifiers = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', code)
     if identifiers:
         avg_ident_len = sum(len(x) for x in identifiers) / len(identifiers)
         if avg_ident_len > 3:
-            score += 20
+            score += 15
         words = re.findall(r'[A-Za-z_]{4,}', code)
         if words:
             unique_ratio = len(set(words)) / max(len(words), 1)
-            if unique_ratio < 0.25:
-                score -= 40
+            if unique_ratio < 0.20:
+                score -= 20
     gibberish = re.findall(r'[A-Za-z0-9]{20,}', code)
-    score -= len(gibberish) * 8
+    score -= len(gibberish) * 3
     for pat in GOOD_PATTERNS:
         if re.search(pat, code):
             score += 35
@@ -397,19 +416,77 @@ def _readability_score(code):
         r'\b(function|if|then|end|for|while|local|return)\b',
         code
     ))
-    if lua_structures >= 6:
-        score += 50
+    if lua_structures >= 4:
+        score += 30
     hex_noise = len(re.findall(r'\\x[0-9A-Fa-f]{2}', code))
-    score -= hex_noise * 2
+    score -= hex_noise
     for pat in VM_SIGNALS:
         if re.search(pat, code):
-            score -= 30
+            score -= 25
     entropy = _shannon_entropy(code)
-    if entropy > 5.5:
-        score -= 50
-    if entropy < 3.0:
-        score -= 20
+    if entropy > 6.5:
+        score -= 30
     return score
+
+
+def _recursive_decode(data, depth=0):
+    if depth > 5:
+        return data
+    if isinstance(data, bytes):
+        text_candidates = []
+        for enc in ('utf-8', 'latin-1'):
+            try:
+                text_candidates.append(data.decode(enc, errors='replace'))
+            except:
+                pass
+    else:
+        text_candidates = [data]
+    best = data if isinstance(data, str) else (text_candidates[0] if text_candidates else data.decode('latin-1', errors='replace'))
+    best_score = _readability_score(best) if isinstance(best, str) else -1
+    for text in text_candidates:
+        if not isinstance(text, str):
+            continue
+        for fn_name, fn in [
+            ('base64', lambda t: _try_base64_decode(t)),
+            ('hex', lambda t: _decode_hex_blob(t)),
+            ('reverse', lambda t: _try_reverse(t)),
+        ]:
+            try:
+                out = fn(text)
+                if out:
+                    if isinstance(out, bytes):
+                        for enc in ('utf-8', 'latin-1'):
+                            try:
+                                out_text = out.decode(enc, errors='replace')
+                                score = _readability_score(out_text)
+                                if score > best_score:
+                                    best = out_text
+                                    best_score = score
+                                    deeper = _recursive_decode(out_text, depth + 1)
+                                    deeper_score = _readability_score(deeper)
+                                    if deeper_score > best_score:
+                                        best = deeper
+                                        best_score = deeper_score
+                            except:
+                                pass
+                    elif isinstance(out, str):
+                        score = _readability_score(out)
+                        if score > best_score:
+                            best = out
+                            best_score = score
+                            deeper = _recursive_decode(out, depth + 1)
+                            deeper_score = _readability_score(deeper)
+                            if deeper_score > best_score:
+                                best = deeper
+                                best_score = deeper_score
+            except:
+                pass
+    if isinstance(best, bytes):
+        try:
+            best = best.decode('utf-8', errors='replace')
+        except:
+            best = best.decode('latin-1', errors='replace')
+    return best
 
 
 class LuaASTWalker:
@@ -473,13 +550,15 @@ class DeobfEngine:
             'readability_scoring', 'bytecode_interception',
             'self_capture_rejection', 'sandboxed_execution',
             'binary_safe_subprocess', 'base64_capture_encoding',
-            'vm_signal_detection', 'concat_cache_cap',
-            'binary_text_separation', 'hash_recursion_prevention',
-            'binary_detection', 'xor_bruteforce_layer',
-            'multi_candidate_ranking', 'entropy_scoring',
-            'tamper_pattern_detection', 'minimal_hook_sandbox',
-            'runtime_alphabet_recovery', 'rolling_xor_transform',
-            'recursive_decode_chain', 'vm_blob_filtering'
+            'vm_signal_detection', 'binary_text_separation',
+            'hash_recursion_prevention', 'binary_detection',
+            'xor_bruteforce_layer', 'multi_candidate_ranking',
+            'entropy_scoring', 'tamper_pattern_detection',
+            'minimal_hook_sandbox', 'runtime_alphabet_recovery',
+            'rolling_xor_transform', 'recursive_decode_chain',
+            'vm_blob_filtering', 'hex_decode', 'reverse_decode',
+            'deferred_capture_return', 'table_insert_hook',
+            'pcall_hook', 'proxy_hook_sandbox'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -604,6 +683,25 @@ table.concat = function(t, sep, i, j)
     return out
 end
 
+local real_insert = table.insert
+table.insert = function(t, v, ...)
+    if type(v) == "string" and #v > 20 then
+        save("insert", v)
+    end
+    return real_insert(t, v, ...)
+end
+
+local real_pcall = pcall
+_G.pcall = function(fn, ...)
+    if type(fn) == "function" then
+        local ok, dumped = pcall(string.dump, fn)
+        if ok and dumped and #dumped > 50 then
+            save("pcall_fn", dumped)
+        end
+    end
+    return real_pcall(fn, ...)
+end
+
 if string.dump then
     local real_dump = string.dump
     string.dump = function(fn, ...)
@@ -635,19 +733,17 @@ pcall(function()
     end
 end)
 
-if #captures > 0 then
-    for _, cap in ipairs(captures) do
-        print("CAP:" .. cap.tag .. ":" .. cap.data)
+for _, cap in ipairs(captures) do
+    print("CAP:" .. cap.tag .. ":" .. cap.data)
+end
+
+if #captures == 0 then
+    if not success then
+        print("ERR:RUNTIME:" .. tostring(result))
+        return
     end
-    return
+    print("ERR:NO_OUTPUT")
 end
-
-if not success then
-    print("ERR:RUNTIME:" .. tostring(result))
-    return
-end
-
-print("ERR:NO_OUTPUT")
 '''
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as src_tmp:
             src_tmp.write(source)
@@ -712,18 +808,20 @@ print("ERR:NO_OUTPUT")
                 if _is_self_capture(decoded_data):
                     continue
                 if not _is_probably_text(decoded_data):
-                    continue
-                raw_check = decoded_data.encode('latin-1', errors='ignore')
-                if raw_check[:4] == b'\x1bLua' and self._java_available:
-                    try:
-                        dec, _ = self._run_unluac(raw_check)
-                        if dec:
-                            decoded_data = dec
-                    except:
-                        pass
+                    raw_check = decoded_data.encode('latin-1', errors='ignore')
+                    if _is_lua_bytecode(raw_check) and self._java_available:
+                        try:
+                            dec, _ = self._run_unluac(raw_check)
+                            if dec:
+                                decoded_data = dec
+                        except:
+                            pass
+                    else:
+                        continue
+                decoded_data = _recursive_decode(decoded_data)
                 score = _readability_score(decoded_data)
                 syntax_ok = self._validate_lua(decoded_data)
-                if score >= 20:
+                if score >= 15:
                     candidates.append({
                         'data': decoded_data,
                         'score': score,
@@ -734,7 +832,7 @@ print("ERR:NO_OUTPUT")
             candidates.sort(key=lambda x: (x['syntax_ok'], x['score']), reverse=True)
 
             for candidate in candidates[:3]:
-                if candidate['score'] >= 30:
+                if candidate['score'] >= 25:
                     result = candidate['data']
                     if result and result != source and depth < 3:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
@@ -755,11 +853,11 @@ print("ERR:NO_OUTPUT")
                 score = _readability_score(harness_result)
                 diags.append(f"harness: {len(harness_result)} chars score={score}")
                 beautified = self._beautify(harness_result)
-                if score >= 45 and self._validate_lua(beautified):
+                if score >= 40 and self._validate_lua(beautified):
                     return beautified, 'lua_harness', 'Readable Lua recovered', []
-                elif score >= 60:
+                elif score >= 50:
                     return beautified, 'lua_harness_highscore', 'High-score Lua output', []
-                elif len(harness_result) > 100 and score >= 20:
+                elif len(harness_result) > 100 and score >= 15:
                     return harness_result, 'lua_harness_raw', 'Lua harness raw output', []
             elif harness_error:
                 diags.append(f"harness error: {harness_error[:200]}")
@@ -788,14 +886,15 @@ print("ERR:NO_OUTPUT")
                     shuffle_ranges = self._extract_shuffle(source)
                     decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
                     if decoded:
+                        decoded = _recursive_decode(decoded)
                         score = _readability_score(decoded)
                         diags.append(f"decoded: {len(decoded)} chars score={score}")
                         beautified = self._beautify(decoded)
-                        if score >= 45 and self._validate_lua(beautified):
+                        if score >= 40 and self._validate_lua(beautified):
                             return beautified, 'static_decode', 'Structural decode', []
-                        elif score >= 60:
+                        elif score >= 50:
                             return beautified, 'static_decode_highscore', 'High-score static decode', []
-                        elif len(decoded) > 100 and score >= 20:
+                        elif len(decoded) > 100 and score >= 15:
                             recursive_result, _ = self._run_lua_harness(decoded)
                             if recursive_result and _readability_score(recursive_result) > score:
                                 beautified = self._beautify(recursive_result)
@@ -815,12 +914,12 @@ print("ERR:NO_OUTPUT")
                 tree = lua_ast.parse(source)
                 for node in LuaASTWalker.walk(tree):
                     if hasattr(node, 'targets') and hasattr(node, 'values') and node.values:
-                        if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 30:
+                        if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 20:
                             entries = []
                             for field in node.values[0].fields:
                                 if hasattr(field, 'value') and hasattr(field.value, 's'):
                                     entries.append(_decode_numeric_escapes(field.value.s))
-                            if len(entries) >= 30:
+                            if len(entries) >= 20:
                                 unescaped = []
                                 for s in entries:
                                     raw = _lua_unescape(s)
@@ -828,9 +927,9 @@ print("ERR:NO_OUTPUT")
                                         unescaped.append(chr(raw[0]))
                                     else:
                                         unescaped.append(s)
-                                if len(unescaped) >= 30:
+                                if len(unescaped) >= 20:
                                     avg_len = sum(len(c) for c in unescaped) / len(unescaped)
-                                    if avg_len <= 2.0:
+                                    if avg_len <= 3.0:
                                         var_name = node.targets[0].id if node.targets and hasattr(node.targets[0], 'id') else 'R'
                                         return unescaped, var_name
             except Exception:
@@ -850,7 +949,7 @@ print("ERR:NO_OUTPUT")
             strings = [e for e in entries if isinstance(e, str)]
             strings = [s for s in strings if not _looks_like_vm_blob(s)]
             n = len(strings)
-            if n < 20:
+            if n < 15:
                 continue
 
             unescaped_candidates = []
@@ -862,7 +961,7 @@ print("ERR:NO_OUTPUT")
                     unescaped_candidates.append(s)
 
             single_char_count = sum(1 for c in unescaped_candidates if len(c) == 1)
-            if single_char_count >= 20:
+            if single_char_count >= 15:
                 best = unescaped_candidates
                 best_var = var_name
                 break
@@ -879,10 +978,10 @@ print("ERR:NO_OUTPUT")
                 strings = [e for e in entries if isinstance(e, str)]
                 strings = [s for s in strings if not _looks_like_vm_blob(s)]
                 n = len(strings)
-                if n < 30:
+                if n < 20:
                     continue
                 avg_len = sum(len(s) for s in strings) / n
-                if avg_len > 3.0:
+                if avg_len > 4.0:
                     continue
                 score = n - abs(n - 64)
                 if score > best_score:
@@ -972,7 +1071,7 @@ print("ERR:NO_OUTPUT")
         for i, entry in enumerate(alphabet, start=1):
             if isinstance(entry, str) and len(entry) >= 1:
                 rev_map[entry] = i
-        if len(rev_map) < 20:
+        if len(rev_map) < 15:
             return None
         working = list(encoded_chunks)
         if shuffle_ranges:
