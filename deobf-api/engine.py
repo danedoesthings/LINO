@@ -300,7 +300,8 @@ class DeobfEngine:
             'unicode_preserving_unescape', 'long_string_tokenization',
             'encoded_data_extraction', 'lua_index_correction',
             'table_diagnostics', 'escaped_alphabet_recovery',
-            'arithmetic_table_evaluation', 'harness_error_logging'
+            'arithmetic_table_evaluation', 'harness_error_logging',
+            'long_bracket_harness_fix'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -319,7 +320,7 @@ _G.loadstring = function(code, name)
 end
 _G.load = _G.loadstring
 
-local f, err = loadstring([[_SRC_]])
+local f, err = loadstring([=[_SRC_]=])
 if not f then
     print("ERR:COMPILE:" .. tostring(err))
     return
@@ -354,7 +355,7 @@ end
 
 print("ERR:NO_OUTPUT")
 '''
-        harness = harness.replace('_SRC_', source.replace('\\', '\\\\').replace('"', '\\"'))
+        harness = harness.replace('_SRC_', source)
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
             tmp.write(harness)
             tmp_path = tmp.name
