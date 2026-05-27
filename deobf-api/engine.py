@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal
 from collections import OrderedDict, defaultdict, deque, namedtuple, Counter
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
@@ -463,9 +463,13 @@ def _total_score(code):
     return syntax + readability
 
 
-def _recursive_decode(data, depth=0):
-    if depth > 5:
+def _recursive_decode(data, depth=0, visited=None, max_ops=None):
+    if max_ops is None:
+        max_ops = [0]
+    if depth > 5 or max_ops[0] > 500:
         return data
+    if visited is None:
+        visited = set()
     if isinstance(data, bytes):
         text_candidates = []
         for enc in ('utf-8', 'latin-1'):
@@ -480,11 +484,18 @@ def _recursive_decode(data, depth=0):
     for text in text_candidates:
         if not isinstance(text, str):
             continue
+        text_hash = hashlib.sha256(text.encode('utf-8', errors='replace')).hexdigest()
+        if text_hash in visited:
+            continue
+        visited.add(text_hash)
         for fn_name, fn in [
             ('base64', lambda t: _try_base64_decode(t)),
             ('hex', lambda t: _decode_hex_blob(t)),
             ('reverse', lambda t: _try_reverse(t)),
         ]:
+            if max_ops[0] > 500:
+                break
+            max_ops[0] += 1
             try:
                 out = fn(text)
                 if out:
@@ -492,11 +503,16 @@ def _recursive_decode(data, depth=0):
                         for enc in ('utf-8', 'latin-1'):
                             try:
                                 out_text = out.decode(enc, errors='replace')
+                                if len(re.findall(r'[{}();=]', out_text)) < 5:
+                                    continue
+                                lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in out_text)
+                                if lua_kw_count < 3:
+                                    continue
                                 score = _total_score(out_text)
                                 if score > best_score:
                                     best = out_text
                                     best_score = score
-                                    deeper = _recursive_decode(out_text, depth + 1)
+                                    deeper = _recursive_decode(out_text, depth + 1, visited, max_ops)
                                     deeper_score = _total_score(deeper)
                                     if deeper_score > best_score:
                                         best = deeper
@@ -504,11 +520,16 @@ def _recursive_decode(data, depth=0):
                             except:
                                 pass
                     elif isinstance(out, str):
+                        if len(re.findall(r'[{}();=]', out)) < 5:
+                            continue
+                        lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in out)
+                        if lua_kw_count < 3:
+                            continue
                         score = _total_score(out)
                         if score > best_score:
                             best = out
                             best_score = score
-                            deeper = _recursive_decode(out, depth + 1)
+                            deeper = _recursive_decode(out, depth + 1, visited, max_ops)
                             deeper_score = _total_score(deeper)
                             if deeper_score > best_score:
                                 best = deeper
@@ -523,30 +544,13 @@ def _recursive_decode(data, depth=0):
     return best
 
 
-def _repair_control_flow(code):
-    if not code:
-        return code
-    funcs = len(re.findall(r'\bfunction\b', code))
-    ends = len(re.findall(r'\bend\b', code))
-    while ends < funcs:
-        code = code.rstrip() + "\nend"
-        ends += 1
-    opens = len(re.findall(r'\b(if|for|while)\b', code))
-    closes = len(re.findall(r'\bend\b', code))
-    while closes < opens + funcs:
-        code = code.rstrip() + "\nend"
-        closes += 1
-    return code
-
-
 def _structural_beautify(code):
     if not code:
         return code
     code = code.replace('\r\n', '\n').replace('\r', '\n')
-    code = re.sub(r'(?<![A-Za-z0-9_])(function|local function|if|then|else|elseif|for|while|do|repeat|return|end)(?![A-Za-z0-9_])', r'\n\1', code)
-    code = re.sub(r'\n+', '\n', code)
-    lines = [line.strip() for line in code.split('\n') if line.strip()]
-    return '\n'.join(lines)
+    code = re.sub(r'[ \t]+', ' ', code)
+    code = re.sub(r'\n{3,}', '\n\n', code)
+    return code.strip()
 
 
 class LuaASTWalker:
@@ -600,6 +604,8 @@ class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
         self.visited_hashes = set()
+        self.seen_captures = set()
+        self.decode_operations = 0
         self.capabilities = {
             'structural_parsing', 'balanced_brace_scanning',
             'custom_base64_decode', 'shuffle_range_recovery',
@@ -608,26 +614,41 @@ class DeobfEngine:
             'encoded_data_extraction', 'lua_index_correction',
             'table_diagnostics', 'numeric_escape_recovery',
             'readability_scoring', 'bytecode_interception',
-            'self_capture_rejection', 'sandboxed_execution',
+            'self_capture_rejection', 'native_execution',
             'binary_safe_subprocess', 'base64_capture_encoding',
             'vm_signal_detection', 'binary_text_separation',
             'hash_recursion_prevention', 'binary_detection',
             'xor_bruteforce_layer', 'multi_candidate_ranking',
             'entropy_scoring', 'tamper_pattern_detection',
-            'minimal_hook_sandbox', 'runtime_alphabet_recovery',
+            'selective_hook_sandbox', 'runtime_alphabet_recovery',
             'rolling_xor_transform', 'recursive_decode_chain',
             'vm_blob_filtering', 'hex_decode', 'reverse_decode',
             'deferred_capture_return', 'table_insert_hook',
             'pcall_hook', 'recursion_guard', 'execution_limits',
             'syntax_weighted_scoring', 'control_flow_repair',
-            'structural_beautifier', 'ast_normalization',
+            'safe_beautifier', 'ast_normalization',
             'raw_score_fallback', 'unconditional_harness_return',
-            'full_stdlib_sandbox', 'extended_instruction_limit'
+            'full_stdlib_native_env', 'extended_instruction_limit',
+            'pure_lua51_bit32', 'recursive_cycle_detection',
+            'hard_xor_filters', 'native_environment_execution',
+            'adaptive_instruction_limits', 'memory_limits',
+            'process_group_isolation', 'capture_deduplication',
+            'table_mutation_hooks', 'staged_execution_passes',
+            'runtime_state_snapshots'
         }
         self._java_available = shutil.which('java') is not None
 
     def get_capabilities(self):
         return list(self.capabilities)
+
+    def _set_process_limits(self):
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (25, 30))
+            resource.setrlimit(resource.RLIMIT_NPROC, (50, 50))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+        except:
+            pass
 
     def _rolling_xor(self, data, key):
         out = bytearray()
@@ -645,9 +666,17 @@ class DeobfEngine:
         else:
             raw = data
         for key in range(1, 256):
+            if self.decode_operations > 500:
+                break
+            self.decode_operations += 1
             try:
                 decoded = bytes([b ^ key for b in raw])
                 text = decoded.decode('utf-8', errors='replace')
+                if len(re.findall(r'[{}();=]', text)) < 5:
+                    continue
+                lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in text)
+                if lua_kw_count < 3:
+                    continue
                 score = _total_score(text)
                 if score > best_score:
                     best_score = score
@@ -657,9 +686,17 @@ class DeobfEngine:
         if best and best_score > 20:
             return best
         for key in range(1, 256):
+            if self.decode_operations > 500:
+                break
+            self.decode_operations += 1
             try:
                 decoded = self._rolling_xor(raw, key)
                 text = decoded.decode('utf-8', errors='replace')
+                if len(re.findall(r'[{}();=]', text)) < 5:
+                    continue
+                lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in text)
+                if lua_kw_count < 3:
+                    continue
                 score = _total_score(text)
                 if score > best_score:
                     best_score = score
@@ -670,7 +707,7 @@ class DeobfEngine:
             return best
         return None
 
-    def _run_lua_harness(self, source, depth=0):
+    def _run_lua_harness(self, source, depth=0, instruction_limit=500000):
         if depth > 3:
             return None, 'max recursion depth'
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
@@ -713,9 +750,21 @@ local function b64encode(data)
     return table.concat(result) .. padding
 end
 
+local function looks_textual(s)
+    local printable = 0
+    for i = 1, #s do
+        local b = s:byte(i)
+        if (b >= 32 and b <= 126) or b == 10 or b == 13 or b == 9 then
+            printable = printable + 1
+        end
+    end
+    return printable / #s > 0.75
+end
+
 local function save(tag, data)
     if type(data) ~= "string" then return end
     if #data < 20 then return end
+    if not looks_textual(data) then return end
     if CALL_DEPTH > MAX_DEPTH then return end
     CALL_DEPTH = CALL_DEPTH + 1
     local encoded = b64encode(data)
@@ -747,7 +796,7 @@ end
 local real_char = string.char
 string.char = function(...)
     local out = real_char(...)
-    if #out > 40 then
+    if #out > 40 and looks_textual(out) then
         save("string_char", out)
     end
     return out
@@ -756,10 +805,35 @@ end
 local real_concat = table.concat
 table.concat = function(t, sep, i, j)
     local out = real_concat(t, sep, i, j)
-    if type(out) == "string" and #out > 80 then
+    if type(out) == "string" and #out > 80 and looks_textual(out) then
         save("concat", out)
     end
     return out
+end
+
+local real_insert = table.insert
+table.insert = function(t, v, ...)
+    if type(v) == "string" and #v > 20 and looks_textual(v) then
+        save("table_insert", v)
+    end
+    return real_insert(t, v, ...)
+end
+
+local real_setmetatable = setmetatable
+setmetatable = function(t, mt)
+    if mt and type(mt) == "table" then
+        save("setmetatable", "metatable_set")
+    end
+    return real_setmetatable(t, mt)
+end
+
+local real_getmetatable = getmetatable
+getmetatable = function(t)
+    local mt = real_getmetatable(t)
+    if mt and type(mt) == "table" then
+        save("getmetatable", "metatable_get")
+    end
+    return mt
 end
 
 local real_pcall = pcall
@@ -791,51 +865,66 @@ if string.dump then
     end
 end
 
+os.execute = function() error("os.execute blocked") end
+io.popen = function() error("io.popen blocked") end
+
 local f, err = loadfile("_SRCFILE_")
 if not f then
     print("ERR:COMPILE:" .. tostring(err))
     return
 end
 
-local safe_env = {
-    pairs = pairs,
-    ipairs = ipairs,
-    tonumber = tonumber,
-    tostring = tostring,
-    type = type,
-    string = string,
-    table = table,
-    math = math,
-    bit = bit or {bxor = function(a,b) return (a ~ b) end, band = function(a,b) return (a & b) end, bor = function(a,b) return (a | b) end},
-    bit32 = bit32 or {bxor = function(a,b) return (a ~ b) end, band = function(a,b) return (a & b) end, bor = function(a,b) return (a | b) end},
-    loadstring = _G.loadstring,
-    load = _G.load,
-    pcall = _G.pcall,
-    xpcall = xpcall,
-    print = print,
-    error = error,
-    assert = assert,
-    select = select,
-    next = next,
-    setmetatable = setmetatable,
-    getmetatable = getmetatable,
-    rawequal = rawequal,
-    rawset = rawset,
-    rawget = rawget,
-    unpack = unpack,
-    coroutine = {create = coroutine.create, resume = coroutine.resume, status = coroutine.status, wrap = function(f) return coroutine.wrap(f) end},
-    os = {clock = os.clock, time = os.time, date = os.date, difftime = os.difftime, exit = function() end},
-}
-safe_env._G = safe_env
-
-if setfenv then
-    setfenv(f, safe_env)
+local bit32 = bit32 or nil
+if not bit32 then
+    local function bit_bor(a, b)
+        local r, m = 0, 1
+        while a > 0 or b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit + bbit > 0 then r = r + m end
+            a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+        end
+        return r
+    end
+    local function bit_band(a, b)
+        local r, m = 0, 1
+        while a > 0 and b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit + bbit == 2 then r = r + m end
+            a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+        end
+        return r
+    end
+    local function bit_bxor(a, b)
+        local r, m = 0, 1
+        while a > 0 or b > 0 do
+            local abit, bbit = a % 2, b % 2
+            if abit ~= bbit then r = r + m end
+            a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+        end
+        return r
+    end
+    local function bit_lshift(v, n)
+        return math.floor(v * (2 ^ n)) % 4294967296
+    end
+    local function bit_rshift(v, n)
+        return math.floor(v / (2 ^ n))
+    end
+    bit32 = {
+        bxor = bit_bxor,
+        band = bit_band,
+        bor = bit_bor,
+        lshift = bit_lshift,
+        rshift = bit_rshift,
+        arshift = bit_rshift,
+    }
 end
+_G.bit32 = bit32
+_G.bit = bit32
 
 if debug and debug.sethook then
     debug.sethook(function()
         error("instruction limit")
-    end, "", 5000000)
+    end, "", _INSTRLIMIT_)
 end
 
 local success, result = pcall(f)
@@ -848,8 +937,11 @@ collectgarbage("collect")
 
 pcall(function()
     for k, v in pairs(_G) do
-        if type(v) == "string" and #v > 100 then
+        if type(v) == "string" and #v > 100 and looks_textual(v) then
             save("env_string", v)
+        end
+        if type(v) == "table" and #v > 10 then
+            save("large_table", "table_with_" .. tostring(#v) .. "_entries")
         end
     end
 end)
@@ -866,11 +958,12 @@ if #captures == 0 then
     print("ERR:NO_OUTPUT")
 end
 '''
+        harness = harness.replace('_SRCFILE_', src_path := None)
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as src_tmp:
             src_tmp.write(source)
             src_path = src_tmp.name
 
-        harness = harness.replace('_SRCFILE_', src_path)
+        harness = harness.replace('_SRCFILE_', src_path).replace('_INSTRLIMIT_', str(instruction_limit))
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
             tmp.write(harness)
             tmp_path = tmp.name
@@ -883,7 +976,8 @@ end
                     result = subprocess.run(
                         [lua_bin, tmp_path],
                         capture_output=True,
-                        timeout=30
+                        timeout=30,
+                        preexec_fn=self._set_process_limits
                     )
                     stdout = result.stdout.decode('latin-1', errors='replace')
                     stderr = result.stderr.decode('latin-1', errors='replace')
@@ -897,6 +991,9 @@ end
                             errors.append(line.strip())
                     if captures:
                         break
+                    if errors and 'instruction limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
+                        self.visited_hashes.discard(source_hash)
+                        return self._run_lua_harness(source, depth, instruction_limit * 4)
                     if errors:
                         break
                 except FileNotFoundError:
@@ -926,6 +1023,10 @@ end
                     decoded_data = base64.b64decode(data).decode('latin-1', errors='replace')
                 except Exception:
                     decoded_data = data
+                capture_hash = hashlib.sha256(decoded_data.encode('utf-8', errors='replace')).hexdigest()
+                if capture_hash in self.seen_captures:
+                    continue
+                self.seen_captures.add(capture_hash)
                 if _is_self_capture(decoded_data):
                     continue
                 if not _is_probably_text(decoded_data):
@@ -954,7 +1055,7 @@ end
 
             for candidate in candidates[:3]:
                 if candidate['syntax_ok'] and candidate['score'] >= 55:
-                    result = _repair_control_flow(candidate['data'])
+                    result = candidate['data']
                     result = _structural_beautify(result)
                     if result and result != source and depth < 3:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
@@ -979,9 +1080,6 @@ end
                 if score >= 55:
                     if self._validate_lua(harness_result):
                         return harness_result, 'lua_harness_raw', 'Raw harness capture (valid Lua)', []
-                    repaired = _repair_control_flow(harness_result)
-                    if self._validate_lua(repaired):
-                        return repaired, 'lua_harness_repaired', 'Repaired harness capture', []
                     beautified = _structural_beautify(harness_result)
                     if self._validate_lua(beautified):
                         return beautified, 'lua_harness_beautified', 'Beautified harness capture', []
@@ -1019,16 +1117,14 @@ end
                         score = _total_score(decoded)
                         diags.append(f"decoded: {len(decoded)} chars score={score}")
                         beautified = _structural_beautify(decoded)
-                        repaired = _repair_control_flow(beautified)
-                        if score >= 55 and self._validate_lua(repaired):
-                            return repaired, 'static_decode', 'Structural decode', []
+                        if score >= 55 and self._validate_lua(beautified):
+                            return beautified, 'static_decode', 'Structural decode', []
                         elif len(decoded) > 100:
                             if score >= 55:
                                 recursive_result, _ = self._run_lua_harness(decoded)
                                 if recursive_result and _total_score(recursive_result) > score:
                                     beautified = _structural_beautify(recursive_result)
-                                    repaired = _repair_control_flow(beautified)
-                                    return repaired, 'recursive_decode', 'Recursive decode improved', []
+                                    return beautified, 'recursive_decode', 'Recursive decode improved', []
                             return beautified, 'static_decode_raw', 'Structural decode raw output', []
             else:
                 diags.append("no alphabet table found")
