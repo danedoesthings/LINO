@@ -466,7 +466,7 @@ def _total_score(code):
 def _recursive_decode(data, depth=0, visited=None, max_ops=None):
     if max_ops is None:
         max_ops = [0]
-    if depth > 5 or max_ops[0] > 500:
+    if depth > 10 or max_ops[0] > 500:
         return data
     if visited is None:
         visited = set()
@@ -503,15 +503,12 @@ def _recursive_decode(data, depth=0, visited=None, max_ops=None):
                         for enc in ('utf-8', 'latin-1'):
                             try:
                                 out_text = out.decode(enc, errors='replace')
-                                if len(re.findall(r'[{}();=]', out_text)) < 5:
-                                    continue
                                 lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in out_text)
-                                if lua_kw_count < 3:
-                                    continue
-                                score = _total_score(out_text)
-                                if score > best_score:
-                                    best = out_text
-                                    best_score = score
+                                if lua_kw_count >= 3 or fn_name == 'base64':
+                                    score = _total_score(out_text)
+                                    if score > best_score:
+                                        best = out_text
+                                        best_score = score
                                     deeper = _recursive_decode(out_text, depth + 1, visited, max_ops)
                                     deeper_score = _total_score(deeper)
                                     if deeper_score > best_score:
@@ -520,15 +517,12 @@ def _recursive_decode(data, depth=0, visited=None, max_ops=None):
                             except:
                                 pass
                     elif isinstance(out, str):
-                        if len(re.findall(r'[{}();=]', out)) < 5:
-                            continue
                         lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in out)
-                        if lua_kw_count < 3:
-                            continue
-                        score = _total_score(out)
-                        if score > best_score:
-                            best = out
-                            best_score = score
+                        if lua_kw_count >= 3 or fn_name == 'base64':
+                            score = _total_score(out)
+                            if score > best_score:
+                                best = out
+                                best_score = score
                             deeper = _recursive_decode(out, depth + 1, visited, max_ops)
                             deeper_score = _total_score(deeper)
                             if deeper_score > best_score:
@@ -558,6 +552,404 @@ def _repair_control_flow(code):
         code = code.rstrip() + "\nend"
         closes += 1
     return code
+
+
+def _safe_beautify(code):
+    if not code:
+        return code
+
+    class State(Enum):
+        CODE = 1
+        STRING_SINGLE = 2
+        STRING_DOUBLE = 3
+        LONG_STRING = 4
+        COMMENT_LINE = 5
+        COMMENT_BLOCK = 6
+
+    state = State.CODE
+    indent_level = 0
+    output_lines = []
+    line_buf = []
+    indent_str = "    "
+
+    outdent_keywords = {"end", "until", "else", "elseif"}
+    indent_after = {"function", "then", "do", "repeat", "else", "elseif"}
+    newline_before_keywords = {
+        "function", "local function", "local", "if", "for",
+        "while", "do", "repeat", "return", "end", "until",
+        "else", "elseif", "then"
+    }
+
+    i = 0
+    n = len(code)
+
+    while i < n:
+        c = code[i]
+
+        if state == State.CODE:
+            if c == '-' and i + 1 < n and code[i + 1] == '-':
+                line_buf.append(c)
+                line_buf.append(code[i + 1])
+                i += 2
+                if i < n and code[i] == '[' and i + 1 < n and code[i + 1] == '[':
+                    state = State.COMMENT_BLOCK
+                    line_buf.append(code[i])
+                    line_buf.append(code[i + 1])
+                    i += 2
+                else:
+                    state = State.COMMENT_LINE
+                continue
+            elif c == '"':
+                state = State.STRING_DOUBLE
+                line_buf.append(c)
+                i += 1
+                continue
+            elif c == "'":
+                state = State.STRING_SINGLE
+                line_buf.append(c)
+                i += 1
+                continue
+            elif c == '[':
+                j = i
+                equal_count = 0
+                while j + 1 < n and code[j + 1] == '=':
+                    equal_count += 1
+                    j += 1
+                if j + 1 < n and code[j + 1] == '[':
+                    state = State.LONG_STRING
+                    for _ in range(2 + equal_count):
+                        line_buf.append(code[i])
+                        i += 1
+                    continue
+
+            if c == '\n' or (c == ';' and state == State.CODE):
+                line_str = ''.join(line_buf).rstrip('\n\r ;')
+                if line_str:
+                    trimmed = line_str.lstrip()
+                    first_word = trimmed.split()[0] if trimmed else ''
+                    if first_word in outdent_keywords:
+                        indent_level = max(0, indent_level - 1)
+                    output_lines.append(indent_str * indent_level + trimmed)
+                    last_word = trimmed.rsplit()[-1] if trimmed.split() else ''
+                    if last_word in indent_after:
+                        indent_level += 1
+                line_buf = []
+                if c == '\n':
+                    i += 1
+                else:
+                    line_buf.append(c)
+                    i += 1
+                continue
+
+            line_buf.append(c)
+            i += 1
+
+        elif state == State.STRING_DOUBLE:
+            line_buf.append(c)
+            if c == '\\' and i + 1 < n:
+                line_buf.append(code[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                state = State.CODE
+            i += 1
+
+        elif state == State.STRING_SINGLE:
+            line_buf.append(c)
+            if c == '\\' and i + 1 < n:
+                line_buf.append(code[i + 1])
+                i += 2
+                continue
+            if c == "'":
+                state = State.CODE
+            i += 1
+
+        elif state == State.LONG_STRING:
+            line_buf.append(c)
+            if c == ']':
+                j = i + 1
+                equal_count = 0
+                while j < n and code[j] == '=':
+                    equal_count += 1
+                    j += 1
+                if j < n and code[j] == ']':
+                    for _ in range(1 + equal_count):
+                        line_buf.append(code[i])
+                        i += 1
+                    state = State.CODE
+                    continue
+            i += 1
+
+        elif state == State.COMMENT_LINE:
+            line_buf.append(c)
+            if c == '\n':
+                state = State.CODE
+            i += 1
+
+        elif state == State.COMMENT_BLOCK:
+            line_buf.append(c)
+            if c == ']':
+                j = i + 1
+                equal_count = 0
+                while j < n and code[j] == '=':
+                    equal_count += 1
+                    j += 1
+                if j < n and code[j] == ']':
+                    for _ in range(1 + equal_count):
+                        line_buf.append(code[i])
+                        i += 1
+                    state = State.CODE
+                    continue
+            i += 1
+
+    if line_buf:
+        line_str = ''.join(line_buf).rstrip('\n\r ;')
+        if line_str:
+            trimmed = line_str.lstrip()
+            first_word = trimmed.split()[0] if trimmed else ''
+            if first_word in outdent_keywords:
+                indent_level = max(0, indent_level - 1)
+            output_lines.append(indent_str * indent_level + trimmed)
+
+    return '\n'.join(output_lines)
+
+
+def _rename_variables(code):
+    if not code or len(code) < 50:
+        return code
+
+    garbage_pattern = re.compile(
+        r'^[A-Za-z]_\d+_?$|^[a-z]__\d+$|^[a-z]_[a-z]?\d+$|^[vV]\d+$|^_[a-zA-Z]\d*$'
+    )
+
+    builtins = {
+        'assert', 'collectgarbage', 'dofile', 'error', 'getfenv', 'getmetatable',
+        'ipairs', 'load', 'loadfile', 'loadstring', 'module', 'next', 'pairs',
+        'pcall', 'print', 'rawequal', 'rawget', 'rawset', 'require', 'select',
+        'setfenv', 'setmetatable', 'tonumber', 'tostring', 'type', 'unpack',
+        'xpcall', '_G', '_VERSION', 'arg', 'coroutine', 'debug', 'io', 'math',
+        'os', 'package', 'string', 'table', 'bit32', 'bit', 'utf8',
+        'game', 'workspace', 'script', 'shared', 'Enum', 'tick', 'wait',
+        'spawn', 'delay', 'elapsedTime', 'time', 'warn', 'Vector3', 'Vector2',
+        'CFrame', 'UDim2', 'UDim', 'Color3', 'BrickColor', 'TweenInfo',
+        'Instance', 'Ray', 'Region3', 'Drawing', 'task', 'os', 'io'
+    }
+
+    try:
+        from luaparser import ast
+        from luaparser.astnodes import (
+            Chunk, Block, LocalAssign, Assign, Function, Fornum, Forin,
+            Name, Index, Call, String, Number, TrueExpr, FalseExpr, Nil,
+            UnaryOp, BinaryOp, Table, Field
+        )
+        tree = ast.parse(code)
+    except Exception:
+        return _regex_rename_variables(code, garbage_pattern, builtins)
+
+    rename_counter = [0]
+
+    def new_name():
+        rename_counter[0] += 1
+        return f"v{rename_counter[0]}"
+
+    scope_stack = [{}]
+    renamed = set()
+
+    def current_scope():
+        return scope_stack[-1]
+
+    def push_scope():
+        scope_stack.append({})
+
+    def pop_scope():
+        scope_stack.pop()
+
+    def is_garbage(name):
+        if name in builtins:
+            return False
+        return bool(garbage_pattern.match(name))
+
+    def should_rename(name):
+        if not name:
+            return False
+        if not is_garbage(name):
+            return False
+        if name in renamed:
+            return True
+        for scope in reversed(scope_stack):
+            if name in scope:
+                return True
+        return False
+
+    def get_or_create_rename(name):
+        if not should_rename(name):
+            return name
+        for scope in reversed(scope_stack):
+            if name in scope:
+                return scope[name]
+        nn = new_name()
+        current_scope()[name] = nn
+        renamed.add(name)
+        return nn
+
+    def collect_locals(node):
+        if isinstance(node, LocalAssign):
+            for target in node.targets:
+                if isinstance(target, Name):
+                    name = target.id
+                    if is_garbage(name) and name not in current_scope():
+                        nn = new_name()
+                        current_scope()[name] = nn
+                        renamed.add(name)
+        if isinstance(node, Function):
+            push_scope()
+            if hasattr(node, 'args'):
+                for arg in (node.args or []):
+                    if isinstance(arg, Name):
+                        name = arg.id
+                        if is_garbage(name) and name not in current_scope():
+                            nn = new_name()
+                            current_scope()[name] = nn
+                            renamed.add(name)
+            if hasattr(node, 'body'):
+                if isinstance(node.body, list):
+                    for child in node.body:
+                        collect_locals(child)
+                elif node.body is not None:
+                    collect_locals(node.body)
+            pop_scope()
+        if isinstance(node, Fornum):
+            if hasattr(node, 'variable') and isinstance(node.variable, Name):
+                name = node.variable.id
+                if is_garbage(name) and name not in current_scope():
+                    nn = new_name()
+                    current_scope()[name] = nn
+                    renamed.add(name)
+        if isinstance(node, Forin):
+            for target in (node.targets or []):
+                if isinstance(target, Name):
+                    name = target.id
+                    if is_garbage(name) and name not in current_scope():
+                        nn = new_name()
+                        current_scope()[name] = nn
+                        renamed.add(name)
+        if isinstance(node, Chunk):
+            if hasattr(node, 'body'):
+                for child in node.body or []:
+                    collect_locals(child)
+        if isinstance(node, Block):
+            if hasattr(node, 'body'):
+                for child in node.body or []:
+                    collect_locals(child)
+        if isinstance(node, (Assign, BinaryOp, UnaryOp, Call, Table, Field)):
+            pass
+
+    def walk_and_rename(node):
+        if isinstance(node, Name):
+            new_n = get_or_create_rename(node.id)
+            node.id = new_n
+        if isinstance(node, Function):
+            push_scope()
+            if hasattr(node, 'args'):
+                for arg in (node.args or []):
+                    if isinstance(arg, Name):
+                        new_n = get_or_create_rename(arg.id)
+                        arg.id = new_n
+            if hasattr(node, 'body'):
+                if isinstance(node.body, list):
+                    for child in node.body:
+                        walk_and_rename(child)
+                elif node.body is not None:
+                    walk_and_rename(node.body)
+            pop_scope()
+            return
+        if isinstance(node, Fornum):
+            push_scope()
+            if hasattr(node, 'variable') and isinstance(node.variable, Name):
+                new_n = get_or_create_rename(node.variable.id)
+                node.variable.id = new_n
+            for child_name in ['start', 'end', 'step', 'body']:
+                child = getattr(node, child_name, None)
+                if child:
+                    if isinstance(child, list):
+                        for c in child:
+                            walk_and_rename(c)
+                    else:
+                        walk_and_rename(child)
+            pop_scope()
+            return
+        if isinstance(node, Forin):
+            push_scope()
+            for target in (node.targets or []):
+                if isinstance(target, Name):
+                    new_n = get_or_create_rename(target.id)
+                    target.id = new_n
+            for child_name in ['iterators', 'body']:
+                child = getattr(node, child_name, None)
+                if child:
+                    if isinstance(child, list):
+                        for c in child:
+                            walk_and_rename(c)
+                    else:
+                        walk_and_rename(child)
+            pop_scope()
+            return
+        for attr in ['body', 'values', 'targets', 'args', 'fields', 'condition',
+                     'func', 'start', 'end', 'step', 'iterators', 'else_body',
+                     'left', 'right', 'operand', 'key', 'value', 'index',
+                     'expression', 'exp', 'var']:
+            child = getattr(node, attr, None)
+            if child is None:
+                continue
+            if isinstance(child, list):
+                for c in child:
+                    walk_and_rename(c)
+            else:
+                walk_and_rename(child)
+
+    collect_locals(tree)
+    walk_and_rename(tree)
+
+    try:
+        return tree.to_lua()
+    except Exception:
+        return _regex_rename_variables(code, garbage_pattern, builtins)
+
+
+def _regex_rename_variables(code, garbage_pattern, builtins):
+    identifier_re = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
+    all_names = set()
+    for m in identifier_re.finditer(code):
+        name = m.group(1)
+        if name not in builtins:
+            all_names.add(name)
+    garbage_names = {n for n in all_names if garbage_pattern.match(n)}
+    counter = [0]
+
+    def new_name():
+        counter[0] += 1
+        return f"v{counter[0]}"
+
+    name_map = {}
+    for gn in sorted(garbage_names, key=len, reverse=True):
+        name_map[gn] = new_name()
+
+    result = []
+    i = 0
+    n = len(code)
+    while i < n:
+        m = identifier_re.match(code, i)
+        if m:
+            name = m.group(1)
+            if name in name_map:
+                result.append(name_map[name])
+            else:
+                result.append(name)
+            i = m.end()
+        else:
+            result.append(code[i])
+            i += 1
+    return ''.join(result)
 
 
 class LuaASTWalker:
@@ -643,7 +1035,9 @@ class DeobfEngine:
             'table_mutation_hooks', 'staged_execution_passes',
             'runtime_state_snapshots', 'hook_diagnostics',
             'rejection_tracking', 'raw_capture_fallback',
-            'base64_recursive_peel', 'process_base64_peel'
+            'base64_recursive_peel', 'process_base64_peel',
+            'safe_beautifier', 'variable_renamer',
+            'deep_base64_peel', 'adaptive_scoring'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -717,7 +1111,7 @@ class DeobfEngine:
         return None
 
     def _run_lua_harness(self, source, depth=0, instruction_limit=500000):
-        if depth > 3:
+        if depth > 6:
             return None, 'max recursion depth'
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
         if source_hash in self.visited_hashes:
@@ -958,7 +1352,8 @@ else
                 end
             end
         end
-        if largest_len > 0 then            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
+        if largest_len > 0 then
+            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
         end
     end)
 
@@ -1088,7 +1483,22 @@ end
                 decoded_data = _recursive_decode(decoded_data)
                 score = _total_score(decoded_data)
                 syntax_ok = self._validate_lua(decoded_data)
-                if score >= 55:
+                roblox_patterns = sum(1 for pat in GOOD_PATTERNS if re.search(pat, decoded_data))
+                if score >= 30 and syntax_ok:
+                    candidates.append({
+                        'data': decoded_data,
+                        'score': score,
+                        'syntax_ok': syntax_ok,
+                        'tag': tag
+                    })
+                elif score >= 55:
+                    candidates.append({
+                        'data': decoded_data,
+                        'score': score,
+                        'syntax_ok': syntax_ok,
+                        'tag': tag
+                    })
+                elif roblox_patterns >= 5:
                     candidates.append({
                         'data': decoded_data,
                         'score': score,
@@ -1099,10 +1509,10 @@ end
             candidates.sort(key=lambda x: (x['syntax_ok'], x['score']), reverse=True)
 
             for candidate in candidates[:3]:
-                if candidate['syntax_ok'] and candidate['score'] >= 55:
+                if candidate['syntax_ok'] and candidate['score'] >= 30:
                     result = candidate['data']
                     result = _repair_control_flow(result)
-                    if result and result != source and depth < 3:
+                    if result and result != source and depth < 6:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
                         if recursive_result and _total_score(recursive_result) > _total_score(result):
                             return recursive_result, None
@@ -1110,7 +1520,7 @@ end
 
             if candidates:
                 best = candidates[0]['data']
-                if depth < 3 and len(best) > 100:
+                if depth < 6 and len(best) > 100:
                     try_decoded = _try_base64_decode(best)
                     if try_decoded:
                         for enc in ('utf-8', 'latin-1'):
@@ -1129,7 +1539,7 @@ end
                     if ':' in raw_cap:
                         raw_cap = raw_cap.split(':', 1)[1]
                     raw_capture = base64.b64decode(raw_cap).decode('latin-1', errors='replace')
-                    if depth < 3 and len(raw_capture) > 100:
+                    if depth < 6 and len(raw_capture) > 100:
                         try_decoded = _try_base64_decode(raw_capture)
                         if try_decoded:
                             for enc in ('utf-8', 'latin-1'):
@@ -1147,41 +1557,57 @@ end
             return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
-    def _keyword_beautify(self, code):
-        if not code:
-            return code
-        code = code.replace('\r\n', '\n').replace('\r', '\n')
-        keywords = ['function', 'local function', 'local', 'if', 'then', 'else', 'elseif',
-                    'for', 'while', 'do', 'repeat', 'return', 'end', 'until']
-        for kw in keywords:
-            code = re.sub(rf'(?<![A-Za-z0-9_])({re.escape(kw)})(?![A-Za-z0-9_])', r'\n\1', code)
-        code = re.sub(r'\n+', '\n', code)
-        lines = [line.strip() for line in code.split('\n') if line.strip()]
-        indent = 0
-        formatted = []
-        for line in lines:
-            if re.match(r'^(end|until|else|elseif)\b', line):
-                indent = max(0, indent - 1)
-            formatted.append('    ' * indent + line)
-            opens = len(re.findall(r'\b(function|then|do|repeat)\b', line))
-            closes = len(re.findall(r'\b(end|until)\b', line))
-            indent += opens - closes
-            if line.startswith(('else', 'elseif')):
-                indent += 1
-            indent = max(indent, 0)
-        return '\n'.join(formatted)
+    def _peel_base64_layers(self, data, max_layers=10):
+        current = data
+        for layer in range(max_layers):
+            if not isinstance(current, str):
+                break
+            stripped = current.strip()
+            if not re.fullmatch(r'[A-Za-z0-9+/=]+', stripped):
+                break
+            decoded = _try_base64_decode(stripped)
+            if not decoded:
+                break
+            try:
+                text = decoded.decode('utf-8', errors='replace')
+                if len(text) < 20:
+                    break
+                lua_kw = sum(1 for kw in LUA_KEYWORDS if kw in text)
+                if lua_kw >= 2:
+                    current = text
+                elif layer > 0:
+                    current = text
+                else:
+                    break
+            except:
+                break
+        return current
 
     def process(self, source):
         diags = []
         try:
             harness_result, harness_error = self._run_lua_harness(source)
             if harness_result:
+                harness_result = self._peel_base64_layers(harness_result)
                 score = _total_score(harness_result)
                 diags.append(f"harness: {len(harness_result)} chars score={score}")
-                if score >= 55:
-                    beautified = self._keyword_beautify(harness_result)
+                syntax_ok = self._validate_lua(harness_result)
+                roblox_patterns = sum(1 for pat in GOOD_PATTERNS if re.search(pat, harness_result))
+                lines_count = len(harness_result.splitlines())
+
+                if syntax_ok and (score >= 30 or roblox_patterns >= 5 or lines_count > 10):
+                    beautified = _safe_beautify(harness_result)
+                    beautified = _repair_control_flow(beautified)
+                    renamed = _rename_variables(beautified)
+                    if self._validate_lua(renamed):
+                        return renamed, 'lua_harness_readable', f'Readable Lua recovered (score={score})', []
+                    return beautified, 'lua_harness_readable', f'Readable Lua recovered (score={score})', []
+                elif score >= 55:
+                    beautified = _safe_beautify(harness_result)
+                    beautified = _repair_control_flow(beautified)
                     if self._validate_lua(beautified):
-                        return beautified, 'lua_harness_readable', 'Readable Lua recovered', []
+                        renamed = _rename_variables(beautified)
+                        return renamed, 'lua_harness_raw_score', f'Validated capture (score={score})', []
                     return beautified, 'lua_harness_raw_score', f'Unvalidated capture (score={score})', []
                 elif len(harness_result) > 100:
                     decoded = _try_base64_decode(harness_result)
@@ -1192,12 +1618,17 @@ end
                                 if len(text) > 50:
                                     recursive_result, _ = self._run_lua_harness(text, depth=1)
                                     if recursive_result:
+                                        recursive_result = self._peel_base64_layers(recursive_result)
                                         score2 = _total_score(recursive_result)
-                                        beautified = self._keyword_beautify(recursive_result)
-                                        return beautified, 'recursive_base64', f'Decoded base64 layer (score={score2})', []
+                                        beautified = _safe_beautify(recursive_result)
+                                        beautified = _repair_control_flow(beautified)
+                                        renamed = _rename_variables(beautified)
+                                        return renamed, 'recursive_base64', f'Decoded base64 layer (score={score2})', []
                             except:
                                 pass
-                    return self._keyword_beautify(harness_result), 'lua_harness_fallback', 'Fallback harness output', []
+                    beautified = _safe_beautify(harness_result)
+                    beautified = _repair_control_flow(beautified)
+                    return beautified, 'lua_harness_fallback', 'Fallback harness output', []
             elif harness_error:
                 diags.append(f"harness error: {harness_error[:500]}")
                 if 'diag: ' in harness_error:
@@ -1227,18 +1658,30 @@ end
                     shuffle_ranges = self._extract_shuffle(source)
                     decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
                     if decoded:
+                        decoded = self._peel_base64_layers(decoded)
                         decoded = _recursive_decode(decoded)
                         score = _total_score(decoded)
                         diags.append(f"decoded: {len(decoded)} chars score={score}")
-                        beautified = self._keyword_beautify(decoded)
-                        if score >= 55 and self._validate_lua(beautified):
-                            return beautified, 'static_decode', 'Structural decode', []
+                        syntax_ok = self._validate_lua(decoded)
+                        if syntax_ok and score >= 30:
+                            beautified = _safe_beautify(decoded)
+                            beautified = _repair_control_flow(beautified)
+                            renamed = _rename_variables(beautified)
+                            return renamed, 'static_decode', 'Structural decode', []
+                        elif score >= 55:
+                            beautified = _safe_beautify(decoded)
+                            beautified = _repair_control_flow(beautified)
+                            return beautified, 'static_decode_highscore', f'Structural decode (score={score})', []
                         elif len(decoded) > 100:
-                            if score >= 55:
-                                recursive_result, _ = self._run_lua_harness(decoded)
-                                if recursive_result and _total_score(recursive_result) > score:
-                                    beautified = self._keyword_beautify(recursive_result)
-                                    return beautified, 'recursive_decode', 'Recursive decode improved', []
+                            recursive_result, _ = self._run_lua_harness(decoded)
+                            if recursive_result and _total_score(recursive_result) > score:
+                                recursive_result = self._peel_base64_layers(recursive_result)
+                                beautified = _safe_beautify(recursive_result)
+                                beautified = _repair_control_flow(beautified)
+                                renamed = _rename_variables(beautified)
+                                return renamed, 'recursive_decode', 'Recursive decode improved', []
+                            beautified = _safe_beautify(decoded)
+                            beautified = _repair_control_flow(beautified)
                             return beautified, 'static_decode_raw', 'Structural decode raw output', []
             else:
                 diags.append("no alphabet table found")
