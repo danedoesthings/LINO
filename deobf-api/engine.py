@@ -635,7 +635,7 @@ class DeobfEngine:
             'process_group_isolation', 'capture_deduplication',
             'table_mutation_hooks', 'staged_execution_passes',
             'runtime_state_snapshots', 'hook_diagnostics',
-            'rejection_tracking'
+            'rejection_tracking', 'raw_capture_fallback'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -1105,6 +1105,15 @@ end
                 best = candidates[0]['data']
                 best = _structural_beautify(best)
                 return best, None
+            if captures:
+                try:
+                    raw_cap = captures[0]
+                    if ':' in raw_cap:
+                        raw_cap = raw_cap.split(':', 1)[1]
+                    raw_capture = base64.b64decode(raw_cap).decode('latin-1', errors='replace')
+                    return raw_capture, None
+                except:
+                    pass
             return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
@@ -1125,7 +1134,9 @@ end
                 elif len(harness_result) > 100:
                     return _structural_beautify(harness_result), 'lua_harness_fallback', 'Fallback harness output', []
             elif harness_error:
-                diags.append(f"harness error: {harness_error[:200]}")
+                diags.append(f"harness error: {harness_error[:500]}")
+                if 'diag: ' in harness_error:
+                    return harness_error, 'harness_diag', 'Harness diagnostic output', []
 
             bodies = _find_all_table_bodies(source)
             table_stats = []
