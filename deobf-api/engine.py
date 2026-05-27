@@ -761,6 +761,8 @@ local function looks_textual(s)
     return printable / #s > 0.75
 end
 
+local real_insert = table.insert
+
 local function save(tag, data)
     if type(data) ~= "string" then return end
     if #data < 20 then return end
@@ -768,12 +770,12 @@ local function save(tag, data)
     if CALL_DEPTH > MAX_DEPTH then return end
     CALL_DEPTH = CALL_DEPTH + 1
     local encoded = b64encode(data)
-    table.insert(captures, {tag = tag, data = encoded, raw_length = #data})
+    real_insert(captures, {tag = tag, data = encoded, raw_length = #data})
     CALL_DEPTH = CALL_DEPTH - 1
 end
 
 local real_loadstring = loadstring
-local real_load = load
+local real_load = load or loadstring
 local INSIDE_LOAD = false
 
 _G.loadstring = function(code, ...)
@@ -784,13 +786,15 @@ _G.loadstring = function(code, ...)
     end
     return real_loadstring(code, ...)
 end
-_G.load = function(code, ...)
-    if not INSIDE_LOAD then
-        INSIDE_LOAD = true
-        save("load", code)
-        INSIDE_LOAD = false
+if load then
+    _G.load = function(code, ...)
+        if not INSIDE_LOAD then
+            INSIDE_LOAD = true
+            save("load", code)
+            INSIDE_LOAD = false
+        end
+        return real_load(code, ...)
     end
-    return real_load(code, ...)
 end
 
 local real_char = string.char
@@ -811,12 +815,12 @@ table.concat = function(t, sep, i, j)
     return out
 end
 
-local real_insert = table.insert
+local real_insert_hook = table.insert
 table.insert = function(t, v, ...)
     if type(v) == "string" and #v > 20 and looks_textual(v) then
         save("table_insert", v)
     end
-    return real_insert(t, v, ...)
+    return real_insert_hook(t, v, ...)
 end
 
 local real_setmetatable = setmetatable
@@ -871,99 +875,106 @@ io.popen = function() error("io.popen blocked") end
 local f, err = loadfile("_SRCFILE_")
 if not f then
     print("ERR:COMPILE:" .. tostring(err))
-    return
-end
-
-local bit32 = bit32 or nil
-if not bit32 then
-    local function bit_bor(a, b)
-        local r, m = 0, 1
-        while a > 0 or b > 0 do
-            local abit, bbit = a % 2, b % 2
-            if abit + bbit > 0 then r = r + m end
-            a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+else
+    local bit32 = bit32 or nil
+    if not bit32 then
+        local function bit_bor(a, b)
+            local r, m = 0, 1
+            while a > 0 or b > 0 do
+                local abit, bbit = a % 2, b % 2
+                if abit + bbit > 0 then r = r + m end
+                a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+            end
+            return r
         end
-        return r
-    end
-    local function bit_band(a, b)
-        local r, m = 0, 1
-        while a > 0 and b > 0 do
-            local abit, bbit = a % 2, b % 2
-            if abit + bbit == 2 then r = r + m end
-            a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+        local function bit_band(a, b)
+            local r, m = 0, 1
+            while a > 0 and b > 0 do
+                local abit, bbit = a % 2, b % 2
+                if abit + bbit == 2 then r = r + m end
+                a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+            end
+            return r
         end
-        return r
-    end
-    local function bit_bxor(a, b)
-        local r, m = 0, 1
-        while a > 0 or b > 0 do
-            local abit, bbit = a % 2, b % 2
-            if abit ~= bbit then r = r + m end
-            a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+        local function bit_bxor(a, b)
+            local r, m = 0, 1
+            while a > 0 or b > 0 do
+                local abit, bbit = a % 2, b % 2
+                if abit ~= bbit then r = r + m end
+                a, b, m = math.floor(a/2), math.floor(b/2), m * 2
+            end
+            return r
         end
-        return r
-    end
-    local function bit_lshift(v, n)
-        return math.floor(v * (2 ^ n)) % 4294967296
-    end
-    local function bit_rshift(v, n)
-        return math.floor(v / (2 ^ n))
-    end
-    bit32 = {
-        bxor = bit_bxor,
-        band = bit_band,
-        bor = bit_bor,
-        lshift = bit_lshift,
-        rshift = bit_rshift,
-        arshift = bit_rshift,
-    }
-end
-_G.bit32 = bit32
-_G.bit = bit32
-
-if debug and debug.sethook then
-    debug.sethook(function()
-        error("instruction limit")
-    end, "", _INSTRLIMIT_)
-end
-
-local success, result = pcall(f)
-
-if debug and debug.sethook then
-    debug.sethook()
-end
-
-collectgarbage("collect")
-
-pcall(function()
-    for k, v in pairs(_G) do
-        if type(v) == "string" and #v > 100 and looks_textual(v) then
-            save("env_string", v)
+        local function bit_lshift(v, n)
+            return math.floor(v * (2 ^ n)) % 4294967296
         end
-        if type(v) == "table" and #v > 10 then
-            save("large_table", "table_with_" .. tostring(#v) .. "_entries")
+        local function bit_rshift(v, n)
+            return math.floor(v / (2 ^ n))
+        end
+        bit32 = {
+            bxor = bit_bxor,
+            band = bit_band,
+            bor = bit_bor,
+            lshift = bit_lshift,
+            rshift = bit_rshift,
+            arshift = bit_rshift,
+        }
+    end
+    _G.bit32 = bit32
+    _G.bit = bit32
+
+    if debug and debug.sethook then
+        debug.sethook(function()
+            error("instruction limit")
+        end, "", _INSTRLIMIT_)
+    end
+
+    local success, result = pcall(f)
+
+    if debug and debug.sethook then
+        debug.sethook()
+    end
+
+    collectgarbage("collect")
+
+    pcall(function()
+        for k, v in pairs(_G) do
+            if type(v) == "string" and #v > 100 and looks_textual(v) then
+                save("env_string", v)
+            end
+            if type(v) == "table" and #v > 10 then
+                save("large_table", "table_with_" .. tostring(#v) .. "_entries")
+            end
+        end
+    end)
+
+    for _, cap in ipairs(captures) do
+        print("CAP:" .. cap.tag .. ":" .. cap.data)
+    end
+
+    if #captures == 0 then
+        if not success then
+            print("ERR:RUNTIME:" .. tostring(result))
+        else
+            print("ERR:NO_OUTPUT")
         end
     end
-end)
-
-for _, cap in ipairs(captures) do
-    print("CAP:" .. cap.tag .. ":" .. cap.data)
-end
-
-if #captures == 0 then
-    if not success then
-        print("ERR:RUNTIME:" .. tostring(result))
-        return
-    end
-    print("ERR:NO_OUTPUT")
 end
 '''
-        harness = harness.replace('_SRCFILE_', src_path := None)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as src_tmp:
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.lua',
+            delete=False,
+            encoding='utf-8'
+        ) as src_tmp:
             src_tmp.write(source)
             src_path = src_tmp.name
 
-        harness = harness.replace('_SRCFILE_', src_path).replace('_INSTRLIMIT_', str(instruction_limit))
+        harness = (
+            harness
+            .replace('_SRCFILE_', src_path)
+            .replace('_INSTRLIMIT_', str(instruction_limit))
+        )
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
             tmp.write(harness)
             tmp_path = tmp.name
