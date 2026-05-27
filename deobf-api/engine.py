@@ -1039,15 +1039,16 @@ class DeobfEngine:
             'safe_beautifier', 'variable_renamer',
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
-            'custom_alphabet_fallback', 'suppress_luaparser_stderr'
+            'custom_alphabet_fallback', 'suppress_luaparser_stderr',
+            'table_allocation_guard', 'reduced_memory_limit'
         ]
 
     def _set_process_limits(self):
         try:
-            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (25, 30))
-            resource.setrlimit(resource.RLIMIT_NPROC, (50, 50))
-            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (18, 20))
+            resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except:
             pass
 
@@ -1180,6 +1181,21 @@ local function save(tag, data)
     local encoded = b64encode(data)
     real_insert(captures, {tag = tag, data = encoded, raw_length = #data})
     CALL_DEPTH = CALL_DEPTH - 1
+end
+
+local table_count = 0
+local table_limit = 50000
+local guarded_tables = setmetatable({}, {__mode = "k"})
+local real_setmetatable = setmetatable
+function setmetatable(t, mt)
+    if not guarded_tables[t] then
+        table_count = table_count + 1
+        guarded_tables[t] = true
+        if table_count > table_limit then
+            error("table allocation limit exceeded")
+        end
+    end
+    return real_setmetatable(t, mt)
 end
 
 local real_loadstring = loadstring
@@ -1408,7 +1424,7 @@ end
                     result = subprocess.run(
                         [lua_bin, tmp_path],
                         capture_output=True,
-                        timeout=30,
+                        timeout=20,
                         preexec_fn=self._set_process_limits
                     )
                     stdout = result.stdout.decode('latin-1', errors='replace')
@@ -1430,6 +1446,9 @@ end
                     if captures:
                         break
                     if errors and 'instruction limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
+                        self.visited_hashes.discard(source_hash)
+                        return self._run_lua_harness(source, depth, instruction_limit * 4)
+                    if errors and 'table allocation limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
                         self.visited_hashes.discard(source_hash)
                         return self._run_lua_harness(source, depth, instruction_limit * 4)
                     if errors:
