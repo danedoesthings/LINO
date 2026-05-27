@@ -1037,7 +1037,8 @@ class DeobfEngine:
             'rejection_tracking', 'raw_capture_fallback',
             'base64_recursive_peel', 'process_base64_peel',
             'safe_beautifier', 'variable_renamer',
-            'deep_base64_peel', 'adaptive_scoring'
+            'deep_base64_peel', 'adaptive_scoring',
+            'aggressive_base64_peel', 'bytecode_detection_in_peel'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -1563,24 +1564,40 @@ end
             if not isinstance(current, str):
                 break
             stripped = current.strip()
-            if not re.fullmatch(r'[A-Za-z0-9+/=]+', stripped):
+            if not re.fullmatch(r'[A-Za-z0-9+/=\s]+', stripped):
                 break
-            decoded = _try_base64_decode(stripped)
+            decoded = _try_base64_decode(re.sub(r'\s+', '', stripped))
             if not decoded:
                 break
-            try:
-                text = decoded.decode('utf-8', errors='replace')
-                if len(text) < 20:
+            if _is_lua_bytecode(decoded) and self._java_available:
+                try:
+                    unlua_result, _ = self._run_unluac(decoded)
+                    if unlua_result and len(unlua_result) > 50:
+                        return unlua_result
+                except:
+                    pass
+            text_found = False
+            for enc in ('utf-8', 'latin-1'):
+                try:
+                    text = decoded.decode(enc, errors='replace')
+                    if len(text) < 10:
+                        continue
+                    lua_kw = sum(1 for kw in LUA_KEYWORDS if kw in text)
+                    if lua_kw >= 2 or _is_probably_text(text):
+                        current = text
+                        text_found = True
+                        break
+                except:
+                    continue
+            if not text_found:
+                try:
+                    text = decoded.decode('latin-1', errors='replace')
+                    if len(text) > 10:
+                        current = text
+                    else:
+                        break
+                except:
                     break
-                lua_kw = sum(1 for kw in LUA_KEYWORDS if kw in text)
-                if lua_kw >= 2:
-                    current = text
-                elif layer > 0:
-                    current = text
-                else:
-                    break
-            except:
-                break
         return current
 
     def process(self, source):
