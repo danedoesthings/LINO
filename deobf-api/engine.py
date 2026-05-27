@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal, io
 from collections import OrderedDict, defaultdict, deque, namedtuple, Counter
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
@@ -1027,7 +1027,7 @@ class DeobfEngine:
             'safe_beautifier', 'variable_renamer',
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
-            'custom_alphabet_fallback'
+            'custom_alphabet_fallback', 'suppress_luaparser_stderr'
         ]
 
     def _set_process_limits(self):
@@ -1696,7 +1696,12 @@ end
     def _extract_alphabet_enhanced(self, source):
         if HAS_LUAPARSER:
             try:
-                tree = lua_ast.parse(source)
+                old_stderr = sys.stderr
+                sys.stderr = io.StringIO()
+                try:
+                    tree = lua_ast.parse(source)
+                finally:
+                    sys.stderr = old_stderr
                 for node in LuaASTWalker.walk(tree):
                     if hasattr(node, 'targets') and hasattr(node, 'values') and node.values:
                         if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 15:
@@ -1928,11 +1933,15 @@ end
             except OSError:
                 pass
         if HAS_LUAPARSER:
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
             try:
                 lua_ast.parse(code)
                 return True
             except Exception:
                 pass
+            finally:
+                sys.stderr = old_stderr
         return False
 
     def _run_unluac(self, bytecode):
