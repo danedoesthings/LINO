@@ -62,19 +62,6 @@ def _truncate(text, max_len):
 def _sanitize_diag(text):
     return ''.join(c for c in text if c.isprintable() or c in '\n\t')
 
-def _cleanup_lua_output(code):
-    if not code:
-        return code
-    code = code.replace('\r\n', '\n').replace('\r', '\n')
-    code = re.sub(r'\n\s*\n\s*\n', '\n\n', code)
-    code = re.sub(r'(\d+)\s+end', r'\1\nend', code)
-    code = re.sub(r'(\d+)\s+then', r'\1\nthen', code)
-    code = re.sub(r'(\d+)\s+else', r'\1\nelse', code)
-    code = re.sub(r'(\d+)\s+do', r'\1\ndo', code)
-    code = re.sub(r',\s*,', ',', code)
-    code = re.sub(r'\.\s*\.', '..', code)
-    return code
-
 async def run_deobf(raw_bytes, filename):
     if len(raw_bytes) > MAX_BYTES:
         return {
@@ -117,7 +104,6 @@ async def run_deobf(raw_bytes, filename):
         }
 
     result = data.get('result', '')
-    result = _cleanup_lua_output(result)
     detected = data.get('detected', 'unknown')
     diagnostic = data.get('diagnostic', '')
     trace = data.get('trace', [])
