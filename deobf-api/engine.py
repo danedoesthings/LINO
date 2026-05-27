@@ -634,7 +634,8 @@ class DeobfEngine:
             'adaptive_instruction_limits', 'memory_limits',
             'process_group_isolation', 'capture_deduplication',
             'table_mutation_hooks', 'staged_execution_passes',
-            'runtime_state_snapshots'
+            'runtime_state_snapshots', 'hook_diagnostics',
+            'rejection_tracking'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -717,6 +718,7 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
+local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0}
 local CALL_DEPTH = 0
 local MAX_DEPTH = 25
 
@@ -758,15 +760,21 @@ local function looks_textual(s)
             printable = printable + 1
         end
     end
-    return printable / #s > 0.75
+    return printable / #s > 0.45
 end
 
 local real_insert = table.insert
 
 local function save(tag, data)
     if type(data) ~= "string" then return end
-    if #data < 20 then return end
-    if not looks_textual(data) then return end
+    if #data < 20 then
+        hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
+        return
+    end
+    if not looks_textual(data) then
+        hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
+        return
+    end
     if CALL_DEPTH > MAX_DEPTH then return end
     CALL_DEPTH = CALL_DEPTH + 1
     local encoded = b64encode(data)
@@ -779,6 +787,7 @@ local real_load = load or loadstring
 local INSIDE_LOAD = false
 
 _G.loadstring = function(code, ...)
+    hook_stats.loadstring = (hook_stats.loadstring or 0) + 1
     if not INSIDE_LOAD then
         INSIDE_LOAD = true
         save("loadstring", code)
@@ -788,6 +797,7 @@ _G.loadstring = function(code, ...)
 end
 if load then
     _G.load = function(code, ...)
+        hook_stats.load = (hook_stats.load or 0) + 1
         if not INSIDE_LOAD then
             INSIDE_LOAD = true
             save("load", code)
@@ -799,8 +809,9 @@ end
 
 local real_char = string.char
 string.char = function(...)
+    hook_stats.char = (hook_stats.char or 0) + 1
     local out = real_char(...)
-    if #out > 40 and looks_textual(out) then
+    if #out > 40 then
         save("string_char", out)
     end
     return out
@@ -808,8 +819,9 @@ end
 
 local real_concat = table.concat
 table.concat = function(t, sep, i, j)
+    hook_stats.concat = (hook_stats.concat or 0) + 1
     local out = real_concat(t, sep, i, j)
-    if type(out) == "string" and #out > 80 and looks_textual(out) then
+    if type(out) == "string" and #out > 80 then
         save("concat", out)
     end
     return out
@@ -817,31 +829,16 @@ end
 
 local real_insert_hook = table.insert
 table.insert = function(t, v, ...)
-    if type(v) == "string" and #v > 20 and looks_textual(v) then
+    hook_stats.insert = (hook_stats.insert or 0) + 1
+    if type(v) == "string" and #v > 20 then
         save("table_insert", v)
     end
     return real_insert_hook(t, v, ...)
 end
 
-local real_setmetatable = setmetatable
-setmetatable = function(t, mt)
-    if mt and type(mt) == "table" then
-        save("setmetatable", "metatable_set")
-    end
-    return real_setmetatable(t, mt)
-end
-
-local real_getmetatable = getmetatable
-getmetatable = function(t)
-    local mt = real_getmetatable(t)
-    if mt and type(mt) == "table" then
-        save("getmetatable", "metatable_get")
-    end
-    return mt
-end
-
 local real_pcall = pcall
 _G.pcall = function(fn, ...)
+    hook_stats.pcall = (hook_stats.pcall or 0) + 1
     if type(fn) == "function" then
         local is_lua_closure = false
         if debug and debug.getinfo then
@@ -863,6 +860,7 @@ end
 if string.dump then
     local real_dump = string.dump
     string.dump = function(fn, ...)
+        hook_stats.bytecode = (hook_stats.bytecode or 0) + 1
         local bc = real_dump(fn, ...)
         save("bytecode", bc)
         return bc
@@ -938,15 +936,37 @@ else
     collectgarbage("collect")
 
     pcall(function()
+        local largest_str = ""
+        local largest_len = 0
         for k, v in pairs(_G) do
-            if type(v) == "string" and #v > 100 and looks_textual(v) then
-                save("env_string", v)
-            end
-            if type(v) == "table" and #v > 10 then
-                save("large_table", "table_with_" .. tostring(#v) .. "_entries")
+            if type(v) == "string" then
+                if #v > largest_len then
+                    largest_str = v
+                    largest_len = #v
+                end
+                if #v > 20 then
+                    hook_stats.env_string = (hook_stats.env_string or 0) + 1
+                    save("env_string", v)
+                end
             end
         end
+        if largest_len > 0 then
+            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
+        end
     end)
+
+    print("DIAG:hook_stats=" .. b64encode(
+        "loadstring=" .. tostring(hook_stats.loadstring or 0) ..
+        ",load=" .. tostring(hook_stats.load or 0) ..
+        ",char=" .. tostring(hook_stats.char or 0) ..
+        ",concat=" .. tostring(hook_stats.concat or 0) ..
+        ",insert=" .. tostring(hook_stats.insert or 0) ..
+        ",pcall=" .. tostring(hook_stats.pcall or 0) ..
+        ",bytecode=" .. tostring(hook_stats.bytecode or 0) ..
+        ",env_string=" .. tostring(hook_stats.env_string or 0) ..
+        ",rejected_textual=" .. tostring(hook_stats.rejected_textual or 0) ..
+        ",rejected_size=" .. tostring(hook_stats.rejected_size or 0)
+    ))
 
     for _, cap in ipairs(captures) do
         print("CAP:" .. cap.tag .. ":" .. cap.data)
@@ -981,6 +1001,7 @@ end
 
         captures = []
         errors = []
+        diag_info = {}
         try:
             for lua_bin in ['lua5.1', 'lua']:
                 try:
@@ -997,9 +1018,15 @@ end
                             captures.append(line[4:])
                         elif line.startswith('ERR:'):
                             errors.append(line[4:])
+                        elif line.startswith('DIAG:'):
+                            parts = line[5:].split('=', 1)
+                            if len(parts) == 2:
+                                diag_info[parts[0]] = parts[1]
                     for line in stderr.splitlines():
                         if line.strip():
                             errors.append(line.strip())
+                    if diag_info:
+                        errors.append('diag: ' + json.dumps(diag_info))
                     if captures:
                         break
                     if errors and 'instruction limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
