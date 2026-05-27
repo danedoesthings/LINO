@@ -503,31 +503,27 @@ def _recursive_decode(data, depth=0, visited=None, max_ops=None):
                         for enc in ('utf-8', 'latin-1'):
                             try:
                                 out_text = out.decode(enc, errors='replace')
-                                lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in out_text)
-                                if lua_kw_count >= 3 or fn_name == 'base64':
-                                    score = _total_score(out_text)
-                                    if score > best_score:
-                                        best = out_text
-                                        best_score = score
-                                    deeper = _recursive_decode(out_text, depth + 1, visited, max_ops)
-                                    deeper_score = _total_score(deeper)
-                                    if deeper_score > best_score:
-                                        best = deeper
-                                        best_score = deeper_score
+                                score = _total_score(out_text)
+                                if score > best_score:
+                                    best = out_text
+                                    best_score = score
+                                deeper = _recursive_decode(out_text, depth + 1, visited, max_ops)
+                                deeper_score = _total_score(deeper)
+                                if deeper_score > best_score:
+                                    best = deeper
+                                    best_score = deeper_score
                             except:
                                 pass
                     elif isinstance(out, str):
-                        lua_kw_count = sum(1 for kw in LUA_KEYWORDS if kw in out)
-                        if lua_kw_count >= 3 or fn_name == 'base64':
-                            score = _total_score(out)
-                            if score > best_score:
-                                best = out
-                                best_score = score
-                            deeper = _recursive_decode(out, depth + 1, visited, max_ops)
-                            deeper_score = _total_score(deeper)
-                            if deeper_score > best_score:
-                                best = deeper
-                                best_score = deeper_score
+                        score = _total_score(out)
+                        if score > best_score:
+                            best = out
+                            best_score = score
+                        deeper = _recursive_decode(out, depth + 1, visited, max_ops)
+                        deeper_score = _total_score(deeper)
+                        if deeper_score > best_score:
+                            best = deeper
+                            best_score = deeper_score
             except:
                 pass
     if isinstance(best, bytes):
@@ -574,11 +570,6 @@ def _safe_beautify(code):
 
     outdent_keywords = {"end", "until", "else", "elseif"}
     indent_after = {"function", "then", "do", "repeat", "else", "elseif"}
-    newline_before_keywords = {
-        "function", "local function", "local", "if", "for",
-        "while", "do", "repeat", "return", "end", "until",
-        "else", "elseif", "then"
-    }
 
     i = 0
     n = len(code)
@@ -622,8 +613,8 @@ def _safe_beautify(code):
                         i += 1
                     continue
 
-            if c == '\n' or (c == ';' and state == State.CODE):
-                line_str = ''.join(line_buf).rstrip('\n\r ;')
+            if c == '\n':
+                line_str = ''.join(line_buf).rstrip('\n\r')
                 if line_str:
                     trimmed = line_str.lstrip()
                     first_word = trimmed.split()[0] if trimmed else ''
@@ -634,11 +625,7 @@ def _safe_beautify(code):
                     if last_word in indent_after:
                         indent_level += 1
                 line_buf = []
-                if c == '\n':
-                    i += 1
-                else:
-                    line_buf.append(c)
-                    i += 1
+                i += 1
                 continue
 
             line_buf.append(c)
@@ -703,7 +690,7 @@ def _safe_beautify(code):
             i += 1
 
     if line_buf:
-        line_str = ''.join(line_buf).rstrip('\n\r ;')
+        line_str = ''.join(line_buf).rstrip('\n\r')
         if line_str:
             trimmed = line_str.lstrip()
             first_word = trimmed.split()[0] if trimmed else ''
@@ -841,8 +828,6 @@ def _rename_variables(code):
             if hasattr(node, 'body'):
                 for child in node.body or []:
                     collect_locals(child)
-        if isinstance(node, (Assign, BinaryOp, UnaryOp, Call, Table, Field)):
-            pass
 
     def walk_and_rename(node):
         if isinstance(node, Name):
@@ -1005,7 +990,10 @@ class DeobfEngine:
         self.visited_hashes = set()
         self.seen_captures = set()
         self.decode_operations = 0
-        self.capabilities = {
+        self._java_available = shutil.which('java') is not None
+
+    def get_capabilities(self):
+        return [
             'structural_parsing', 'balanced_brace_scanning',
             'custom_base64_decode', 'shuffle_range_recovery',
             'lua_runtime_harness', 'luaparser_ast_extraction',
@@ -1038,12 +1026,9 @@ class DeobfEngine:
             'base64_recursive_peel', 'process_base64_peel',
             'safe_beautifier', 'variable_renamer',
             'deep_base64_peel', 'adaptive_scoring',
-            'aggressive_base64_peel', 'bytecode_detection_in_peel'
-        }
-        self._java_available = shutil.which('java') is not None
-
-    def get_capabilities(self):
-        return list(self.capabilities)
+            'aggressive_base64_peel', 'bytecode_detection_in_peel',
+            'custom_alphabet_fallback'
+        ]
 
     def _set_process_limits(self):
         try:
