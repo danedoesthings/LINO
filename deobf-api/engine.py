@@ -544,13 +544,20 @@ def _recursive_decode(data, depth=0, visited=None, max_ops=None):
     return best
 
 
-def _structural_beautify(code):
+def _repair_control_flow(code):
     if not code:
         return code
-    code = code.replace('\r\n', '\n').replace('\r', '\n')
-    code = re.sub(r'[ \t]+', ' ', code)
-    code = re.sub(r'\n{3,}', '\n\n', code)
-    return code.strip()
+    funcs = len(re.findall(r'\bfunction\b', code))
+    ends = len(re.findall(r'\bend\b', code))
+    while ends < funcs:
+        code = code.rstrip() + "\nend"
+        ends += 1
+    opens = len(re.findall(r'\b(if|for|while)\b', code))
+    closes = len(re.findall(r'\bend\b', code))
+    while closes < opens + funcs:
+        code = code.rstrip() + "\nend"
+        closes += 1
+    return code
 
 
 class LuaASTWalker:
@@ -626,7 +633,7 @@ class DeobfEngine:
             'deferred_capture_return', 'table_insert_hook',
             'pcall_hook', 'recursion_guard', 'execution_limits',
             'syntax_weighted_scoring', 'control_flow_repair',
-            'safe_beautifier', 'ast_normalization',
+            'keyword_beautifier', 'ast_normalization',
             'raw_score_fallback', 'unconditional_harness_return',
             'full_stdlib_native_env', 'extended_instruction_limit',
             'pure_lua51_bit32', 'recursive_cycle_detection',
@@ -636,7 +643,7 @@ class DeobfEngine:
             'table_mutation_hooks', 'staged_execution_passes',
             'runtime_state_snapshots', 'hook_diagnostics',
             'rejection_tracking', 'raw_capture_fallback',
-            'base64_recursive_peel'
+            'base64_recursive_peel', 'process_base64_peel'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -951,8 +958,7 @@ else
                 end
             end
         end
-        if largest_len > 0 then
-            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
+        if largest_len > 0 then            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
         end
     end)
 
@@ -1095,7 +1101,7 @@ end
             for candidate in candidates[:3]:
                 if candidate['syntax_ok'] and candidate['score'] >= 55:
                     result = candidate['data']
-                    result = _structural_beautify(result)
+                    result = _repair_control_flow(result)
                     if result and result != source and depth < 3:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
                         if recursive_result and _total_score(recursive_result) > _total_score(result):
@@ -1104,7 +1110,6 @@ end
 
             if candidates:
                 best = candidates[0]['data']
-                best = _structural_beautify(best)
                 if depth < 3 and len(best) > 100:
                     try_decoded = _try_base64_decode(best)
                     if try_decoded:
@@ -1142,6 +1147,30 @@ end
             return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
+    def _keyword_beautify(self, code):
+        if not code:
+            return code
+        code = code.replace('\r\n', '\n').replace('\r', '\n')
+        keywords = ['function', 'local function', 'local', 'if', 'then', 'else', 'elseif',
+                    'for', 'while', 'do', 'repeat', 'return', 'end', 'until']
+        for kw in keywords:
+            code = re.sub(rf'(?<![A-Za-z0-9_])({re.escape(kw)})(?![A-Za-z0-9_])', r'\n\1', code)
+        code = re.sub(r'\n+', '\n', code)
+        lines = [line.strip() for line in code.split('\n') if line.strip()]
+        indent = 0
+        formatted = []
+        for line in lines:
+            if re.match(r'^(end|until|else|elseif)\b', line):
+                indent = max(0, indent - 1)
+            formatted.append('    ' * indent + line)
+            opens = len(re.findall(r'\b(function|then|do|repeat)\b', line))
+            closes = len(re.findall(r'\b(end|until)\b', line))
+            indent += opens - closes
+            if line.startswith(('else', 'elseif')):
+                indent += 1
+            indent = max(indent, 0)
+        return '\n'.join(formatted)
+
     def process(self, source):
         diags = []
         try:
@@ -1150,14 +1179,25 @@ end
                 score = _total_score(harness_result)
                 diags.append(f"harness: {len(harness_result)} chars score={score}")
                 if score >= 55:
-                    if self._validate_lua(harness_result):
-                        return harness_result, 'lua_harness_raw', 'Raw harness capture (valid Lua)', []
-                    beautified = _structural_beautify(harness_result)
+                    beautified = self._keyword_beautify(harness_result)
                     if self._validate_lua(beautified):
-                        return beautified, 'lua_harness_beautified', 'Beautified harness capture', []
-                    return harness_result, 'lua_harness_raw_score', f'High-score unvalidated capture (score={score})', []
+                        return beautified, 'lua_harness_readable', 'Readable Lua recovered', []
+                    return beautified, 'lua_harness_raw_score', f'Unvalidated capture (score={score})', []
                 elif len(harness_result) > 100:
-                    return _structural_beautify(harness_result), 'lua_harness_fallback', 'Fallback harness output', []
+                    decoded = _try_base64_decode(harness_result)
+                    if decoded:
+                        for enc in ('utf-8', 'latin-1'):
+                            try:
+                                text = decoded.decode(enc, errors='replace')
+                                if len(text) > 50:
+                                    recursive_result, _ = self._run_lua_harness(text, depth=1)
+                                    if recursive_result:
+                                        score2 = _total_score(recursive_result)
+                                        beautified = self._keyword_beautify(recursive_result)
+                                        return beautified, 'recursive_base64', f'Decoded base64 layer (score={score2})', []
+                            except:
+                                pass
+                    return self._keyword_beautify(harness_result), 'lua_harness_fallback', 'Fallback harness output', []
             elif harness_error:
                 diags.append(f"harness error: {harness_error[:500]}")
                 if 'diag: ' in harness_error:
@@ -1190,14 +1230,14 @@ end
                         decoded = _recursive_decode(decoded)
                         score = _total_score(decoded)
                         diags.append(f"decoded: {len(decoded)} chars score={score}")
-                        beautified = _structural_beautify(decoded)
+                        beautified = self._keyword_beautify(decoded)
                         if score >= 55 and self._validate_lua(beautified):
                             return beautified, 'static_decode', 'Structural decode', []
                         elif len(decoded) > 100:
                             if score >= 55:
                                 recursive_result, _ = self._run_lua_harness(decoded)
                                 if recursive_result and _total_score(recursive_result) > score:
-                                    beautified = _structural_beautify(recursive_result)
+                                    beautified = self._keyword_beautify(recursive_result)
                                     return beautified, 'recursive_decode', 'Recursive decode improved', []
                             return beautified, 'static_decode_raw', 'Structural decode raw output', []
             else:
