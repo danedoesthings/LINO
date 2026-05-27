@@ -85,16 +85,6 @@ LOAD_PATTERNS = [
 ]
 
 
-@dataclass
-class Diagnostic:
-    stage: str
-    success: bool
-    score: int = 0
-    syntax_valid: bool = False
-    entropy: float = 0.0
-    notes: List[str] = field(default_factory=list)
-
-
 def _shannon_entropy(data):
     if not data:
         return 0
@@ -549,6 +539,16 @@ def _repair_control_flow(code):
     return code
 
 
+def _structural_beautify(code):
+    if not code:
+        return code
+    code = code.replace('\r\n', '\n').replace('\r', '\n')
+    code = re.sub(r'(?<![A-Za-z0-9_])(function|local function|if|then|else|elseif|for|while|do|repeat|return|end)(?![A-Za-z0-9_])', r'\n\1', code)
+    code = re.sub(r'\n+', '\n', code)
+    lines = [line.strip() for line in code.split('\n') if line.strip()]
+    return '\n'.join(lines)
+
+
 class LuaASTWalker:
     @staticmethod
     def walk(node):
@@ -620,7 +620,8 @@ class DeobfEngine:
             'deferred_capture_return', 'table_insert_hook',
             'pcall_hook', 'recursion_guard', 'execution_limits',
             'syntax_weighted_scoring', 'control_flow_repair',
-            'token_aware_beautifier', 'ast_normalization'
+            'structural_beautifier', 'ast_normalization',
+            'raw_score_fallback', 'unconditional_harness_return'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -974,7 +975,7 @@ end
             for candidate in candidates[:3]:
                 if candidate['syntax_ok'] and candidate['score'] >= 55:
                     result = _repair_control_flow(candidate['data'])
-                    result = self._beautify(result)
+                    result = _structural_beautify(result)
                     if result and result != source and depth < 3:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
                         if recursive_result and _total_score(recursive_result) > _total_score(result):
@@ -982,7 +983,9 @@ end
                     return result, None
 
             if candidates:
-                return candidates[0]['data'], None
+                best = candidates[0]['data']
+                best = _structural_beautify(best)
+                return best, None
             return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
@@ -993,12 +996,18 @@ end
             if harness_result:
                 score = _total_score(harness_result)
                 diags.append(f"harness: {len(harness_result)} chars score={score}")
-                beautified = self._beautify(harness_result)
-                repaired = _repair_control_flow(beautified)
-                if score >= 55 and self._validate_lua(repaired):
-                    return repaired, 'lua_harness', 'Readable Lua recovered', []
-                elif len(harness_result) > 100 and score >= 55 and self._validate_lua(beautified):
-                    return beautified, 'lua_harness_validated', 'Validated Lua output', []
+                if score >= 55:
+                    if self._validate_lua(harness_result):
+                        return harness_result, 'lua_harness_raw', 'Raw harness capture (valid Lua)', []
+                    repaired = _repair_control_flow(harness_result)
+                    if self._validate_lua(repaired):
+                        return repaired, 'lua_harness_repaired', 'Repaired harness capture', []
+                    beautified = _structural_beautify(harness_result)
+                    if self._validate_lua(beautified):
+                        return beautified, 'lua_harness_beautified', 'Beautified harness capture', []
+                    return harness_result, 'lua_harness_raw_score', f'High-score unvalidated capture (score={score})', []
+                elif len(harness_result) > 100:
+                    return _structural_beautify(harness_result), 'lua_harness_fallback', 'Fallback harness output', []
             elif harness_error:
                 diags.append(f"harness error: {harness_error[:200]}")
 
@@ -1029,16 +1038,17 @@ end
                         decoded = _recursive_decode(decoded)
                         score = _total_score(decoded)
                         diags.append(f"decoded: {len(decoded)} chars score={score}")
-                        beautified = self._beautify(decoded)
+                        beautified = _structural_beautify(decoded)
                         repaired = _repair_control_flow(beautified)
                         if score >= 55 and self._validate_lua(repaired):
                             return repaired, 'static_decode', 'Structural decode', []
-                        elif len(decoded) > 100 and score >= 55 and self._validate_lua(beautified):
-                            recursive_result, _ = self._run_lua_harness(decoded)
-                            if recursive_result and _total_score(recursive_result) > score:
-                                beautified = self._beautify(recursive_result)
-                                repaired = _repair_control_flow(beautified)
-                                return repaired, 'recursive_decode', 'Recursive decode improved', []
+                        elif len(decoded) > 100:
+                            if score >= 55:
+                                recursive_result, _ = self._run_lua_harness(decoded)
+                                if recursive_result and _total_score(recursive_result) > score:
+                                    beautified = _structural_beautify(recursive_result)
+                                    repaired = _repair_control_flow(beautified)
+                                    return repaired, 'recursive_decode', 'Recursive decode improved', []
                             return beautified, 'static_decode_raw', 'Structural decode raw output', []
             else:
                 diags.append("no alphabet table found")
@@ -1255,13 +1265,6 @@ end
         if xor_result:
             return xor_result
         return decoded if len(decoded) > 50 else None
-
-    def _beautify(self, code):
-        if not code:
-            return code
-        code = code.replace('\r\n', '\n').replace('\r', '\n')
-        lines = [''.join(c for c in line if c.isprintable() or c == '\t').rstrip() for line in code.split('\n')]
-        return '\n'.join(lines)
 
     def _validate_lua(self, code):
         if not code or len(code) < 20:
