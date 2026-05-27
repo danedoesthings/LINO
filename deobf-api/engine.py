@@ -621,7 +621,8 @@ class DeobfEngine:
             'pcall_hook', 'recursion_guard', 'execution_limits',
             'syntax_weighted_scoring', 'control_flow_repair',
             'structural_beautifier', 'ast_normalization',
-            'raw_score_fallback', 'unconditional_harness_return'
+            'raw_score_fallback', 'unconditional_harness_return',
+            'full_stdlib_sandbox', 'extended_instruction_limit'
         }
         self._java_available = shutil.which('java') is not None
 
@@ -802,34 +803,11 @@ local safe_env = {
     tonumber = tonumber,
     tostring = tostring,
     type = type,
-    string = {
-        byte = string.byte,
-        char = string.char,
-        find = string.find,
-        format = string.format,
-        gmatch = string.gmatch,
-        gsub = string.gsub,
-        len = string.len,
-        lower = string.lower,
-        match = string.match,
-        rep = string.rep,
-        reverse = string.reverse,
-        sub = string.sub,
-        upper = string.upper,
-    },
-    table = {
-        concat = table.concat,
-        insert = table.insert,
-        remove = table.remove,
-        sort = table.sort,
-    },
-    math = {
-        abs = math.abs,
-        ceil = math.ceil,
-        floor = math.floor,
-        max = math.max,
-        min = math.min,
-    },
+    string = string,
+    table = table,
+    math = math,
+    bit = bit or {bxor = function(a,b) return (a ~ b) end, band = function(a,b) return (a & b) end, bor = function(a,b) return (a | b) end},
+    bit32 = bit32 or {bxor = function(a,b) return (a ~ b) end, band = function(a,b) return (a & b) end, bor = function(a,b) return (a | b) end},
     loadstring = _G.loadstring,
     load = _G.load,
     pcall = _G.pcall,
@@ -845,6 +823,8 @@ local safe_env = {
     rawset = rawset,
     rawget = rawget,
     unpack = unpack,
+    coroutine = {create = coroutine.create, resume = coroutine.resume, status = coroutine.status, wrap = function(f) return coroutine.wrap(f) end},
+    os = {clock = os.clock, time = os.time, date = os.date, difftime = os.difftime, exit = function() end},
 }
 safe_env._G = safe_env
 
@@ -855,7 +835,7 @@ end
 if debug and debug.sethook then
     debug.sethook(function()
         error("instruction limit")
-    end, "", 100000)
+    end, "", 5000000)
 end
 
 local success, result = pcall(f)
