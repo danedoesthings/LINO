@@ -31,11 +31,14 @@ SUCCESS_METHODS = (
     'recursive_sandbox_capture', 'recursive_lune_capture',
     'lifter_unluac', 'lifter_source',
     'roblox_execution', 'semantic_full', 'semantic_raw',
-    'static_decode', 'static_decode_raw',
-    'lua_harness', 'lua_harness_raw',
+    'static_decode', 'static_decode_raw', 'static_decode_highscore',
+    'lua_harness', 'lua_harness_raw', 'lua_harness_raw_score',
+    'lua_harness_repaired', 'lua_harness_beautified', 'lua_harness_fallback',
+    'lua_harness_highscore', 'lua_harness_validated',
     'raw_base64_decode', 'raw_base64_decode_raw',
     'runtime_execution', 'sandbox_raw',
     'roblox_raw', 'prometheus_execution',
+    'recursive_decode',
 )
 
 async def call_api(source_b64):
