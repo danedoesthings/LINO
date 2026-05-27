@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal, io
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal, io, contextlib
 from collections import OrderedDict, defaultdict, deque, namedtuple, Counter
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
@@ -83,6 +83,16 @@ LOAD_PATTERNS = [
     "assert(load",
     "pcall(load",
 ]
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stderr = old_stderr
 
 
 def _shannon_entropy(data):
@@ -392,16 +402,17 @@ def _is_self_capture(text):
 def _score_lua_validity(code):
     if not code or len(code) < 20:
         return -100
-    try:
-        lua_ast.parse(code)
-        return 100
-    except Exception as e:
-        msg = str(e).lower()
-        if "expected" in msg:
-            return -40
-        if "malformed" in msg:
-            return -80
-        return -20
+    with _suppress_stderr():
+        try:
+            lua_ast.parse(code)
+            return 100
+        except Exception as e:
+            msg = str(e).lower()
+            if "expected" in msg:
+                return -40
+            if "malformed" in msg:
+                return -80
+            return -20
 
 
 def _readability_score(code):
@@ -722,16 +733,17 @@ def _rename_variables(code):
         'Instance', 'Ray', 'Region3', 'Drawing', 'task', 'os', 'io'
     }
 
-    try:
-        from luaparser import ast
-        from luaparser.astnodes import (
-            Chunk, Block, LocalAssign, Assign, Function, Fornum, Forin,
-            Name, Index, Call, String, Number, TrueExpr, FalseExpr, Nil,
-            UnaryOp, BinaryOp, Table, Field
-        )
-        tree = ast.parse(code)
-    except Exception:
-        return _regex_rename_variables(code, garbage_pattern, builtins)
+    with _suppress_stderr():
+        try:
+            from luaparser import ast
+            from luaparser.astnodes import (
+                Chunk, Block, LocalAssign, Assign, Function, Fornum, Forin,
+                Name, Index, Call, String, Number, TrueExpr, FalseExpr, Nil,
+                UnaryOp, BinaryOp, Table, Field
+            )
+            tree = ast.parse(code)
+        except Exception:
+            return _regex_rename_variables(code, garbage_pattern, builtins)
 
     rename_counter = [0]
 
@@ -1586,122 +1598,118 @@ end
         return current
 
     def process(self, source):
-        diags = []
-        try:
-            harness_result, harness_error = self._run_lua_harness(source)
-            if harness_result:
-                harness_result = self._peel_base64_layers(harness_result)
-                score = _total_score(harness_result)
-                diags.append(f"harness: {len(harness_result)} chars score={score}")
-                syntax_ok = self._validate_lua(harness_result)
-                roblox_patterns = sum(1 for pat in GOOD_PATTERNS if re.search(pat, harness_result))
-                lines_count = len(harness_result.splitlines())
+        with _suppress_stderr():
+            diags = []
+            try:
+                harness_result, harness_error = self._run_lua_harness(source)
+                if harness_result:
+                    harness_result = self._peel_base64_layers(harness_result)
+                    score = _total_score(harness_result)
+                    diags.append(f"harness: {len(harness_result)} chars score={score}")
+                    syntax_ok = self._validate_lua(harness_result)
+                    roblox_patterns = sum(1 for pat in GOOD_PATTERNS if re.search(pat, harness_result))
+                    lines_count = len(harness_result.splitlines())
 
-                if syntax_ok and (score >= 30 or roblox_patterns >= 5 or lines_count > 10):
-                    beautified = _safe_beautify(harness_result)
-                    beautified = _repair_control_flow(beautified)
-                    renamed = _rename_variables(beautified)
-                    if self._validate_lua(renamed):
-                        return renamed, 'lua_harness_readable', f'Readable Lua recovered (score={score})', []
-                    return beautified, 'lua_harness_readable', f'Readable Lua recovered (score={score})', []
-                elif score >= 55:
-                    beautified = _safe_beautify(harness_result)
-                    beautified = _repair_control_flow(beautified)
-                    if self._validate_lua(beautified):
+                    if syntax_ok and (score >= 30 or roblox_patterns >= 5 or lines_count > 10):
+                        beautified = _safe_beautify(harness_result)
+                        beautified = _repair_control_flow(beautified)
                         renamed = _rename_variables(beautified)
-                        return renamed, 'lua_harness_raw_score', f'Validated capture (score={score})', []
-                    return beautified, 'lua_harness_raw_score', f'Unvalidated capture (score={score})', []
-                elif len(harness_result) > 100:
-                    decoded = _try_base64_decode(harness_result)
-                    if decoded:
-                        for enc in ('utf-8', 'latin-1'):
-                            try:
-                                text = decoded.decode(enc, errors='replace')
-                                if len(text) > 50:
-                                    recursive_result, _ = self._run_lua_harness(text, depth=1)
-                                    if recursive_result:
-                                        recursive_result = self._peel_base64_layers(recursive_result)
-                                        score2 = _total_score(recursive_result)
-                                        beautified = _safe_beautify(recursive_result)
-                                        beautified = _repair_control_flow(beautified)
-                                        renamed = _rename_variables(beautified)
-                                        return renamed, 'recursive_base64', f'Decoded base64 layer (score={score2})', []
-                            except:
-                                pass
-                    beautified = _safe_beautify(harness_result)
-                    beautified = _repair_control_flow(beautified)
-                    return beautified, 'lua_harness_fallback', 'Fallback harness output', []
-            elif harness_error:
-                diags.append(f"harness error: {harness_error[:500]}")
-                if 'diag: ' in harness_error:
-                    return harness_error, 'harness_diag', 'Harness diagnostic output', []
-
-            bodies = _find_all_table_bodies(source)
-            table_stats = []
-            for body in bodies:
-                entries = _parse_table_entries(body)
-                strings = [e for e in entries if isinstance(e, str)]
-                strings = [s for s in strings if not _looks_like_vm_blob(s)]
-                if len(strings) >= 10:
-                    avg = sum(len(s) for s in strings) / len(strings)
-                    table_stats.append(f"n={len(strings)} avg={avg:.1f} sample={strings[0][:20]}")
-
-            if table_stats:
-                diags.append("tables: " + "; ".join(table_stats[:5]))
-            else:
-                diags.append("no tables with 10+ strings found")
-
-            alphabet, alpha_var = self._extract_alphabet_enhanced(source)
-            if alphabet:
-                diags.append(f"alphabet: {len(alphabet)} entries")
-                encoded_chunks = self._extract_encoded_data_enhanced(source, alpha_var, bodies)
-                if encoded_chunks:
-                    diags.append(f"encoded_chunks: {len(encoded_chunks)}")
-                    shuffle_ranges = self._extract_shuffle(source)
-                    decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
-                    if decoded:
-                        decoded = self._peel_base64_layers(decoded)
-                        decoded = _recursive_decode(decoded)
-                        score = _total_score(decoded)
-                        diags.append(f"decoded: {len(decoded)} chars score={score}")
-                        syntax_ok = self._validate_lua(decoded)
-                        if syntax_ok and score >= 30:
-                            beautified = _safe_beautify(decoded)
-                            beautified = _repair_control_flow(beautified)
+                        if self._validate_lua(renamed):
+                            return renamed, 'lua_harness_readable', f'Readable Lua recovered (score={score})', []
+                        return beautified, 'lua_harness_readable', f'Readable Lua recovered (score={score})', []
+                    elif score >= 55:
+                        beautified = _safe_beautify(harness_result)
+                        beautified = _repair_control_flow(beautified)
+                        if self._validate_lua(beautified):
                             renamed = _rename_variables(beautified)
-                            return renamed, 'static_decode', 'Structural decode', []
-                        elif score >= 55:
-                            beautified = _safe_beautify(decoded)
-                            beautified = _repair_control_flow(beautified)
-                            return beautified, 'static_decode_highscore', f'Structural decode (score={score})', []
-                        elif len(decoded) > 100:
-                            recursive_result, _ = self._run_lua_harness(decoded)
-                            if recursive_result and _total_score(recursive_result) > score:
-                                recursive_result = self._peel_base64_layers(recursive_result)
-                                beautified = _safe_beautify(recursive_result)
+                            return renamed, 'lua_harness_raw_score', f'Validated capture (score={score})', []
+                        return beautified, 'lua_harness_raw_score', f'Unvalidated capture (score={score})', []
+                    elif len(harness_result) > 100:
+                        decoded = _try_base64_decode(harness_result)
+                        if decoded:
+                            for enc in ('utf-8', 'latin-1'):
+                                try:
+                                    text = decoded.decode(enc, errors='replace')
+                                    if len(text) > 50:
+                                        recursive_result, _ = self._run_lua_harness(text, depth=1)
+                                        if recursive_result:
+                                            recursive_result = self._peel_base64_layers(recursive_result)
+                                            score2 = _total_score(recursive_result)
+                                            beautified = _safe_beautify(recursive_result)
+                                            beautified = _repair_control_flow(beautified)
+                                            renamed = _rename_variables(beautified)
+                                            return renamed, 'recursive_base64', f'Decoded base64 layer (score={score2})', []
+                                except:
+                                    pass
+                        beautified = _safe_beautify(harness_result)
+                        beautified = _repair_control_flow(beautified)
+                        return beautified, 'lua_harness_fallback', 'Fallback harness output', []
+                elif harness_error:
+                    diags.append(f"harness error: {harness_error[:500]}")
+                    if 'diag: ' in harness_error:
+                        return harness_error, 'harness_diag', 'Harness diagnostic output', []
+
+                bodies = _find_all_table_bodies(source)
+                table_stats = []
+                for body in bodies:
+                    entries = _parse_table_entries(body)
+                    strings = [e for e in entries if isinstance(e, str)]
+                    strings = [s for s in strings if not _looks_like_vm_blob(s)]
+                    if len(strings) >= 10:
+                        avg = sum(len(s) for s in strings) / len(strings)
+                        table_stats.append(f"n={len(strings)} avg={avg:.1f} sample={strings[0][:20]}")
+
+                if table_stats:
+                    diags.append("tables: " + "; ".join(table_stats[:5]))
+                else:
+                    diags.append("no tables with 10+ strings found")
+
+                alphabet, alpha_var = self._extract_alphabet_enhanced(source)
+                if alphabet:
+                    diags.append(f"alphabet: {len(alphabet)} entries")
+                    encoded_chunks = self._extract_encoded_data_enhanced(source, alpha_var, bodies)
+                    if encoded_chunks:
+                        diags.append(f"encoded_chunks: {len(encoded_chunks)}")
+                        shuffle_ranges = self._extract_shuffle(source)
+                        decoded = self._decode_prometheus(encoded_chunks, alphabet, shuffle_ranges)
+                        if decoded:
+                            decoded = self._peel_base64_layers(decoded)
+                            decoded = _recursive_decode(decoded)
+                            score = _total_score(decoded)
+                            diags.append(f"decoded: {len(decoded)} chars score={score}")
+                            syntax_ok = self._validate_lua(decoded)
+                            if syntax_ok and score >= 30:
+                                beautified = _safe_beautify(decoded)
                                 beautified = _repair_control_flow(beautified)
                                 renamed = _rename_variables(beautified)
-                                return renamed, 'recursive_decode', 'Recursive decode improved', []
-                            beautified = _safe_beautify(decoded)
-                            beautified = _repair_control_flow(beautified)
-                            return beautified, 'static_decode_raw', 'Structural decode raw output', []
-            else:
-                diags.append("no alphabet table found")
+                                return renamed, 'static_decode', 'Structural decode', []
+                            elif score >= 55:
+                                beautified = _safe_beautify(decoded)
+                                beautified = _repair_control_flow(beautified)
+                                return beautified, 'static_decode_highscore', f'Structural decode (score={score})', []
+                            elif len(decoded) > 100:
+                                recursive_result, _ = self._run_lua_harness(decoded)
+                                if recursive_result and _total_score(recursive_result) > score:
+                                    recursive_result = self._peel_base64_layers(recursive_result)
+                                    beautified = _safe_beautify(recursive_result)
+                                    beautified = _repair_control_flow(beautified)
+                                    renamed = _rename_variables(beautified)
+                                    return renamed, 'recursive_decode', 'Recursive decode improved', []
+                                beautified = _safe_beautify(decoded)
+                                beautified = _repair_control_flow(beautified)
+                                return beautified, 'static_decode_raw', 'Structural decode raw output', []
+                else:
+                    diags.append("no alphabet table found")
 
-            diag_str = '; '.join(diags) if diags else 'no strategies produced output'
-            return '', 'unable', diag_str, []
-        except Exception as e:
-            return '', 'error', str(e), []
+                diag_str = '; '.join(diags) if diags else 'no strategies produced output'
+                return '', 'unable', diag_str, []
+            except Exception as e:
+                return '', 'error', str(e), []
 
     def _extract_alphabet_enhanced(self, source):
         if HAS_LUAPARSER:
             try:
-                old_stderr = sys.stderr
-                sys.stderr = io.StringIO()
-                try:
-                    tree = lua_ast.parse(source)
-                finally:
-                    sys.stderr = old_stderr
+                tree = lua_ast.parse(source)
                 for node in LuaASTWalker.walk(tree):
                     if hasattr(node, 'targets') and hasattr(node, 'values') and node.values:
                         if hasattr(node.values[0], 'fields') and len(node.values[0].fields) >= 15:
@@ -1933,15 +1941,11 @@ end
             except OSError:
                 pass
         if HAS_LUAPARSER:
-            old_stderr = sys.stderr
-            sys.stderr = io.StringIO()
             try:
                 lua_ast.parse(code)
                 return True
             except Exception:
                 pass
-            finally:
-                sys.stderr = old_stderr
         return False
 
     def _run_unluac(self, bytecode):
