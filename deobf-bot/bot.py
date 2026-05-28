@@ -5,7 +5,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(me
 log = logging.getLogger('deobf-bot')
 
 TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
-API_URL = os.environ.get('DEOBF_API_URL', 'http://localhost:5000')
+API_URL = os.environ.get('DEOBF_API_URL', 'http://localhost:5000').strip()
 
 if not TOKEN:
     raise SystemExit("DISCORD_BOT_TOKEN not set.")
