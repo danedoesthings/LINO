@@ -1042,13 +1042,14 @@ class DeobfEngine:
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'prometheus_static_decompiler', 'vm_always_return',
             'result_cache', 'tight_timeouts',
-            'luaparser_first_validation', 'validation_cache'
+            'luaparser_first_validation', 'validation_cache',
+            'increased_cpu_limit'
         ]
 
     def _set_process_limits(self):
         try:
-            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (55, 60))
+            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (120, 130))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except:
@@ -1400,7 +1401,7 @@ end
                         start_new_session=True
                     )
                     try:
-                        stdout, stderr = proc.communicate(timeout=12)
+                        stdout, stderr = proc.communicate(timeout=20)
                         stdout = stdout.decode('latin-1', errors='replace')
                         stderr = stderr.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
