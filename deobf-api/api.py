@@ -14,11 +14,14 @@ log = logging.getLogger('deobf-api')
 app = Flask(__name__)
 engine = DeobfEngine()
 
+REGISTERED_ROUTES = sorted([rule.rule for rule in app.url_map.iter_rules()])
+
 @app.route('/health')
 def health():
     return jsonify({
         'ok': True,
-        'version': '8.0.0',
+        'version': '8.1.0',
+        'routes': REGISTERED_ROUTES,
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
