@@ -1045,7 +1045,8 @@ class DeobfEngine:
             'prometheus_static_decompiler', 'vm_always_return',
             'result_cache', 'job_wall_clock_timeout',
             'luaparser_first_validation', 'validation_cache',
-            'cpu_limit_subprocess_only'
+            'cpu_limit_subprocess_only',
+            'no_harness_fallback_for_vm'
         ]
 
     def _check_timeout(self):
@@ -1511,8 +1512,6 @@ end
             for candidate in candidates[:3]:
                 if candidate['syntax_ok'] and candidate['score'] >= 30:
                     result = candidate['data']
-                    if len(result) < 200 and 'return' in result and '{' in result:
-                        continue
                     result = _repair_control_flow(result)
                     if len(result) > 400000:
                         return result, None
@@ -1647,16 +1646,9 @@ end
                         return renamed, 'prometheus_vm', f'Prometheus VM decompiled (score={score})', []
                     return '', 'prometheus_vm_empty', 'VM detected but decompilation produced no output', []
 
-                self._check_timeout()
                 harness_result, harness_error = self._run_lua_harness(source)
                 if harness_result:
                     harness_result = self._peel_base64_layers(harness_result)
-
-                    if len(harness_result) < 1000 and 'return' in harness_result and '{' in harness_result:
-                        re_result, re_error = self._run_lua_harness(harness_result, depth=1)
-                        if re_result and len(re_result) > len(harness_result):
-                            harness_result = re_result
-
                     score = _total_score(harness_result)
                     diags.append(f"harness: {len(harness_result)} chars score={score}")
                     syntax_ok = self._validate_lua(harness_result)
@@ -1678,22 +1670,6 @@ end
                             return renamed, 'lua_harness_raw_score', f'Validated capture (score={score})', []
                         return beautified, 'lua_harness_raw_score', f'Unvalidated capture (score={score})', []
                     elif len(harness_result) > 100:
-                        decoded = _try_base64_decode(harness_result)
-                        if decoded:
-                            for enc in ('utf-8', 'latin-1'):
-                                try:
-                                    text = decoded.decode(enc, errors='replace')
-                                    if len(text) > 50:
-                                        recursive_result, _ = self._run_lua_harness(text, depth=1)
-                                        if recursive_result:
-                                            recursive_result = self._peel_base64_layers(recursive_result)
-                                            score2 = _total_score(recursive_result)
-                                            beautified = _safe_beautify(recursive_result)
-                                            beautified = _repair_control_flow(beautified)
-                                            renamed = _rename_variables(beautified)
-                                            return renamed, 'recursive_base64', f'Decoded base64 layer (score={score2})', []
-                                except:
-                                    pass
                         beautified = _safe_beautify(harness_result)
                         beautified = _repair_control_flow(beautified)
                         return beautified, 'lua_harness_fallback', 'Fallback harness output', []
