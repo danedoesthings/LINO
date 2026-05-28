@@ -996,64 +996,6 @@ class LuaASTWalker:
             yield node.name
 
 
-class PrometheusVMDecompiler:
-    def __init__(self, source):
-        self.source = source
-        self.instructions = []
-        self.constants = []
-        self.output_lines = []
-        self.label_counter = 0
-
-    def extract(self):
-        bodies = _find_all_table_bodies(self.source)
-        if not bodies:
-            return None
-        for body in bodies:
-            entries = _parse_table_entries(body)
-            nums = [e for e in entries if isinstance(e, int)]
-            if len(nums) > 50:
-                self.instructions = nums
-                break
-        const_match = re.search(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', self.source)
-        if const_match:
-            const_body = '{' + const_match.group(2) + '}'
-            const_entries = _parse_table_entries(const_body)
-            self.constants = [e for e in const_entries if isinstance(e, str)]
-        if not self.instructions:
-            return None
-        return self._decompile()
-
-    def _decompile(self):
-        ip = 0
-        length = len(self.instructions)
-        indent = 0
-        lines = []
-        while ip < length:
-            op = self.instructions[ip]
-            ip += 1
-            if op == 1:
-                idx = self.instructions[ip] if ip < length else 0
-                ip += 1
-                val = self.constants[idx - 1] if 1 <= idx <= len(self.constants) else 'nil'
-                lines.append('    ' * indent + f'local r = {json.dumps(val)}')
-            elif op == 2:
-                a = self.instructions[ip] if ip < length else 0
-                b = self.instructions[ip + 1] if ip + 1 < length else 0
-                ip += 2
-                lhs = self.constants[a - 1] if 1 <= a <= len(self.constants) else f'var{a}'
-                rhs = self.constants[b - 1] if 1 <= b <= len(self.constants) else f'var{b}'
-                lines.append('    ' * indent + f'{lhs} = {rhs}')
-            else:
-                lines.append('    ' * indent + f'-- unknown op {op}')
-        return '\n'.join(lines)
-
-    def try_deobf(self):
-        try:
-            return self.extract()
-        except Exception:
-            return None
-
-
 class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
@@ -1100,7 +1042,8 @@ class DeobfEngine:
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'reduced_memory_limit', 'process_group_kill',
             'extended_harness_timeout', 'async_job_queue',
-            'prometheus_vm_decompiler'
+            'prometheus_static_decompiler', 'vm_detection_skip_harness',
+            'result_cache', 'tight_timeouts'
         ]
 
     def _set_process_limits(self):
@@ -1458,7 +1401,7 @@ end
                         start_new_session=True
                     )
                     try:
-                        stdout, stderr = proc.communicate(timeout=90)
+                        stdout, stderr = proc.communicate(timeout=12)
                         stdout = stdout.decode('latin-1', errors='replace')
                         stderr = stderr.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
@@ -1485,9 +1428,6 @@ end
                         errors.append('diag: ' + json.dumps(diag_info))
                     if captures:
                         break
-                    if errors and 'instruction limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
-                        self.visited_hashes.discard(source_hash)
-                        return self._run_lua_harness(source, depth, instruction_limit * 4)
                     if errors:
                         break
                 except FileNotFoundError:
@@ -1569,7 +1509,7 @@ end
                     result = _repair_control_flow(result)
                     if len(result) > 400000:
                         return result, None
-                    if result and result != source and depth < 6:
+                    if result and result != source and depth < 3:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
                         if recursive_result and _total_score(recursive_result) > _total_score(result):
                             return recursive_result, None
@@ -1579,18 +1519,6 @@ end
                 best = candidates[0]['data']
                 if len(best) > 400000:
                     return best, None
-                if depth < 6 and len(best) > 100:
-                    try_decoded = _try_base64_decode(best)
-                    if try_decoded:
-                        for enc in ('utf-8', 'latin-1'):
-                            try:
-                                text = try_decoded.decode(enc, errors='replace')
-                                if len(text) > 50 and len(text) <= 400000:
-                                    recursive_result, _ = self._run_lua_harness(text, depth + 1)
-                                    if recursive_result:
-                                        return recursive_result, None
-                            except:
-                                pass
                 return best, None
             if captures:
                 try:
@@ -1600,18 +1528,6 @@ end
                     raw_capture = base64.b64decode(raw_cap).decode('latin-1', errors='replace')
                     if len(raw_capture) > 400000:
                         return raw_capture, None
-                    if depth < 6 and len(raw_capture) > 100:
-                        try_decoded = _try_base64_decode(raw_capture)
-                        if try_decoded:
-                            for enc in ('utf-8', 'latin-1'):
-                                try:
-                                    text = try_decoded.decode(enc, errors='replace')
-                                    if len(text) > 50 and len(text) <= 400000:
-                                        recursive_result, _ = self._run_lua_harness(text, depth + 1)
-                                        if recursive_result:
-                                            return recursive_result, None
-                                except:
-                                    pass
                     return raw_capture, None
                 except:
                     pass
@@ -1660,15 +1576,72 @@ end
                     break
         return current
 
-    def _try_prometheus_vm_deobf(self, source):
-        decompiler = PrometheusVMDecompiler(source)
-        result = decompiler.try_deobf()
-        return result
+    def _detect_prometheus_vm(self, source):
+        bodies = _find_all_table_bodies(source)
+        for body in bodies:
+            entries = _parse_table_entries(body)
+            nums = [e for e in entries if isinstance(e, int)]
+            if len(nums) > 50:
+                return True
+        return False
+
+    def _prometheus_decompile(self, source):
+        bodies = _find_all_table_bodies(source)
+        instructions = []
+        constants = []
+        for body in bodies:
+            entries = _parse_table_entries(body)
+            nums = [e for e in entries if isinstance(e, int)]
+            if len(nums) > 50:
+                instructions = nums
+                break
+        const_match = re.search(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', source)
+        if const_match:
+            const_body = '{' + const_match.group(2) + '}'
+            const_entries = _parse_table_entries(const_body)
+            constants = [e for e in const_entries if isinstance(e, str)]
+        if not instructions:
+            return None
+        lines = []
+        ip = 0
+        while ip < len(instructions):
+            op = instructions[ip]
+            ip += 1
+            if op == 0:
+                idx = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
+                val = constants[idx - 1] if 1 <= idx <= len(constants) else 'nil'
+                lines.append(f"loadk {json.dumps(val)}")
+            elif op == 1:
+                a = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
+                name = constants[a - 1] if 1 <= a <= len(constants) else f"var{a}"
+                b = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
+                val = constants[b - 1] if 1 <= b <= len(constants) else f"var{b}"
+                lines.append(f"{name} = {val}")
+            elif op == 2:
+                a = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
+                name = constants[a - 1] if 1 <= a <= len(constants) else f"var{a}"
+                lines.append(f"call {name}")
+            else:
+                lines.append(f"-- op {op}")
+        return '\n'.join(lines)
 
     def process(self, source):
         with _suppress_stderr():
             diags = []
             try:
+                if self._detect_prometheus_vm(source):
+                    vm_result = self._prometheus_decompile(source)
+                    if vm_result:
+                        score = _total_score(vm_result)
+                        beautified = _safe_beautify(vm_result)
+                        beautified = _repair_control_flow(beautified)
+                        renamed = _rename_variables(beautified)
+                        return renamed, 'prometheus_vm', f'Prometheus VM decompiled (score={score})', []
+
                 harness_result, harness_error = self._run_lua_harness(source)
                 if harness_result:
                     harness_result = self._peel_base64_layers(harness_result)
@@ -1722,18 +1695,6 @@ end
                     diags.append(f"harness error: {harness_error[:500]}")
                     if 'diag: ' in harness_error:
                         return harness_error, 'harness_diag', 'Harness diagnostic output', []
-
-                vm_result = self._try_prometheus_vm_deobf(source)
-                if vm_result:
-                    score = _total_score(vm_result)
-                    if score >= 30:
-                        beautified = _safe_beautify(vm_result)
-                        beautified = _repair_control_flow(beautified)
-                        renamed = _rename_variables(beautified)
-                        return renamed, 'prometheus_vm', f'Prometheus VM decompiled (score={score})', []
-                    elif len(vm_result) > 100:
-                        beautified = _safe_beautify(vm_result)
-                        return beautified, 'prometheus_vm_raw', 'Prometheus VM raw output', []
 
                 bodies = _find_all_table_bodies(source)
                 table_stats = []
@@ -2054,7 +2015,7 @@ end
             r = subprocess.run(
                 ['java', '-jar', self.unluac_path, '--rawstring', tmp_path],
                 capture_output=True,
-                timeout=30
+                timeout=10
             )
             stdout = r.stdout.decode('latin-1', errors='replace')
             stderr = r.stderr.decode('latin-1', errors='replace')
@@ -2064,7 +2025,7 @@ end
                 r2 = subprocess.run(
                     ['java', '-jar', self.unluac_path, tmp_path],
                     capture_output=True,
-                    timeout=30
+                    timeout=10
                 )
                 stdout2 = r2.stdout.decode('latin-1', errors='replace')
                 stderr2 = r2.stderr.decode('latin-1', errors='replace')
@@ -2091,42 +2052,66 @@ end
             pass
 
 
+_result_cache = {}
+_cache_lock = threading.Lock()
+MAX_CACHE_SIZE = 500
+CACHE_TTL = 3600
+
+
+def _cleanup_cache():
+    with _cache_lock:
+        now = time.time()
+        expired = [k for k, v in _result_cache.items() if v.get('ts', 0) < now - CACHE_TTL]
+        for k in expired:
+            del _result_cache[k]
+
+
 job_store = {}
 job_lock = threading.Lock()
 
 
 def _run_job(job_id, source):
+    source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
+
+    with _cache_lock:
+        if source_hash in _result_cache:
+            cached = _result_cache[source_hash]
+            with job_lock:
+                job_store[job_id] = cached
+            return
+
     engine = DeobfEngine()
     try:
         result, method, diagnostic, trace = engine.process(source)
+        result_data = {
+            'status': 'complete',
+            'result': result,
+            'detected': method,
+            'diagnostic': diagnostic,
+            'trace': trace,
+            'result_length': len(result) if result else 0,
+            'ts': time.time()
+        }
+        with _cache_lock:
+            _cleanup_cache()
+            if len(_result_cache) >= MAX_CACHE_SIZE:
+                oldest = min(_result_cache.items(), key=lambda x: x[1].get('ts', 0))[0]
+                del _result_cache[oldest]
+            _result_cache[source_hash] = result_data
         with job_lock:
-            job_store[job_id] = {
-                'status': 'complete',
-                'result': result,
-                'detected': method,
-                'diagnostic': diagnostic,
-                'trace': trace,
-                'result_length': len(result) if result else 0
-            }
+            job_store[job_id] = result_data
     except Exception as e:
+        error_data = {
+            'status': 'error',
+            'error': str(e),
+            'traceback': traceback.format_exc()[:4000],
+            'ts': time.time()
+        }
         with job_lock:
-            job_store[job_id] = {
-                'status': 'error',
-                'error': str(e),
-                'traceback': traceback.format_exc()[:4000]
-            }
-
-
-def _cleanup_old_jobs():
-    with job_lock:
-        now = time.time()
-        expired = [jid for jid, job in job_store.items() if job.get('created', 0) < now - 600]
-        for jid in expired:
-            del job_store[jid]
+            job_store[job_id] = error_data
 
 
 def submit_job(source):
-    _cleanup_old_jobs()
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
