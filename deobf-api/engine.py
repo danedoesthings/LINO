@@ -91,6 +91,7 @@ def _is_probably_text(data):
 
 def _try_base64_decode(s):
     try:
+        s = s.replace('-', '+').replace('_', '/')
         padded = s + '=' * (-len(s) % 4)
         return base64.b64decode(padded)
     except:
@@ -211,7 +212,7 @@ def _parse_table_entries(body):
             current += c
             i += 1
             continue
-        if c == ',' and depth == 0:
+        if c in (',', ';') and depth == 0:
             entries.append(current.strip())
             current = ""
             i += 1
@@ -246,42 +247,75 @@ def _decode_numeric_escapes(s):
     )
 
 
+def _extract_b64_substrings(s):
+    results = []
+    for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', s):
+        val = (m.group(1) or m.group(2)).strip()
+        if val and re.match(r'^[A-Za-z0-9+/]+=*$', val):
+            results.append(val)
+    if results:
+        return results
+    for part in re.split(r'[;,]', s):
+        part = part.strip().strip('"\'')
+        if part and re.match(r'^[A-Za-z0-9+/]+=*$', part):
+            results.append(part)
+    if results:
+        return results
+    cleaned = s.strip().strip('"\'')
+    if cleaned and re.match(r'^[A-Za-z0-9+/]+=*$', cleaned):
+        results.append(cleaned)
+    return results
+
+
 def _wearedevs_decode(source):
     bodies = _find_all_table_bodies(source)
     for body in bodies:
         entries = _parse_table_entries(body)
-        strings = [e for e in entries if isinstance(e, str)]
-        decoded = [_decode_numeric_escapes(s) for s in strings if len(s) > 2 and '\\' in s]
-        if len(decoded) >= 10:
-            shuffle_data = re.findall(r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}', source)
-            if shuffle_data:
-                for sd in shuffle_data:
-                    pairs = re.findall(r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}', '{' + sd + '}')
-                    swaps = [(int(a), int(b)) for a, b in pairs]
-                    for a, b in swaps:
-                        lo, hi = a, b
-                        if 1 <= lo < hi <= len(decoded):
-                            decoded[lo-1:hi] = decoded[lo-1:hi][::-1]
-            final = []
-            for s in decoded:
-                b64_decoded = _try_base64_decode(s)
-                if b64_decoded:
+        strings = [e for e in entries if isinstance(e, str) and len(e) > 2]
+        if len(strings) < 3:
+            continue
+        step1 = [_decode_numeric_escapes(s) if '\\' in s else s for s in strings]
+        all_chunks = []
+        for s in step1:
+            if re.match(r'^[A-Za-z0-9+/]+=*$', s.strip()):
+                all_chunks.append(s.strip())
+            else:
+                sub = _extract_b64_substrings(s)
+                if sub:
+                    all_chunks.extend(sub)
+                else:
+                    all_chunks.append(s)
+        if len(all_chunks) < 3:
+            continue
+        shuffle_data = re.findall(
+            r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}', source
+        )
+        if shuffle_data:
+            for sd in shuffle_data:
+                pairs = re.findall(r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}', '{' + sd + '}')
+                swaps = [(int(a), int(b)) for a, b in pairs]
+                for a, b in swaps:
+                    ai, bi = a - 1, b - 1
+                    if 0 <= ai < len(all_chunks) and 0 <= bi < len(all_chunks):
+                        all_chunks[ai], all_chunks[bi] = all_chunks[bi], all_chunks[ai]
+        decoded_chunks = []
+        for chunk in all_chunks:
+            b64 = _try_base64_decode(chunk)
+            if b64:
+                for enc in ('utf-8', 'latin-1'):
                     try:
-                        text = b64_decoded.decode('utf-8', errors='replace')
-                        if _is_probably_text(text) or any(kw in text for kw in LUA_KEYWORDS):
-                            final.append(text)
-                            continue
-                    except:
+                        decoded_chunks.append(b64.decode(enc, errors='replace'))
+                        break
+                    except Exception:
                         pass
-                    try:
-                        text = b64_decoded.decode('latin-1', errors='replace')
-                        if _is_probably_text(text) or any(kw in text for kw in LUA_KEYWORDS):
-                            final.append(text)
-                            continue
-                    except:
-                        pass
-                final.append(s)
-            return '\n'.join(final)
+                else:
+                    decoded_chunks.append(chunk)
+            else:
+                decoded_chunks.append(chunk)
+        full_text = ''.join(decoded_chunks)
+        kw_hits = sum(1 for kw in LUA_KEYWORDS if kw in full_text)
+        if kw_hits >= 2 or (_is_probably_text(full_text) and kw_hits >= 1):
+            return full_text
     return None
 
 
