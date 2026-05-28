@@ -1045,7 +1045,7 @@ class DeobfEngine:
             'prometheus_static_decompiler', 'vm_always_return',
             'result_cache', 'job_wall_clock_timeout',
             'luaparser_first_validation', 'validation_cache',
-            'increased_cpu_limit'
+            'cpu_limit_subprocess_only'
         ]
 
     def _check_timeout(self):
@@ -1055,8 +1055,8 @@ class DeobfEngine:
 
     def _set_process_limits(self):
         try:
-            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (120, 130))
+            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (40, 45))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except:
