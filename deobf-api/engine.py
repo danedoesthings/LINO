@@ -1042,7 +1042,8 @@ class DeobfEngine:
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'reduced_memory_limit', 'process_group_kill',
             'extended_harness_timeout', 'async_job_queue',
-            'throttled_hooks', 'recursive_size_limit'
+            'throttled_hooks', 'recursive_size_limit',
+            'binary_capture_bytecode'
         ]
 
     def _set_process_limits(self):
@@ -1121,7 +1122,7 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
-local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0, char_flood=0}
+local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0}
 local CALL_DEPTH = 0
 local MAX_DEPTH = 25
 
@@ -1174,7 +1175,7 @@ local function save(tag, data)
         hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
         return
     end
-    if not looks_textual(data) then
+    if tag ~= "bytecode" and tag ~= "pcall_fn" and not looks_textual(data) then
         hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
         return
     end
