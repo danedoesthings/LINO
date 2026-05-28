@@ -1045,7 +1045,8 @@ class DeobfEngine:
             'throttled_hooks', 'recursive_size_limit',
             'binary_capture_bytecode', 'fixed_validate_lua',
             'loader_re_execution', 'lenient_textuality_for_unluac',
-            'skip_loader_stubs', 'concat_capture_raw'
+            'skip_loader_stubs', 'concat_capture_raw',
+            'env_string_capture', 'rawset_hook'
         ]
 
     def _set_process_limits(self):
@@ -1177,7 +1178,7 @@ local function save(tag, data)
         hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
         return
     end
-    if tag ~= "bytecode" and tag ~= "pcall_fn" and tag ~= "concat" and not looks_textual(data) then
+    if tag ~= "bytecode" and tag ~= "pcall_fn" and tag ~= "concat" and tag ~= "env_string" and not looks_textual(data) then
         hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
         return
     end
@@ -1268,6 +1269,36 @@ if string.dump then
     end
 end
 
+if rawset then
+    local real_rawset = rawset
+    _G.rawset = function(t, k, v)
+        if t == _G and type(k) == "string" and type(v) == "string" and #v > 20 then
+            hook_stats.env_string = (hook_stats.env_string or 0) + 1
+            save("env_string", v)
+        end
+        return real_rawset(t, k, v)
+    end
+end
+
+if setfenv then
+    local real_setfenv = setfenv
+    _G.setfenv = function(fn, env)
+        local env_trap = {}
+        local real_env = env or {}
+        setmetatable(env_trap, {
+            __index = real_env,
+            __newindex = function(t, k, v)
+                if type(k) == "string" and type(v) == "string" and #v > 20 then
+                    hook_stats.env_string = (hook_stats.env_string or 0) + 1
+                    save("env_string", v)
+                end
+                real_env[k] = v
+            end
+        })
+        return real_setfenv(fn, env_trap)
+    end
+end
+
 os.execute = function() error("os.execute blocked") end
 io.popen = function() error("io.popen blocked") end
 
@@ -1337,22 +1368,11 @@ else
     collectgarbage("collect")
 
     pcall(function()
-        local largest_str = ""
-        local largest_len = 0
         for k, v in pairs(_G) do
-            if type(v) == "string" then
-                if #v > largest_len then
-                    largest_str = v
-                    largest_len = #v
-                end
-                if #v > 20 then
-                    hook_stats.env_string = (hook_stats.env_string or 0) + 1
-                    save("env_string", v)
-                end
+            if type(v) == "string" and #v > 20 then
+                hook_stats.env_string = (hook_stats.env_string or 0) + 1
+                save("env_string", v)
             end
-        end
-        if largest_len > 0 then
-            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
         end
     end)
 
