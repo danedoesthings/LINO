@@ -14,14 +14,11 @@ log = logging.getLogger('deobf-api')
 app = Flask(__name__)
 engine = DeobfEngine()
 
-REGISTERED_ROUTES = sorted([rule.rule for rule in app.url_map.iter_rules()])
-
 @app.route('/health')
 def health():
     return jsonify({
         'ok': True,
-        'version': '8.1.0',
-        'routes': REGISTERED_ROUTES,
+        'version': '8.2.0',
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
@@ -70,11 +67,7 @@ def deobf():
         'status': 'processing'
     })
 
-@app.route('/deobf/ping', methods=['GET'])
-def ping():
-    return jsonify({'pong': True})
-
-@app.route('/deobf/<path:job_id>', methods=['GET'])
+@app.route('/deobf/<job_id>', methods=['GET'])
 def deobf_status(job_id):
     job_id = re.sub(r'\s+', '', job_id)
     job = get_job(job_id)
