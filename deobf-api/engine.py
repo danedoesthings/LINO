@@ -1048,7 +1048,7 @@ class DeobfEngine:
             'skip_loader_stubs', 'concat_capture_raw',
             'env_string_capture', 'rawset_hook',
             'return_value_capture', 'proxy_environment',
-            'registry_scanning'
+            'registry_scanning', 'minimal_harness'
         ]
 
     def _set_process_limits(self):
@@ -1127,7 +1127,7 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
-local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0, proxy_assign=0}
+local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0}
 local CALL_DEPTH = 0
 local MAX_DEPTH = 25
 
@@ -1216,28 +1216,33 @@ if load then
     end
 end
 
-local char_hits = 0
 local real_char = string.char
 string.char = function(...)
-    char_hits = char_hits + 1
-    if char_hits > 200000 then
-        error("char flood limit")
+    hook_stats.char = (hook_stats.char or 0) + 1
+    local out = real_char(...)
+    if #out > 40 then
+        save("string_char", out)
     end
-    return real_char(...)
+    return out
 end
 
 local real_concat = table.concat
 table.concat = function(t, sep, i, j)
     hook_stats.concat = (hook_stats.concat or 0) + 1
     local out = real_concat(t, sep, i, j)
-    if type(out) == "string" then
-        if #out > 200 and #out < 200000 then
-            save("concat", out)
-        elseif #out >= 200000 then
-            error("concat overflow limit")
-        end
+    if type(out) == "string" and #out > 80 then
+        save("concat", out)
     end
     return out
+end
+
+local real_insert_hook = table.insert
+table.insert = function(t, v, ...)
+    hook_stats.insert = (hook_stats.insert or 0) + 1
+    if type(v) == "string" and #v > 20 then
+        save("table_insert", v)
+    end
+    return real_insert_hook(t, v, ...)
 end
 
 local real_pcall = pcall
@@ -1325,30 +1330,6 @@ else
     _G.bit32 = bit32
     _G.bit = bit32
 
-    local proxy_env = {}
-    local proxy_mt = {
-        __index = _G,
-        __newindex = function(t, k, v)
-            hook_stats.proxy_assign = (hook_stats.proxy_assign or 0) + 1
-            if type(v) == "string" and #v > 20 then
-                save("proxy_string", v)
-            elseif type(v) == "function" then
-                local ok, dumped = real_pcall(string.dump, v)
-                if ok and dumped and #dumped > 50 then
-                    save("proxy_function", dumped)
-                end
-            elseif type(v) == "table" and #v > 10 then
-                save("proxy_table", "table_with_" .. tostring(#v) .. "_entries")
-            end
-            rawset(_G, k, v)
-        end
-    }
-    setmetatable(proxy_env, proxy_mt)
-
-    if setfenv then
-        setfenv(f, proxy_env)
-    end
-
     if debug and debug.sethook then
         debug.sethook(function()
             error("instruction limit")
@@ -1359,30 +1340,6 @@ else
 
     if debug and debug.sethook then
         debug.sethook()
-    end
-
-    if type(result) == "string" and #result > 20 then
-        save("return_value", result)
-    elseif type(result) == "function" then
-        local ok, dumped = real_pcall(string.dump, result)
-        if ok and dumped and #dumped > 50 then
-            save("returned_function", dumped)
-        end
-        local call_ok, call_result = real_pcall(result)
-        if call_ok and type(call_result) == "string" and #call_result > 20 then
-            save("called_returned_function", call_result)
-        end
-    elseif type(result) == "table" then
-        for k, v in pairs(result) do
-            if type(v) == "string" and #v > 20 then
-                save("return_table_value", v)
-            elseif type(v) == "function" then
-                local ok, dumped = real_pcall(string.dump, v)
-                if ok and dumped and #dumped > 50 then
-                    save("return_table_function", dumped)
-                end
-            end
-        end
     end
 
     collectgarbage("collect")
@@ -1400,11 +1357,6 @@ else
                     hook_stats.env_string = (hook_stats.env_string or 0) + 1
                     save("env_string", v)
                 end
-            elseif type(v) == "function" and k ~= "loadstring" and k ~= "load" and k ~= "pcall" then
-                local ok, dumped = real_pcall(string.dump, v)
-                if ok and dumped and #dumped > 50 then
-                    save("global_function", dumped)
-                end
             end
         end
         if largest_len > 0 then
@@ -1412,34 +1364,17 @@ else
         end
     end)
 
-    if debug and debug.getregistry then
-        pcall(function()
-            local registry = debug.getregistry()
-            for k, v in pairs(registry) do
-                if type(v) == "function" then
-                    local ok, dumped = real_pcall(string.dump, v)
-                    if ok and dumped and #dumped > 50 then
-                        save("registry_function", dumped)
-                    end
-                elseif type(v) == "string" and #v > 20 then
-                    save("registry_string", v)
-                end
-            end
-        end)
-    end
-
     print("DIAG:hook_stats=" .. b64encode(
         "loadstring=" .. tostring(hook_stats.loadstring or 0) ..
         ",load=" .. tostring(hook_stats.load or 0) ..
-        ",char=" .. tostring(char_hits) ..
+        ",char=" .. tostring(hook_stats.char or 0) ..
         ",concat=" .. tostring(hook_stats.concat or 0) ..
         ",insert=" .. tostring(hook_stats.insert or 0) ..
         ",pcall=" .. tostring(hook_stats.pcall or 0) ..
         ",bytecode=" .. tostring(hook_stats.bytecode or 0) ..
         ",env_string=" .. tostring(hook_stats.env_string or 0) ..
         ",rejected_textual=" .. tostring(hook_stats.rejected_textual or 0) ..
-        ",rejected_size=" .. tostring(hook_stats.rejected_size or 0) ..
-        ",proxy_assign=" .. tostring(hook_stats.proxy_assign or 0)
+        ",rejected_size=" .. tostring(hook_stats.rejected_size or 0)
     ))
 
     for _, cap in ipairs(captures) do
