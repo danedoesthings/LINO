@@ -1044,7 +1044,8 @@ class DeobfEngine:
             'extended_harness_timeout', 'async_job_queue',
             'throttled_hooks', 'recursive_size_limit',
             'binary_capture_bytecode', 'fixed_validate_lua',
-            'loader_re_execution', 'lenient_textuality_for_unluac'
+            'loader_re_execution', 'lenient_textuality_for_unluac',
+            'skip_loader_stubs'
         ]
 
     def _set_process_limits(self):
@@ -1519,6 +1520,8 @@ end
             for candidate in candidates[:3]:
                 if candidate['syntax_ok'] and candidate['score'] >= 30:
                     result = candidate['data']
+                    if len(result) < 200 and 'return' in result and '{' in result:
+                        continue
                     result = _repair_control_flow(result)
                     if len(result) > 400000:
                         return result, None
