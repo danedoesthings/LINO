@@ -1003,6 +1003,8 @@ class DeobfEngine:
         self.seen_captures = set()
         self.decode_operations = 0
         self._java_available = shutil.which('java') is not None
+        self._job_start = None
+        self._job_timeout = None
 
     def get_capabilities(self):
         return [
@@ -1041,10 +1043,15 @@ class DeobfEngine:
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'prometheus_static_decompiler', 'vm_always_return',
-            'result_cache', 'tight_timeouts',
+            'result_cache', 'job_wall_clock_timeout',
             'luaparser_first_validation', 'validation_cache',
             'increased_cpu_limit'
         ]
+
+    def _check_timeout(self):
+        if self._job_start is not None and self._job_timeout is not None:
+            if time.time() - self._job_start > self._job_timeout:
+                raise TimeoutError("Job exceeded wall clock time limit")
 
     def _set_process_limits(self):
         try:
@@ -1088,8 +1095,6 @@ class DeobfEngine:
                     best = text
             except:
                 continue
-        if best and best_score > 20:
-            return best
         for key in range(1, 256):
             if self.decode_operations > 500:
                 break
@@ -1115,6 +1120,8 @@ class DeobfEngine:
     def _run_lua_harness(self, source, depth=0, instruction_limit=500000):
         if depth > 1:
             return None, 'max recursion depth'
+        if depth > 0:
+            instruction_limit = 100000
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
         if source_hash in self.visited_hashes:
             return None, 'recursion detected'
@@ -1401,7 +1408,7 @@ end
                         start_new_session=True
                     )
                     try:
-                        stdout, stderr = proc.communicate(timeout=20)
+                        stdout, stderr = proc.communicate(timeout=45)
                         stdout = stdout.decode('latin-1', errors='replace')
                         stderr = stderr.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
@@ -1629,6 +1636,7 @@ end
         with _suppress_stderr():
             diags = []
             try:
+                self._check_timeout()
                 if self._detect_prometheus_vm(source):
                     vm_result = self._prometheus_decompile(source)
                     if vm_result:
@@ -1639,6 +1647,7 @@ end
                         return renamed, 'prometheus_vm', f'Prometheus VM decompiled (score={score})', []
                     return '', 'prometheus_vm_empty', 'VM detected but decompilation produced no output', []
 
+                self._check_timeout()
                 harness_result, harness_error = self._run_lua_harness(source)
                 if harness_result:
                     harness_result = self._peel_base64_layers(harness_result)
@@ -1708,6 +1717,7 @@ end
                 else:
                     diags.append("no tables with 10+ strings found")
 
+                self._check_timeout()
                 alphabet, alpha_var = self._extract_alphabet_enhanced(source)
                 if alphabet:
                     diags.append(f"alphabet: {len(alphabet)} entries")
@@ -1747,6 +1757,8 @@ end
 
                 diag_str = '; '.join(diags) if diags else 'no strategies produced output'
                 return '', 'unable', diag_str, []
+            except TimeoutError:
+                return '', 'timeout', 'Job exceeded wall clock time limit', []
             except Exception as e:
                 return '', 'error', str(e), []
 
@@ -2082,6 +2094,7 @@ job_lock = threading.Lock()
 
 
 def _run_job(job_id, source):
+    job_start = time.time()
     source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
 
     with _cache_lock:
@@ -2092,6 +2105,9 @@ def _run_job(job_id, source):
             return
 
     engine = DeobfEngine()
+    engine._job_start = job_start
+    engine._job_timeout = 100
+
     try:
         result, method, diagnostic, trace = engine.process(source)
         result_data = {
@@ -2111,6 +2127,15 @@ def _run_job(job_id, source):
             _result_cache[source_hash] = result_data
         with job_lock:
             job_store[job_id] = result_data
+    except TimeoutError:
+        error_data = {
+            'status': 'error',
+            'error': 'Processing timed out — script may be too complex',
+            'traceback': '',
+            'ts': time.time()
+        }
+        with job_lock:
+            job_store[job_id] = error_data
     except Exception as e:
         error_data = {
             'status': 'error',
