@@ -18,4 +18,4 @@ RUN git clone https://github.com/Renbex0/Virtual-Machine.git /app/renbex0
 ADD https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar /opt/unluac.jar
 ENV UNLUAC_PATH=/opt/unluac.jar
 
-CMD ["sh", "-c", "gunicorn -w 1 --threads 4 -b 0.0.0.0:${PORT} --timeout 120 --graceful-timeout 15 api:app"]
+CMD ["sh", "-c", "gunicorn -w 1 --threads 8 -b 0.0.0.0:${PORT} --timeout 150 --graceful-timeout 15 api:app"]
