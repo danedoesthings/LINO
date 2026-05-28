@@ -1047,7 +1047,8 @@ class DeobfEngine:
             'loader_re_execution', 'lenient_textuality_for_unluac',
             'skip_loader_stubs', 'concat_capture_raw',
             'env_string_capture', 'rawset_hook',
-            'return_value_capture'
+            'return_value_capture', 'proxy_environment',
+            'registry_scanning'
         ]
 
     def _set_process_limits(self):
@@ -1116,8 +1117,8 @@ class DeobfEngine:
             return best
         return None
 
-    def _run_lua_harness(self, source, depth=0, instruction_limit=200000):
-        if depth > 6:
+    def _run_lua_harness(self, source, depth=0, instruction_limit=500000):
+        if depth > 3:
             return None, 'max recursion depth'
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
         if source_hash in self.visited_hashes:
@@ -1126,7 +1127,7 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
-local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0}
+local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0, proxy_assign=0}
 local CALL_DEPTH = 0
 local MAX_DEPTH = 25
 
@@ -1179,7 +1180,7 @@ local function save(tag, data)
         hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
         return
     end
-    if tag ~= "bytecode" and tag ~= "pcall_fn" and tag ~= "concat" and tag ~= "env_string" and tag ~= "return_value" and not looks_textual(data) then
+    if not looks_textual(data) then
         hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
         return
     end
@@ -1273,29 +1274,6 @@ end
 os.execute = function() error("os.execute blocked") end
 io.popen = function() error("io.popen blocked") end
 
-local function capture_return_values(results)
-    if results == nil then return end
-    local count = select("#", results)
-    if count == 0 then return end
-    for i = 1, count do
-        local v = select(i, results)
-        if type(v) == "string" and #v > 20 then
-            save("return_value", v)
-        elseif type(v) == "table" then
-            for _, elem in pairs(v) do
-                if type(elem) == "string" and #elem > 20 then
-                    save("return_value", elem)
-                end
-            end
-        elseif type(v) == "function" and string.dump then
-            local ok, dumped = real_pcall(string.dump, v)
-            if ok and dumped and #dumped > 50 then
-                save("return_value_fn", dumped)
-            end
-        end
-    end
-end
-
 local f, err = loadfile("_SRCFILE_")
 if not f then
     print("ERR:COMPILE:" .. tostring(err))
@@ -1347,30 +1325,108 @@ else
     _G.bit32 = bit32
     _G.bit = bit32
 
+    local proxy_env = {}
+    local proxy_mt = {
+        __index = _G,
+        __newindex = function(t, k, v)
+            hook_stats.proxy_assign = (hook_stats.proxy_assign or 0) + 1
+            if type(v) == "string" and #v > 20 then
+                save("proxy_string", v)
+            elseif type(v) == "function" then
+                local ok, dumped = real_pcall(string.dump, v)
+                if ok and dumped and #dumped > 50 then
+                    save("proxy_function", dumped)
+                end
+            elseif type(v) == "table" and #v > 10 then
+                save("proxy_table", "table_with_" .. tostring(#v) .. "_entries")
+            end
+            rawset(_G, k, v)
+        end
+    }
+    setmetatable(proxy_env, proxy_mt)
+
+    if setfenv then
+        setfenv(f, proxy_env)
+    end
+
     if debug and debug.sethook then
         debug.sethook(function()
             error("instruction limit")
         end, "", _INSTRLIMIT_)
     end
 
-    local success, results = real_pcall(f)
-
-    capture_return_values(results)
+    local success, result = pcall(f)
 
     if debug and debug.sethook then
         debug.sethook()
     end
 
+    if type(result) == "string" and #result > 20 then
+        save("return_value", result)
+    elseif type(result) == "function" then
+        local ok, dumped = real_pcall(string.dump, result)
+        if ok and dumped and #dumped > 50 then
+            save("returned_function", dumped)
+        end
+        local call_ok, call_result = real_pcall(result)
+        if call_ok and type(call_result) == "string" and #call_result > 20 then
+            save("called_returned_function", call_result)
+        end
+    elseif type(result) == "table" then
+        for k, v in pairs(result) do
+            if type(v) == "string" and #v > 20 then
+                save("return_table_value", v)
+            elseif type(v) == "function" then
+                local ok, dumped = real_pcall(string.dump, v)
+                if ok and dumped and #dumped > 50 then
+                    save("return_table_function", dumped)
+                end
+            end
+        end
+    end
+
     collectgarbage("collect")
 
     pcall(function()
+        local largest_str = ""
+        local largest_len = 0
         for k, v in pairs(_G) do
-            if type(v) == "string" and #v > 20 then
-                hook_stats.env_string = (hook_stats.env_string or 0) + 1
-                save("env_string", v)
+            if type(v) == "string" then
+                if #v > largest_len then
+                    largest_str = v
+                    largest_len = #v
+                end
+                if #v > 20 then
+                    hook_stats.env_string = (hook_stats.env_string or 0) + 1
+                    save("env_string", v)
+                end
+            elseif type(v) == "function" and k ~= "loadstring" and k ~= "load" and k ~= "pcall" then
+                local ok, dumped = real_pcall(string.dump, v)
+                if ok and dumped and #dumped > 50 then
+                    save("global_function", dumped)
+                end
             end
         end
+        if largest_len > 0 then
+            print("DIAG:largest_global_string_len=" .. tostring(largest_len))
+        end
     end)
+
+    if debug and debug.getregistry then
+        pcall(function()
+            local registry = debug.getregistry()
+            for k, v in pairs(registry) do
+                if type(v) == "function" then
+                    local ok, dumped = real_pcall(string.dump, v)
+                    if ok and dumped and #dumped > 50 then
+                        save("registry_function", dumped)
+                    end
+                elseif type(v) == "string" and #v > 20 then
+                    save("registry_string", v)
+                end
+            end
+        end)
+    end
 
     print("DIAG:hook_stats=" .. b64encode(
         "loadstring=" .. tostring(hook_stats.loadstring or 0) ..
@@ -1382,7 +1438,8 @@ else
         ",bytecode=" .. tostring(hook_stats.bytecode or 0) ..
         ",env_string=" .. tostring(hook_stats.env_string or 0) ..
         ",rejected_textual=" .. tostring(hook_stats.rejected_textual or 0) ..
-        ",rejected_size=" .. tostring(hook_stats.rejected_size or 0)
+        ",rejected_size=" .. tostring(hook_stats.rejected_size or 0) ..
+        ",proxy_assign=" .. tostring(hook_stats.proxy_assign or 0)
     ))
 
     for _, cap in ipairs(captures) do
@@ -1391,7 +1448,7 @@ else
 
     if #captures == 0 then
         if not success then
-            print("ERR:RUNTIME:" .. tostring(results))
+            print("ERR:RUNTIME:" .. tostring(result))
         else
             print("ERR:NO_OUTPUT")
         end
