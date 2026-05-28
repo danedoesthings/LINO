@@ -1043,7 +1043,8 @@ class DeobfEngine:
             'reduced_memory_limit', 'process_group_kill',
             'extended_harness_timeout', 'async_job_queue',
             'throttled_hooks', 'recursive_size_limit',
-            'binary_capture_bytecode'
+            'binary_capture_bytecode', 'fixed_validate_lua',
+            'loader_detection'
         ]
 
     def _set_process_limits(self):
@@ -1610,6 +1611,39 @@ end
                     break
         return current
 
+    def _detect_loader_and_unpack(self, code):
+        m = re.match(r'^return\s+(\w+)\s*\(\s*(\w+)\s*,\s*\{([^}]+)\}\s*,\s*(\w+)\s*,\s*(\w+)\s*\)', code.strip())
+        if not m:
+            m = re.match(r'^return\s+(\w+)\s*\(\s*(\w+)\s*,\s*\{([^}]+)\}\s*\)', code.strip())
+        if not m:
+            return code
+        func_name = m.group(1)
+        first_arg = m.group(2)
+        table_body = m.group(3)
+        entries = _parse_table_entries('{' + table_body + '}')
+        string_entries = [e for e in entries if isinstance(e, str)]
+        if len(string_entries) == 0:
+            return code
+        for s in string_entries:
+            decoded_bytes = _try_base64_decode(s)
+            if decoded_bytes:
+                for enc in ('utf-8', 'latin-1'):
+                    try:
+                        text = decoded_bytes.decode(enc, errors='replace')
+                        if _is_probably_text(text) and len(text) > 20:
+                            result = self._peel_base64_layers(text)
+                            result = _recursive_decode(result)
+                            if len(result) > len(code):
+                                return result
+                    except:
+                        pass
+            if _is_probably_text(s) and len(s) > 20:
+                result = self._peel_base64_layers(s)
+                result = _recursive_decode(result)
+                if len(result) > len(code):
+                    return result
+        return code
+
     def process(self, source):
         with _suppress_stderr():
             diags = []
@@ -1617,6 +1651,7 @@ end
                 harness_result, harness_error = self._run_lua_harness(source)
                 if harness_result:
                     harness_result = self._peel_base64_layers(harness_result)
+                    harness_result = self._detect_loader_and_unpack(harness_result)
                     score = _total_score(harness_result)
                     diags.append(f"harness: {len(harness_result)} chars score={score}")
                     syntax_ok = self._validate_lua(harness_result)
@@ -1647,6 +1682,7 @@ end
                                         recursive_result, _ = self._run_lua_harness(text, depth=1)
                                         if recursive_result:
                                             recursive_result = self._peel_base64_layers(recursive_result)
+                                            recursive_result = self._detect_loader_and_unpack(recursive_result)
                                             score2 = _total_score(recursive_result)
                                             beautified = _safe_beautify(recursive_result)
                                             beautified = _repair_control_flow(beautified)
@@ -1688,6 +1724,7 @@ end
                         if decoded:
                             decoded = self._peel_base64_layers(decoded)
                             decoded = _recursive_decode(decoded)
+                            decoded = self._detect_loader_and_unpack(decoded)
                             score = _total_score(decoded)
                             diags.append(f"decoded: {len(decoded)} chars score={score}")
                             syntax_ok = self._validate_lua(decoded)
@@ -1704,6 +1741,7 @@ end
                                 recursive_result, _ = self._run_lua_harness(decoded)
                                 if recursive_result and _total_score(recursive_result) > score:
                                     recursive_result = self._peel_base64_layers(recursive_result)
+                                    recursive_result = self._detect_loader_and_unpack(recursive_result)
                                     beautified = _safe_beautify(recursive_result)
                                     beautified = _repair_control_flow(beautified)
                                     renamed = _rename_variables(beautified)
@@ -1934,6 +1972,7 @@ end
             tmp.write(code)
             tmp_path = tmp.name
         try:
+            validation_passed = False
             for lua_bin in ['lua5.1', 'lua']:
                 try:
                     result = subprocess.run(
@@ -1942,12 +1981,15 @@ end
                         timeout=10
                     )
                     if result.returncode == 0:
-                        return True
-                    break
+                        validation_passed = True
                 except FileNotFoundError:
                     continue
                 except subprocess.TimeoutExpired:
+                    continue
+                if validation_passed:
                     break
+            if validation_passed:
+                return True
         finally:
             try:
                 os.unlink(tmp_path)
