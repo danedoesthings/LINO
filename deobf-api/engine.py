@@ -262,7 +262,26 @@ def _wearedevs_decode(source):
                         lo, hi = a, b
                         if 1 <= lo < hi <= len(decoded):
                             decoded[lo-1:hi] = decoded[lo-1:hi][::-1]
-            return '\n'.join(decoded)
+            final = []
+            for s in decoded:
+                b64_decoded = _try_base64_decode(s)
+                if b64_decoded:
+                    try:
+                        text = b64_decoded.decode('utf-8', errors='replace')
+                        if _is_probably_text(text) or any(kw in text for kw in LUA_KEYWORDS):
+                            final.append(text)
+                            continue
+                    except:
+                        pass
+                    try:
+                        text = b64_decoded.decode('latin-1', errors='replace')
+                        if _is_probably_text(text) or any(kw in text for kw in LUA_KEYWORDS):
+                            final.append(text)
+                            continue
+                    except:
+                        pass
+                final.append(s)
+            return '\n'.join(final)
     return None
 
 
@@ -279,15 +298,6 @@ class DeobfEngine:
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'luaparser': HAS_LUAPARSER,
         }
-
-    def _set_process_limits(self):
-        try:
-            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (40, 45))
-            resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
-            resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
-        except:
-            pass
 
     def _detect_prometheus_vm(self, source):
         bodies = _find_all_table_bodies(source)
