@@ -44,7 +44,7 @@ SUCCESS_METHODS = (
 )
 
 async def call_api(source_b64):
-    async with httpx.AsyncClient(timeout=180) as c:
+    async with httpx.AsyncClient(timeout=300) as c:
         r = await c.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
         r.raise_for_status()
         data = r.json()
@@ -53,7 +53,7 @@ async def call_api(source_b64):
         if not job_id:
             return data
 
-        for _ in range(55):
+        for _ in range(120):
             await asyncio.sleep(1)
             poll = await c.get(f'{API_URL}/deobf/{job_id}')
             poll.raise_for_status()
@@ -63,7 +63,7 @@ async def call_api(source_b64):
                     return poll_data
                 return poll_data
 
-        raise httpx.TimeoutException("Deobfuscation timed out after 55 seconds")
+        raise httpx.TimeoutException("Deobfuscation timed out after 120 seconds")
 
 def _extract_inline_code(content):
     m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
@@ -92,7 +92,7 @@ async def run_deobf(raw_bytes, filename):
         data = await call_api(source_b64)
     except httpx.TimeoutException:
         return {
-            'embed': discord.Embed(title='API Timeout', description='Deobfuscation API did not respond within 55 seconds', color=0xe74c3c),
+            'embed': discord.Embed(title='API Timeout', description='Deobfuscation API did not respond within 120 seconds', color=0xe74c3c),
             'files': [],
             'full_diag': None
         }
