@@ -44,19 +44,18 @@ SUCCESS_METHODS = (
 )
 
 async def call_api(source_b64):
-    base = API_URL.rstrip('/')
     async with httpx.AsyncClient(timeout=180) as c:
-        r = await c.post(f'{base}/deobf', json={'source_b64': source_b64})
+        r = await c.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
         r.raise_for_status()
         data = r.json()
 
-        job_id = data.get('job_id', '').strip()
+        job_id = re.sub(r'\s+', '', data.get('job_id', ''))
         if not job_id:
             return data
 
         for _ in range(60):
             await asyncio.sleep(2)
-            poll = await c.get(f'{base}/deobf/{job_id}')
+            poll = await c.get(f'{API_URL}/deobf/{job_id}')
             poll.raise_for_status()
             poll_data = poll.json()
             if poll_data.get('status') != 'processing':
