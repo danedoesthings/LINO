@@ -1040,7 +1040,7 @@ class DeobfEngine:
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
-            'prometheus_static_decompiler', 'vm_first',
+            'prometheus_static_decompiler', 'vm_always_return',
             'result_cache', 'tight_timeouts',
             'luaparser_first_validation', 'validation_cache'
         ]
@@ -1630,12 +1630,13 @@ end
             try:
                 if self._detect_prometheus_vm(source):
                     vm_result = self._prometheus_decompile(source)
-                    if vm_result and len(vm_result) > 50:
+                    if vm_result:
                         score = _total_score(vm_result)
                         beautified = _safe_beautify(vm_result)
                         beautified = _repair_control_flow(beautified)
                         renamed = _rename_variables(beautified)
                         return renamed, 'prometheus_vm', f'Prometheus VM decompiled (score={score})', []
+                    return '', 'prometheus_vm_empty', 'VM detected but decompilation produced no output', []
 
                 harness_result, harness_error = self._run_lua_harness(source)
                 if harness_result:
