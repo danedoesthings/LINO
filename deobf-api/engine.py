@@ -14,15 +14,13 @@ except ImportError:
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
-LUA_KEYWORDS = {
-    'function', 'local', 'end', 'return', 'if', 'then', 'else', 'elseif',
-    'for', 'while', 'do', 'repeat', 'until', 'not', 'and', 'or',
-    'nil', 'true', 'false', 'in', 'break', 'print', 'require',
-    'pcall', 'xpcall', 'loadstring', 'load', 'pairs', 'ipairs',
-    'setmetatable', 'getmetatable', 'rawset', 'rawget', 'tostring', 'tonumber',
-    'table', 'string', 'math', 'coroutine', 'debug', 'io', 'os',
-    'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
-}
+
+def _try_base64_decode(s):
+    try:
+        padded = s + '=' * (-len(s) % 4)
+        return base64.b64decode(padded)
+    except:
+        return None
 
 
 def _find_balanced_end(content, open_brace_index):
@@ -233,6 +231,17 @@ class DeobfEngine:
         return '\n'.join(lines)
 
     def process(self, source):
+        decoded = _try_base64_decode(source.strip())
+        if decoded:
+            for enc in ('utf-8', 'latin-1'):
+                try:
+                    decoded_str = decoded.decode(enc)
+                    if len(decoded_str) > 50 and ('local' in decoded_str or 'function' in decoded_str or '{' in decoded_str):
+                        source = decoded_str
+                        break
+                except:
+                    continue
+
         if self._detect_prometheus_vm(source):
             result = self._prometheus_decompile(source)
             if result:
