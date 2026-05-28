@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal, io, contextlib
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, time, traceback, binascii, sys, math, resource, signal, io, contextlib, threading, uuid
 from collections import OrderedDict, defaultdict, deque, namedtuple, Counter
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
@@ -1040,8 +1040,8 @@ class DeobfEngine:
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
-            'table_allocation_guard', 'reduced_memory_limit',
-            'process_group_kill', 'extended_harness_timeout'
+            'reduced_memory_limit', 'process_group_kill',
+            'extended_harness_timeout', 'async_job_queue'
         ]
 
     def _set_process_limits(self):
@@ -1182,21 +1182,6 @@ local function save(tag, data)
     local encoded = b64encode(data)
     real_insert(captures, {tag = tag, data = encoded, raw_length = #data})
     CALL_DEPTH = CALL_DEPTH - 1
-end
-
-local table_count = 0
-local table_limit = 50000
-local guarded_tables = setmetatable({}, {__mode = "k"})
-local real_setmetatable = setmetatable
-function setmetatable(t, mt)
-    if not guarded_tables[t] then
-        table_count = table_count + 1
-        guarded_tables[t] = true
-        if table_count > table_limit then
-            error("table allocation limit exceeded")
-        end
-    end
-    return real_setmetatable(t, mt)
 end
 
 local real_loadstring = loadstring
@@ -1422,15 +1407,25 @@ end
         try:
             for lua_bin in ['lua5.1', 'lua']:
                 try:
-                    result = subprocess.run(
+                    proc = subprocess.Popen(
                         [lua_bin, tmp_path],
-                        capture_output=True,
-                        timeout=60,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
                         preexec_fn=self._set_process_limits,
                         start_new_session=True
                     )
-                    stdout = result.stdout.decode('latin-1', errors='replace')
-                    stderr = result.stderr.decode('latin-1', errors='replace')
+                    try:
+                        stdout, stderr = proc.communicate(timeout=60)
+                        stdout = stdout.decode('latin-1', errors='replace')
+                        stderr = stderr.decode('latin-1', errors='replace')
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except:
+                            pass
+                        proc.wait()
+                        errors.append("timeout")
+                        break
                     for line in stdout.splitlines():
                         if line.startswith('CAP:'):
                             captures.append(line[4:])
@@ -1450,21 +1445,11 @@ end
                     if errors and 'instruction limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
                         self.visited_hashes.discard(source_hash)
                         return self._run_lua_harness(source, depth, instruction_limit * 4)
-                    if errors and 'table allocation limit' in ' '.join(errors).lower() and instruction_limit < 5000000:
-                        self.visited_hashes.discard(source_hash)
-                        return self._run_lua_harness(source, depth, instruction_limit * 4)
                     if errors:
                         break
                 except FileNotFoundError:
                     errors.append(f"{lua_bin} not found")
                     continue
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(result.pid), signal.SIGKILL)
-                    except:
-                        pass
-                    errors.append("timeout")
-                    break
         finally:
             try:
                 os.unlink(tmp_path)
@@ -2024,3 +2009,52 @@ end
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
         except:
             pass
+
+
+job_store = {}
+job_lock = threading.Lock()
+
+
+def _run_job(job_id, source):
+    engine = DeobfEngine()
+    try:
+        result, method, diagnostic, trace = engine.process(source)
+        with job_lock:
+            job_store[job_id] = {
+                'status': 'complete',
+                'result': result,
+                'detected': method,
+                'diagnostic': diagnostic,
+                'trace': trace,
+                'result_length': len(result) if result else 0
+            }
+    except Exception as e:
+        with job_lock:
+            job_store[job_id] = {
+                'status': 'error',
+                'error': str(e),
+                'traceback': traceback.format_exc()[:4000]
+            }
+
+
+def _cleanup_old_jobs():
+    with job_lock:
+        now = time.time()
+        expired = [jid for jid, job in job_store.items() if job.get('created', 0) < now - 600]
+        for jid in expired:
+            del job_store[jid]
+
+
+def submit_job(source):
+    _cleanup_old_jobs()
+    job_id = str(uuid.uuid4())
+    with job_lock:
+        job_store[job_id] = {'status': 'processing', 'created': time.time()}
+    thread = threading.Thread(target=_run_job, args=(job_id, source), daemon=True)
+    thread.start()
+    return job_id
+
+
+def get_job(job_id):
+    with job_lock:
+        return job_store.get(job_id)
