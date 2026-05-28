@@ -5,7 +5,7 @@ import logging
 import hashlib
 import re
 from flask import Flask, request, jsonify
-from engine import DeobfEngine
+from engine import DeobfEngine, submit_job, get_job
 
 try:
     from luaparser import ast as lua_ast
@@ -23,7 +23,7 @@ engine = DeobfEngine()
 def health():
     return jsonify({
         'ok': True,
-        'version': '7.0.0',
+        'version': '8.0.0',
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
@@ -66,19 +66,33 @@ def deobf():
     source_str = raw_bytes.decode('latin-1')
     log.info(f"Deobf request: {len(raw_bytes)} bytes, {len(source_str.splitlines())} lines")
 
-    try:
-        result, obf_type, diag, trace = engine.process(source_str)
-    except Exception as e:
-        tb = traceback.format_exc()
-        log.error(f"Deobf failed: {e}\n{tb}")
-        return jsonify({'error': str(e), 'traceback': tb[:4000]}), 500
+    job_id = submit_job(source_str)
+    return jsonify({
+        'job_id': job_id,
+        'status': 'processing'
+    })
+
+@app.route('/deobf/<job_id>', methods=['GET'])
+def deobf_status(job_id):
+    job = get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    if job['status'] == 'processing':
+        return jsonify({'status': 'processing'})
+
+    if job['status'] == 'error':
+        return jsonify({
+            'error': job.get('error', 'Unknown error'),
+            'traceback': job.get('traceback', '')[:4000]
+        }), 500
 
     return jsonify({
-        'result': result,
-        'detected': obf_type,
-        'diagnostic': diag,
-        'trace': trace,
-        'result_length': len(result) if result else 0
+        'result': job.get('result', ''),
+        'detected': job.get('detected', 'unknown'),
+        'diagnostic': job.get('diagnostic', ''),
+        'trace': job.get('trace', []),
+        'result_length': job.get('result_length', 0)
     })
 
 if __name__ == '__main__':
