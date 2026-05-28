@@ -66,7 +66,7 @@ def deobf():
     source_str = raw_bytes.decode('latin-1')
     log.info(f"Deobf request: {len(raw_bytes)} bytes, {len(source_str.splitlines())} lines")
 
-    job_id = submit_job(source_str)
+    job_id = submit_job(source_str).strip()
     return jsonify({
         'job_id': job_id,
         'status': 'processing'
@@ -74,6 +74,7 @@ def deobf():
 
 @app.route('/deobf/<job_id>', methods=['GET'])
 def deobf_status(job_id):
+    job_id = job_id.strip()
     job = get_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
