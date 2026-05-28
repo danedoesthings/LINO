@@ -1041,7 +1041,8 @@ class DeobfEngine:
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'reduced_memory_limit', 'process_group_kill',
-            'extended_harness_timeout', 'async_job_queue'
+            'extended_harness_timeout', 'async_job_queue',
+            'throttled_hooks', 'recursive_size_limit'
         ]
 
     def _set_process_limits(self):
@@ -1110,7 +1111,7 @@ class DeobfEngine:
             return best
         return None
 
-    def _run_lua_harness(self, source, depth=0, instruction_limit=500000):
+    def _run_lua_harness(self, source, depth=0, instruction_limit=200000):
         if depth > 6:
             return None, 'max recursion depth'
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
@@ -1120,7 +1121,7 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
-local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0}
+local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0, char_flood=0}
 local CALL_DEPTH = 0
 local MAX_DEPTH = 25
 
@@ -1209,33 +1210,28 @@ if load then
     end
 end
 
+local char_hits = 0
 local real_char = string.char
 string.char = function(...)
-    hook_stats.char = (hook_stats.char or 0) + 1
-    local out = real_char(...)
-    if #out > 40 then
-        save("string_char", out)
+    char_hits = char_hits + 1
+    if char_hits > 200000 then
+        error("char flood limit")
     end
-    return out
+    return real_char(...)
 end
 
 local real_concat = table.concat
 table.concat = function(t, sep, i, j)
     hook_stats.concat = (hook_stats.concat or 0) + 1
     local out = real_concat(t, sep, i, j)
-    if type(out) == "string" and #out > 80 then
-        save("concat", out)
+    if type(out) == "string" then
+        if #out > 200 and #out < 200000 then
+            save("concat", out)
+        elseif #out >= 200000 then
+            error("concat overflow limit")
+        end
     end
     return out
-end
-
-local real_insert_hook = table.insert
-table.insert = function(t, v, ...)
-    hook_stats.insert = (hook_stats.insert or 0) + 1
-    if type(v) == "string" and #v > 20 then
-        save("table_insert", v)
-    end
-    return real_insert_hook(t, v, ...)
 end
 
 local real_pcall = pcall
@@ -1360,7 +1356,7 @@ else
     print("DIAG:hook_stats=" .. b64encode(
         "loadstring=" .. tostring(hook_stats.loadstring or 0) ..
         ",load=" .. tostring(hook_stats.load or 0) ..
-        ",char=" .. tostring(hook_stats.char or 0) ..
+        ",char=" .. tostring(char_hits) ..
         ",concat=" .. tostring(hook_stats.concat or 0) ..
         ",insert=" .. tostring(hook_stats.insert or 0) ..
         ",pcall=" .. tostring(hook_stats.pcall or 0) ..
@@ -1520,6 +1516,8 @@ end
                 if candidate['syntax_ok'] and candidate['score'] >= 30:
                     result = candidate['data']
                     result = _repair_control_flow(result)
+                    if len(result) > 400000:
+                        return result, None
                     if result and result != source and depth < 6:
                         recursive_result, _ = self._run_lua_harness(result, depth + 1)
                         if recursive_result and _total_score(recursive_result) > _total_score(result):
@@ -1528,13 +1526,15 @@ end
 
             if candidates:
                 best = candidates[0]['data']
+                if len(best) > 400000:
+                    return best, None
                 if depth < 6 and len(best) > 100:
                     try_decoded = _try_base64_decode(best)
                     if try_decoded:
                         for enc in ('utf-8', 'latin-1'):
                             try:
                                 text = try_decoded.decode(enc, errors='replace')
-                                if len(text) > 50:
+                                if len(text) > 50 and len(text) <= 400000:
                                     recursive_result, _ = self._run_lua_harness(text, depth + 1)
                                     if recursive_result:
                                         return recursive_result, None
@@ -1547,13 +1547,15 @@ end
                     if ':' in raw_cap:
                         raw_cap = raw_cap.split(':', 1)[1]
                     raw_capture = base64.b64decode(raw_cap).decode('latin-1', errors='replace')
+                    if len(raw_capture) > 400000:
+                        return raw_capture, None
                     if depth < 6 and len(raw_capture) > 100:
                         try_decoded = _try_base64_decode(raw_capture)
                         if try_decoded:
                             for enc in ('utf-8', 'latin-1'):
                                 try:
                                     text = try_decoded.decode(enc, errors='replace')
-                                    if len(text) > 50:
+                                    if len(text) > 50 and len(text) <= 400000:
                                         recursive_result, _ = self._run_lua_harness(text, depth + 1)
                                         if recursive_result:
                                             return recursive_result, None
