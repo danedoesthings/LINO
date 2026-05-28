@@ -1042,14 +1042,7 @@ class DeobfEngine:
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'reduced_memory_limit', 'process_group_kill',
             'extended_harness_timeout', 'async_job_queue',
-            'throttled_hooks', 'recursive_size_limit',
-            'binary_capture_bytecode', 'fixed_validate_lua',
-            'loader_re_execution', 'lenient_textuality_for_unluac',
-            'skip_loader_stubs', 'concat_capture_raw',
-            'env_string_capture', 'rawset_hook',
-            'return_value_capture', 'proxy_environment',
-            'registry_scanning', 'minimal_harness',
-            'gunicorn_timeout_sync'
+            'no_textual_filter'
         ]
 
     def _set_process_limits(self):
@@ -1128,7 +1121,7 @@ class DeobfEngine:
 
         harness = r'''
 local captures = {}
-local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_textual=0, rejected_size=0}
+local hook_stats = {loadstring=0, load=0, char=0, concat=0, insert=0, pcall=0, bytecode=0, env_string=0, rejected_size=0}
 local CALL_DEPTH = 0
 local MAX_DEPTH = 25
 
@@ -1162,27 +1155,12 @@ local function b64encode(data)
     return table.concat(result) .. padding
 end
 
-local function looks_textual(s)
-    local printable = 0
-    for i = 1, #s do
-        local b = s:byte(i)
-        if (b >= 32 and b <= 126) or b == 10 or b == 13 or b == 9 then
-            printable = printable + 1
-        end
-    end
-    return printable / #s > 0.45
-end
-
 local real_insert = table.insert
 
 local function save(tag, data)
     if type(data) ~= "string" then return end
     if #data < 20 then
         hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
-        return
-    end
-    if not looks_textual(data) then
-        hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
         return
     end
     if CALL_DEPTH > MAX_DEPTH then return end
@@ -1374,7 +1352,6 @@ else
         ",pcall=" .. tostring(hook_stats.pcall or 0) ..
         ",bytecode=" .. tostring(hook_stats.bytecode or 0) ..
         ",env_string=" .. tostring(hook_stats.env_string or 0) ..
-        ",rejected_textual=" .. tostring(hook_stats.rejected_textual or 0) ..
         ",rejected_size=" .. tostring(hook_stats.rejected_size or 0)
     ))
 
