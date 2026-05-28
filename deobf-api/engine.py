@@ -996,6 +996,64 @@ class LuaASTWalker:
             yield node.name
 
 
+class PrometheusVMDecompiler:
+    def __init__(self, source):
+        self.source = source
+        self.instructions = []
+        self.constants = []
+        self.output_lines = []
+        self.label_counter = 0
+
+    def extract(self):
+        bodies = _find_all_table_bodies(self.source)
+        if not bodies:
+            return None
+        for body in bodies:
+            entries = _parse_table_entries(body)
+            nums = [e for e in entries if isinstance(e, int)]
+            if len(nums) > 50:
+                self.instructions = nums
+                break
+        const_match = re.search(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', self.source)
+        if const_match:
+            const_body = '{' + const_match.group(2) + '}'
+            const_entries = _parse_table_entries(const_body)
+            self.constants = [e for e in const_entries if isinstance(e, str)]
+        if not self.instructions:
+            return None
+        return self._decompile()
+
+    def _decompile(self):
+        ip = 0
+        length = len(self.instructions)
+        indent = 0
+        lines = []
+        while ip < length:
+            op = self.instructions[ip]
+            ip += 1
+            if op == 1:
+                idx = self.instructions[ip] if ip < length else 0
+                ip += 1
+                val = self.constants[idx - 1] if 1 <= idx <= len(self.constants) else 'nil'
+                lines.append('    ' * indent + f'local r = {json.dumps(val)}')
+            elif op == 2:
+                a = self.instructions[ip] if ip < length else 0
+                b = self.instructions[ip + 1] if ip + 1 < length else 0
+                ip += 2
+                lhs = self.constants[a - 1] if 1 <= a <= len(self.constants) else f'var{a}'
+                rhs = self.constants[b - 1] if 1 <= b <= len(self.constants) else f'var{b}'
+                lines.append('    ' * indent + f'{lhs} = {rhs}')
+            else:
+                lines.append('    ' * indent + f'-- unknown op {op}')
+        return '\n'.join(lines)
+
+    def try_deobf(self):
+        try:
+            return self.extract()
+        except Exception:
+            return None
+
+
 class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
@@ -1042,13 +1100,13 @@ class DeobfEngine:
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
             'reduced_memory_limit', 'process_group_kill',
             'extended_harness_timeout', 'async_job_queue',
-            'no_textual_filter'
+            'prometheus_vm_decompiler'
         ]
 
     def _set_process_limits(self):
         try:
             resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (85, 90))
+            resource.setrlimit(resource.RLIMIT_CPU, (55, 60))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except:
@@ -1602,6 +1660,11 @@ end
                     break
         return current
 
+    def _try_prometheus_vm_deobf(self, source):
+        decompiler = PrometheusVMDecompiler(source)
+        result = decompiler.try_deobf()
+        return result
+
     def process(self, source):
         with _suppress_stderr():
             diags = []
@@ -1659,6 +1722,18 @@ end
                     diags.append(f"harness error: {harness_error[:500]}")
                     if 'diag: ' in harness_error:
                         return harness_error, 'harness_diag', 'Harness diagnostic output', []
+
+                vm_result = self._try_prometheus_vm_deobf(source)
+                if vm_result:
+                    score = _total_score(vm_result)
+                    if score >= 30:
+                        beautified = _safe_beautify(vm_result)
+                        beautified = _repair_control_flow(beautified)
+                        renamed = _rename_variables(beautified)
+                        return renamed, 'prometheus_vm', f'Prometheus VM decompiled (score={score})', []
+                    elif len(vm_result) > 100:
+                        beautified = _safe_beautify(vm_result)
+                        return beautified, 'prometheus_vm_raw', 'Prometheus VM raw output', []
 
                 bodies = _find_all_table_bodies(source)
                 table_stats = []
