@@ -1040,7 +1040,7 @@ class DeobfEngine:
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
-            'prometheus_static_decompiler', 'vm_detection_skip_harness',
+            'prometheus_static_decompiler', 'vm_first',
             'result_cache', 'tight_timeouts',
             'luaparser_first_validation', 'validation_cache'
         ]
@@ -1630,7 +1630,7 @@ end
             try:
                 if self._detect_prometheus_vm(source):
                     vm_result = self._prometheus_decompile(source)
-                    if vm_result:
+                    if vm_result and len(vm_result) > 50:
                         score = _total_score(vm_result)
                         beautified = _safe_beautify(vm_result)
                         beautified = _repair_control_flow(beautified)
