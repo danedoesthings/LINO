@@ -1,9 +1,4 @@
-import os
-import base64
-import traceback
-import logging
-import hashlib
-import re
+import os, base64, traceback, logging, hashlib, re
 from flask import Flask, request, jsonify
 from engine import DeobfEngine, submit_job, get_job
 
