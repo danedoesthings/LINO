@@ -1046,7 +1046,8 @@ class DeobfEngine:
             'binary_capture_bytecode', 'fixed_validate_lua',
             'loader_re_execution', 'lenient_textuality_for_unluac',
             'skip_loader_stubs', 'concat_capture_raw',
-            'env_string_capture', 'rawset_hook'
+            'env_string_capture', 'rawset_hook',
+            'return_value_capture'
         ]
 
     def _set_process_limits(self):
@@ -1178,7 +1179,7 @@ local function save(tag, data)
         hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
         return
     end
-    if tag ~= "bytecode" and tag ~= "pcall_fn" and tag ~= "concat" and tag ~= "env_string" and not looks_textual(data) then
+    if tag ~= "bytecode" and tag ~= "pcall_fn" and tag ~= "concat" and tag ~= "env_string" and tag ~= "return_value" and not looks_textual(data) then
         hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
         return
     end
@@ -1269,38 +1270,31 @@ if string.dump then
     end
 end
 
-if rawset then
-    local real_rawset = rawset
-    _G.rawset = function(t, k, v)
-        if t == _G and type(k) == "string" and type(v) == "string" and #v > 20 then
-            hook_stats.env_string = (hook_stats.env_string or 0) + 1
-            save("env_string", v)
-        end
-        return real_rawset(t, k, v)
-    end
-end
-
-if setfenv then
-    local real_setfenv = setfenv
-    _G.setfenv = function(fn, env)
-        local env_trap = {}
-        local real_env = env or {}
-        setmetatable(env_trap, {
-            __index = real_env,
-            __newindex = function(t, k, v)
-                if type(k) == "string" and type(v) == "string" and #v > 20 then
-                    hook_stats.env_string = (hook_stats.env_string or 0) + 1
-                    save("env_string", v)
-                end
-                real_env[k] = v
-            end
-        })
-        return real_setfenv(fn, env_trap)
-    end
-end
-
 os.execute = function() error("os.execute blocked") end
 io.popen = function() error("io.popen blocked") end
+
+local function capture_return_values(results)
+    if results == nil then return end
+    local count = select("#", results)
+    if count == 0 then return end
+    for i = 1, count do
+        local v = select(i, results)
+        if type(v) == "string" and #v > 20 then
+            save("return_value", v)
+        elseif type(v) == "table" then
+            for _, elem in pairs(v) do
+                if type(elem) == "string" and #elem > 20 then
+                    save("return_value", elem)
+                end
+            end
+        elseif type(v) == "function" and string.dump then
+            local ok, dumped = real_pcall(string.dump, v)
+            if ok and dumped and #dumped > 50 then
+                save("return_value_fn", dumped)
+            end
+        end
+    end
+end
 
 local f, err = loadfile("_SRCFILE_")
 if not f then
@@ -1359,7 +1353,9 @@ else
         end, "", _INSTRLIMIT_)
     end
 
-    local success, result = pcall(f)
+    local success, results = real_pcall(f)
+
+    capture_return_values(results)
 
     if debug and debug.sethook then
         debug.sethook()
@@ -1395,7 +1391,7 @@ else
 
     if #captures == 0 then
         if not success then
-            print("ERR:RUNTIME:" .. tostring(result))
+            print("ERR:RUNTIME:" .. tostring(results))
         else
             print("ERR:NO_OUTPUT")
         end
