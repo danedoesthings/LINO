@@ -49,7 +49,7 @@ async def call_api(source_b64):
         r.raise_for_status()
         data = r.json()
 
-        job_id = data.get('job_id')
+        job_id = data.get('job_id', '').strip()
         if not job_id:
             return data
 
