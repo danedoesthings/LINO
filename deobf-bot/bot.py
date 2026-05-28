@@ -1,4 +1,4 @@
-import discord, io, os, re, logging, httpx, base64, datetime
+import discord, io, os, re, logging, httpx, base64, datetime, asyncio
 from discord.ext import commands
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%H:%M:%S')
@@ -38,14 +38,32 @@ SUCCESS_METHODS = (
     'raw_base64_decode', 'raw_base64_decode_raw',
     'runtime_execution', 'sandbox_raw',
     'roblox_raw', 'prometheus_execution',
-    'recursive_decode',
+    'recursive_decode', 'lua_harness_readable',
+    'recursive_base64', 'harness_diag',
+    'prometheus_vm', 'prometheus_vm_raw',
 )
 
 async def call_api(source_b64):
     async with httpx.AsyncClient(timeout=180) as c:
         r = await c.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+
+        job_id = data.get('job_id')
+        if not job_id:
+            return data
+
+        for _ in range(60):
+            await asyncio.sleep(2)
+            poll = await c.get(f'{API_URL}/deobf/{job_id}')
+            poll.raise_for_status()
+            poll_data = poll.json()
+            if poll_data.get('status') != 'processing':
+                if 'error' in poll_data:
+                    return poll_data
+                return poll_data
+
+        raise httpx.TimeoutException("Deobfuscation timed out after 120 seconds")
 
 def _extract_inline_code(content):
     m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
