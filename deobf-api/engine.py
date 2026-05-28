@@ -319,10 +319,23 @@ def _wearedevs_decode(source):
     return None
 
 
+@dataclass
+class DiagnosticEvent:
+    stage: str
+    success: bool
+    message: str
+    line: Optional[int] = None
+    column: Optional[int] = None
+    snippet: Optional[str] = None
+    exception_type: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
+
+
 class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
         self._java_available = shutil.which('java') is not None
+        self.trace = []
 
     def get_capabilities(self):
         return {
@@ -332,6 +345,49 @@ class DeobfEngine:
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'luaparser': HAS_LUAPARSER,
         }
+
+    def _trace(self, stage, success, message, line=None, column=None, snippet=None, exc=None):
+        self.trace.append(DiagnosticEvent(
+            stage=stage, success=success, message=message,
+            line=line, column=column, snippet=snippet,
+            exception_type=type(exc).__name__ if exc else None
+        ))
+
+    def _validate_lua(self, code, stage="unknown"):
+        if not HAS_LUAPARSER:
+            self._trace(stage, True, "luaparser not available, skipping validation")
+            return True
+        try:
+            with _suppress_stderr():
+                lua_ast.parse(code)
+            self._trace(stage, True, "lua validation passed")
+            return True
+        except Exception as e:
+            info = self._extract_parse_error(code, e)
+            self._trace(stage, False, str(e), line=info.get("line"),
+                       column=info.get("column"), snippet=info.get("snippet"), exc=e)
+            return False
+
+    def _extract_parse_error(self, code, error):
+        text = str(error)
+        line, column = None, None
+        m = re.search(r'line\s+(\d+)', text, re.I)
+        if m:
+            line = int(m.group(1))
+        c = re.search(r'column\s+(\d+)', text, re.I)
+        if c:
+            column = int(c.group(1))
+        snippet = None
+        if line:
+            lines = code.splitlines()
+            start = max(0, line - 3)
+            end = min(len(lines), line + 2)
+            context = []
+            for i in range(start, end):
+                prefix = ">>" if i + 1 == line else "  "
+                context.append(f"{prefix} {i+1}: {lines[i]}")
+            snippet = "\n".join(context)
+        return {"line": line, "column": column, "snippet": snippet}
 
     def _detect_prometheus_vm(self, source):
         bodies = _find_all_table_bodies(source)
@@ -395,16 +451,48 @@ class DeobfEngine:
         return '\n'.join(lines)
 
     def process(self, source):
-        if self._detect_prometheus_vm(source):
-            result = self._prometheus_decompile(source)
-            if result:
-                return result, 'prometheus_vm', 'Prometheus VM decompiled', []
+        self.trace = []
+        candidates = [source]
 
-        wd_result = _wearedevs_decode(source)
-        if wd_result:
-            return wd_result, 'wearedevs_decode', 'WeAreDevs string table decoded', []
+        cleaned = re.sub(r'\s+', '', source.strip())
+        if re.match(r'^[A-Za-z0-9+/=]+$', cleaned):
+            decoded = _try_base64_decode(cleaned)
+            if decoded:
+                for enc in ('utf-8', 'latin-1'):
+                    try:
+                        text = decoded.decode(enc, errors='replace')
+                        if len(text) > 50:
+                            candidates.insert(0, text)
+                            self._trace("base64_peel", True, f"decoded outer base64, {len(text)} chars")
+                            break
+                    except:
+                        pass
+                else:
+                    self._trace("base64_peel", False, "base64 decoded but no text encoding succeeded")
 
-        return '', 'unable', 'no strategies produced output', []
+        for src in candidates:
+            if self._detect_prometheus_vm(src):
+                self._trace("prometheus_detect", True, "VM bytecode table detected")
+                result = self._prometheus_decompile(src)
+                if result:
+                    self._trace("prometheus_decompile", True, f"decompiled {len(result)} chars")
+                    if self._validate_lua(result, "prometheus_output"):
+                        return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
+                else:
+                    self._trace("prometheus_decompile", False, "decompilation produced no output")
+
+            self._trace("wearedevs_decode", True, "attempting WeAreDevs string table decode")
+            wd_result = _wearedevs_decode(src)
+            if wd_result:
+                self._trace("wearedevs_decode", True, f"decoded {len(wd_result)} chars")
+                if self._validate_lua(wd_result, "wearedevs_output"):
+                    return wd_result, 'wearedevs_decode', 'WeAreDevs string table decoded', [vars(t) for t in self.trace]
+                self._trace("wearedevs_decode", False, "output failed lua validation")
+            else:
+                self._trace("wearedevs_decode", False, "no string table found or decoding produced no output")
+
+        self._trace("process", False, "all strategies exhausted")
+        return '', 'unable', 'no strategies produced output', [vars(t) for t in self.trace]
 
 
 job_store = {}
