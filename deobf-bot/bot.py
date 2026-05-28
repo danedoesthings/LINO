@@ -5,7 +5,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(me
 log = logging.getLogger('deobf-bot')
 
 TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
-API_URL = os.environ.get('DEOBF_API_URL', 'http://localhost:5000').strip()
+API_URL = os.environ.get('DEOBF_API_URL', 'http://localhost:5000').strip().rstrip('/')
 
 if not TOKEN:
     raise SystemExit("DISCORD_BOT_TOKEN not set.")
@@ -44,8 +44,9 @@ SUCCESS_METHODS = (
 )
 
 async def call_api(source_b64):
+    base = API_URL.rstrip('/')
     async with httpx.AsyncClient(timeout=180) as c:
-        r = await c.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
+        r = await c.post(f'{base}/deobf', json={'source_b64': source_b64})
         r.raise_for_status()
         data = r.json()
 
@@ -55,7 +56,7 @@ async def call_api(source_b64):
 
         for _ in range(60):
             await asyncio.sleep(2)
-            poll = await c.get(f'{API_URL}/deobf/{job_id}')
+            poll = await c.get(f'{base}/deobf/{job_id}')
             poll.raise_for_status()
             poll_data = poll.json()
             if poll_data.get('status') != 'processing':
