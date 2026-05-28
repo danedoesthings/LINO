@@ -75,6 +75,15 @@ def _is_lua_bytecode(raw):
     return raw[:4] == b'\x1bLua'
 
 
+def _is_self_capture(text):
+    if not text:
+        return False
+    for sig in REJECT_SIGNATURES:
+        if sig in text:
+            return True
+    return False
+
+
 def _is_probably_text(data):
     if not data:
         return False
@@ -82,7 +91,7 @@ def _is_probably_text(data):
         raw = data.encode('latin-1', errors='ignore')
     else:
         raw = data
-    if len(raw) < 50:
+    if len(raw) < 10:
         return False
     if _is_lua_bytecode(raw):
         return False
@@ -252,6 +261,14 @@ class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
         self._java_available = shutil.which('java') is not None
+
+    def get_capabilities(self):
+        return {
+            'lua_harness': True,
+            'prometheus_vm': True,
+            'unluac': self._java_available and os.path.isfile(self.unluac_path),
+            'luaparser': HAS_LUAPARSER,
+        }
 
     def _set_process_limits(self):
         try:
