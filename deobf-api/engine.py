@@ -1040,10 +1040,9 @@ class DeobfEngine:
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
-            'reduced_memory_limit', 'process_group_kill',
-            'extended_harness_timeout', 'async_job_queue',
             'prometheus_static_decompiler', 'vm_detection_skip_harness',
-            'result_cache', 'tight_timeouts'
+            'result_cache', 'tight_timeouts',
+            'luaparser_first_validation', 'validation_cache'
         ]
 
     def _set_process_limits(self):
@@ -1113,7 +1112,7 @@ class DeobfEngine:
         return None
 
     def _run_lua_harness(self, source, depth=0, instruction_limit=500000):
-        if depth > 3:
+        if depth > 1:
             return None, 'max recursion depth'
         source_hash = hashlib.sha256(source.encode('utf-8', errors='replace')).hexdigest()
         if source_hash in self.visited_hashes:
@@ -1509,10 +1508,6 @@ end
                     result = _repair_control_flow(result)
                     if len(result) > 400000:
                         return result, None
-                    if result and result != source and depth < 3:
-                        recursive_result, _ = self._run_lua_harness(result, depth + 1)
-                        if recursive_result and _total_score(recursive_result) > _total_score(result):
-                            return recursive_result, None
                     return result, None
 
             if candidates:
@@ -1534,7 +1529,7 @@ end
             return None, 'no readable captures'
         return None, '; '.join(errors) if errors else 'no output'
 
-    def _peel_base64_layers(self, data, max_layers=10):
+    def _peel_base64_layers(self, data, max_layers=3):
         current = data
         for layer in range(max_layers):
             if not isinstance(current, str):
@@ -1964,40 +1959,51 @@ end
     def _validate_lua(self, code):
         if not code or len(code) < 20:
             return False
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as tmp:
-            tmp.write(code)
-            tmp_path = tmp.name
-        try:
-            validation_passed = False
-            for lua_bin in ['lua5.1', 'lua']:
-                try:
-                    result = subprocess.run(
-                        [lua_bin, '-p', tmp_path],
-                        capture_output=True,
-                        timeout=10
-                    )
-                    if result.returncode == 0:
-                        validation_passed = True
-                except FileNotFoundError:
-                    continue
-                except subprocess.TimeoutExpired:
-                    continue
-                if validation_passed:
-                    break
-            if validation_passed:
-                return True
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+
+        code_hash = hashlib.sha256(code.encode('utf-8', errors='replace')).hexdigest()
+        with _validation_cache_lock:
+            if code_hash in _validation_cache:
+                return _validation_cache[code_hash]
+
+        result = False
+
         if HAS_LUAPARSER:
             try:
                 lua_ast.parse(code)
-                return True
+                result = True
             except Exception:
                 pass
-        return False
+
+        if not result and not HAS_LUAPARSER:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as tmp:
+                tmp.write(code)
+                tmp_path = tmp.name
+            try:
+                for lua_bin in ['lua5.1', 'lua']:
+                    try:
+                        r = subprocess.run(
+                            [lua_bin, '-p', tmp_path],
+                            capture_output=True,
+                            timeout=3
+                        )
+                        if r.returncode == 0:
+                            result = True
+                            break
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                        continue
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        with _validation_cache_lock:
+            if len(_validation_cache) > 2000:
+                for k in list(_validation_cache.keys())[:1000]:
+                    del _validation_cache[k]
+            _validation_cache[code_hash] = result
+
+        return result
 
     def _run_unluac(self, bytecode):
         if not self._java_available:
@@ -2056,6 +2062,9 @@ _result_cache = {}
 _cache_lock = threading.Lock()
 MAX_CACHE_SIZE = 500
 CACHE_TTL = 3600
+
+_validation_cache = {}
+_validation_cache_lock = threading.Lock()
 
 
 def _cleanup_cache():
