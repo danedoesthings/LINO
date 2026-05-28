@@ -1048,13 +1048,14 @@ class DeobfEngine:
             'skip_loader_stubs', 'concat_capture_raw',
             'env_string_capture', 'rawset_hook',
             'return_value_capture', 'proxy_environment',
-            'registry_scanning', 'minimal_harness'
+            'registry_scanning', 'minimal_harness',
+            'gunicorn_timeout_sync'
         ]
 
     def _set_process_limits(self):
         try:
             resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (55, 60))
+            resource.setrlimit(resource.RLIMIT_CPU, (85, 90))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except:
@@ -1422,7 +1423,7 @@ end
                         start_new_session=True
                     )
                     try:
-                        stdout, stderr = proc.communicate(timeout=60)
+                        stdout, stderr = proc.communicate(timeout=90)
                         stdout = stdout.decode('latin-1', errors='replace')
                         stderr = stderr.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
