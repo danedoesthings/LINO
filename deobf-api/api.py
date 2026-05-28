@@ -18,7 +18,7 @@ engine = DeobfEngine()
 def health():
     return jsonify({
         'ok': True,
-        'version': '8.2.0',
+        'version': '8.3.0',
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
