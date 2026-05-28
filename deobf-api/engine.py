@@ -1040,13 +1040,14 @@ class DeobfEngine:
             'deep_base64_peel', 'adaptive_scoring',
             'aggressive_base64_peel', 'bytecode_detection_in_peel',
             'custom_alphabet_fallback', 'suppress_luaparser_stderr',
-            'table_allocation_guard', 'reduced_memory_limit'
+            'table_allocation_guard', 'reduced_memory_limit',
+            'process_group_kill', 'extended_harness_timeout'
         ]
 
     def _set_process_limits(self):
         try:
             resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (18, 20))
+            resource.setrlimit(resource.RLIMIT_CPU, (55, 60))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except:
@@ -1424,8 +1425,9 @@ end
                     result = subprocess.run(
                         [lua_bin, tmp_path],
                         capture_output=True,
-                        timeout=20,
-                        preexec_fn=self._set_process_limits
+                        timeout=60,
+                        preexec_fn=self._set_process_limits,
+                        start_new_session=True
                     )
                     stdout = result.stdout.decode('latin-1', errors='replace')
                     stderr = result.stderr.decode('latin-1', errors='replace')
@@ -1457,6 +1459,10 @@ end
                     errors.append(f"{lua_bin} not found")
                     continue
                 except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(result.pid), signal.SIGKILL)
+                    except:
+                        pass
                     errors.append("timeout")
                     break
         finally:
