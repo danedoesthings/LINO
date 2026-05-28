@@ -1045,7 +1045,7 @@ class DeobfEngine:
             'throttled_hooks', 'recursive_size_limit',
             'binary_capture_bytecode', 'fixed_validate_lua',
             'loader_re_execution', 'lenient_textuality_for_unluac',
-            'skip_loader_stubs'
+            'skip_loader_stubs', 'concat_capture_raw'
         ]
 
     def _set_process_limits(self):
@@ -1177,7 +1177,7 @@ local function save(tag, data)
         hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1
         return
     end
-    if tag ~= "bytecode" and tag ~= "pcall_fn" and not looks_textual(data) then
+    if tag ~= "bytecode" and tag ~= "pcall_fn" and tag ~= "concat" and not looks_textual(data) then
         hook_stats["rejected_textual"] = (hook_stats["rejected_textual"] or 0) + 1
         return
     end
