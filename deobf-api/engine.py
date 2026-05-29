@@ -388,10 +388,11 @@ def _wearedevs_decode(source):
     for body_index, body in enumerate(bodies):
         entries = _parse_table_entries(body)
         strings = [e for e in entries if isinstance(e, str) and len(e) > 2]
-        if len(strings) < 3:
+        string_count = len(strings)
+        if string_count < 3:
             diagnostics["rejections"].append({
                 "table": body_index, "reason": "not enough strings",
-                "string_count": len(strings)
+                "string_count": string_count
             })
             continue
         diagnostics["candidate_tables"] += 1
@@ -407,10 +408,12 @@ def _wearedevs_decode(source):
                 if sub:
                     all_chunks.extend(sub)
                     diagnostics["base64_chunks"] += len(sub)
-        if len(all_chunks) < 3:
+        chunk_count = len(all_chunks)
+        if chunk_count < 3:
             diagnostics["rejections"].append({
                 "table": body_index, "reason": "not enough base64 chunks",
-                "chunk_count": len(all_chunks)
+                "string_count": string_count,
+                "chunk_count": chunk_count
             })
             continue
         all_chunks = _merge_b64_fragments(all_chunks)
@@ -434,7 +437,9 @@ def _wearedevs_decode(source):
                     pass
         if not decoded_chunks:
             diagnostics["rejections"].append({
-                "table": body_index, "reason": "no decodable chunks"
+                "table": body_index, "reason": "no decodable chunks",
+                "string_count": string_count,
+                "chunk_count": chunk_count
             })
             continue
         candidates = []
@@ -449,9 +454,11 @@ def _wearedevs_decode(source):
         diagnostics["entropy"] = round(_shannon_entropy(full_text.encode()), 3)
         score = _lua_score(full_text)
         diagnostics["lua_score"] = score
-        if score < 25:
+        if score < 15:
             diagnostics["rejections"].append({
                 "table": body_index, "reason": "lua score too low",
+                "string_count": string_count,
+                "chunk_count": chunk_count,
                 "score": score
             })
             continue
