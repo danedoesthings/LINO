@@ -182,6 +182,37 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
+def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=10):
+    if depth > max_depth:
+        return data if isinstance(data, str) else data.decode('latin-1', errors='replace')
+    if isinstance(data, bytes):
+        raw = data
+    else:
+        raw = data.encode('latin-1', errors='replace')
+    try:
+        text = raw.decode('utf-8')
+        if len(text) >= 2 and _is_probably_text(text) and _shannon_entropy(raw) < 6:
+            return text
+    except:
+        pass
+    try:
+        s = raw.decode('latin-1', errors='replace')
+        decoded = _custom_b64_decode(s, custom_alpha)
+        if decoded and decoded != raw:
+            return _recursive_decode_bytes(decoded, custom_alpha, depth + 1, max_depth)
+    except:
+        pass
+    try:
+        s = raw.decode('latin-1', errors='replace').strip()
+        if re.match(r'^[A-Za-z0-9+/=]+$', s):
+            padded = s + '=' * (-len(s) % 4)
+            std_decoded = base64.b64decode(padded, validate=True)
+            if std_decoded != raw:
+                return _recursive_decode_bytes(std_decoded, custom_alpha, depth + 1, max_depth)
+    except:
+        pass
+    return raw.decode('latin-1', errors='replace')
+
 def _wearedevs_decode(source):
     diag = {}
     alphabet = _extract_wearedevs_alphabet(source)
@@ -207,10 +238,18 @@ def _wearedevs_decode(source):
             continue
         try:
             raw = _custom_b64_decode(s, alphabet)
-            text = raw.decode('utf-8', errors='replace')
-            decoded.append(text)
+            final = _recursive_decode_bytes(raw, alphabet)
+            decoded.append(final)
         except Exception:
-            decoded.append(s)
+            if re.match(r'^[A-Za-z0-9+/=]+$', s):
+                try:
+                    raw = base64.b64decode(s + '=' * (-len(s) % 4), validate=True)
+                    final = _recursive_decode_bytes(raw, alphabet)
+                    decoded.append(final)
+                except:
+                    decoded.append(s)
+            else:
+                decoded.append(s)
     diag['decoded_count'] = len(decoded)
     readable = [s for s in decoded if s and _is_probably_text(s)]
     lua_hits = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
