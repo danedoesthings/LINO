@@ -41,6 +41,7 @@ SUCCESS_METHODS = (
     'recursive_decode', 'lua_harness_readable',
     'recursive_base64', 'harness_diag',
     'prometheus_vm', 'prometheus_vm_raw',
+    'wearedevs_decode', 'wearedevs_vm_lifted',
 )
 
 async def call_api(source_b64):
@@ -48,11 +49,9 @@ async def call_api(source_b64):
         r = await c.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
         r.raise_for_status()
         data = r.json()
-
         job_id = re.sub(r'\s+', '', data.get('job_id', ''))
         if not job_id:
             return data
-
         for _ in range(120):
             await asyncio.sleep(1)
             poll = await c.get(f'{API_URL}/deobf/{job_id}')
@@ -62,7 +61,6 @@ async def call_api(source_b64):
                 if 'error' in poll_data:
                     return poll_data
                 return poll_data
-
         raise httpx.TimeoutException("Deobfuscation timed out after 120 seconds")
 
 def _extract_inline_code(content):
@@ -83,9 +81,9 @@ def _sanitize_diag(text):
 async def run_deobf(raw_bytes, filename):
     if len(raw_bytes) > MAX_BYTES:
         return {
-            'embed': discord.Embed(title='Error', description=f'Input exceeds 5 MB limit ({len(raw_bytes)} bytes)', color=0xe74c3c),
             'files': [],
-            'full_diag': None
+            'full_diag': None,
+            'embed': discord.Embed(title='Error', description=f'Input exceeds 5 MB limit ({len(raw_bytes)} bytes)', color=0xe74c3c),
         }
     try:
         source_b64 = base64.b64encode(raw_bytes).decode('ascii')
@@ -94,20 +92,20 @@ async def run_deobf(raw_bytes, filename):
         return {
             'embed': discord.Embed(title='API Timeout', description='Deobfuscation API did not respond within 120 seconds', color=0xe74c3c),
             'files': [],
-            'full_diag': None
+            'full_diag': None,
         }
     except httpx.ConnectError:
         return {
-            'embed': discord.Embed(title='API Unreachable', description=f'Cannot connect to {API_URL}', color=0xe74c3c),
             'files': [],
-            'full_diag': None
+            'full_diag': None,
+            'embed': discord.Embed(title='API Unreachable', description=f'Cannot connect to {API_URL}. Is the API running?', color=0xe74c3c),
         }
     except Exception as e:
         log.error(f"API call failed: {e}")
         return {
-            'embed': discord.Embed(title='API Error', description=_truncate(str(e), 1800), color=0xe74c3c),
             'files': [],
-            'full_diag': None
+            'full_diag': None,
+            'embed': discord.Embed(title='API Error', description=_truncate(str(e), 1800), color=0xe74c3c),
         }
 
     if 'error' in data:
@@ -118,7 +116,7 @@ async def run_deobf(raw_bytes, filename):
         return {
             'embed': discord.Embed(title='Deobfuscation Failed', description=desc, color=0xe74c3c),
             'files': [],
-            'full_diag': _sanitize_diag(data.get('diagnostic', ''))
+            'full_diag': _sanitize_diag(data.get('diagnostic', '')),
         }
 
     result = data.get('result', '')
@@ -160,13 +158,15 @@ async def run_deobf(raw_bytes, filename):
 
     files = []
     if result and detected != 'bytecode':
-        files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'deobf_{filename}'))
+        files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'deobfuscated_{filename}'))
     elif detected == 'bytecode' and result:
-        raw_out = base64.b64decode(result)
-        files.append(discord.File(fp=io.BytesIO(raw_out), filename=f'extracted_{filename}.luac'))
+        try:
+            raw_out = base64.b64decode(result)
+            files.append(discord.File(fp=io.BytesIO(raw_out), filename=f'extracted_{filename}.luac'))
+        except:
+            files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'extracted_{filename}.txt'))
 
     full_diag = diagnostic if len(diagnostic) > 900 else None
-
     return {'embed': em, 'files': files, 'full_diag': full_diag}
 
 last_results = {}
@@ -195,7 +195,6 @@ async def prefix_deobf(ctx):
     log.info(f"Deobf request from {ctx.author} ({filename}, {len(raw)} bytes)")
     msg = await ctx.send(embed=discord.Embed(title='Deobfuscating...', description=f'Processing {filename} ({len(raw)} bytes)', color=0x3498db))
     res = await run_deobf(raw, filename)
-
     last_results[ctx.channel.id] = res
 
     try:
@@ -204,7 +203,6 @@ async def prefix_deobf(ctx):
         pass
 
     await ctx.send(embed=res['embed'], files=res.get('files', []))
-
     if res.get('full_diag'):
         await ctx.send('Diagnostic was truncated. Use `=fulldiag` to get the full diagnostic as a file.')
 
@@ -235,15 +233,17 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
         return await interaction.response.send_message('Please attach a `.lua`, `.luau`, or `.txt` file.', ephemeral=True)
     if file.size > MAX_BYTES:
         return await interaction.response.send_message(f'File too large ({file.size} bytes, max {MAX_BYTES})', ephemeral=True)
+
     await interaction.response.defer(thinking=True)
     raw = await file.read()
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
     res = await run_deobf(raw, file.filename)
+
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
     if res.get('full_diag'):
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
         diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
-        await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file, ephemeral=True)
+        await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file)
 
 @slash_deobf.error
 async def slash_deobf_error(interaction: discord.Interaction, error):
