@@ -77,14 +77,11 @@ def _is_probably_text(data):
     if _is_lua_bytecode(raw):
         return False
     printable = sum(1 for b in raw if 32 <= b <= 126 or b in (9, 10, 13))
-    ratio = printable / len(raw)
-    if ratio < 0.60:
+    if (printable / len(raw)) < 0.60:
         return False
-    null_bytes = raw.count(b'\x00')
-    if null_bytes > len(raw) * 0.15:
+    if raw.count(b'\x00') > len(raw) * 0.15:
         return False
-    entropy = _shannon_entropy(raw)
-    if entropy > 7.2:
+    if _shannon_entropy(raw) > 7.2:
         return False
     return True
 
@@ -94,34 +91,99 @@ def _try_base64_decode(s):
         s = s.replace('-', '+').replace('_', '/')
         padded = s + '=' * (-len(s) % 4)
         return base64.b64decode(padded, validate=True)
-    except:
+    except Exception:
         return None
 
 
-def _extract_custom_b64_alphabet(source):
-    for m in re.finditer(r'["\'`]([A-Za-z0-9+/]{64})[\"\'`]', source):
+def _decode_numeric_escapes(s):
+    """Decode Lua numeric escapes: \\076 -> 'L'"""
+    return re.sub(r'\\(\d{1,3})', lambda m: chr(int(m.group(1))), s)
+
+
+def _lua_score(text):
+    """Score a string on how likely it is to be readable Lua source."""
+    score = sum(1 for kw in LUA_KEYWORDS if kw in text) * 8
+    for pat in [r'local\s+\w+', r'function\s*\(', r'end\b', r'return\b', r'if\s+.+\s+then']:
+        if re.search(pat, text):
+            score += 15
+    if _shannon_entropy(text.encode(errors='ignore')) < 7:
+        score += 10
+    if text.count('(') == text.count(')'):
+        score += 10
+    funcs = text.count('function')
+    ends  = text.count('end')
+    if funcs > 0 and ends >= funcs:
+        score += 25
+    return score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WeAreDevs alphabet extraction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_wearedevs_alphabet(source):
+    """
+    WeAreDevs stores the custom base64 alphabet as a Lua char→index lookup table.
+    Every entry is: identifier = arithmetic_expr  OR  ["\\NNN"] = arithmetic_expr
+    where the value evaluates to an integer 0..63.
+
+    Example:
+        local N={M=685299-685257; V=615891+-615871, ["\055"]=135105-135089, ...}
+
+    We parse all 64 entries, evaluate their arithmetic, and reconstruct the
+    alphabet string (index 0 → char, index 1 → char, …, index 63 → char).
+    """
+    # Find all large Lua table blocks in the source
+    for table_match in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{400,})\}', source):
+        body = table_match.group(1)
+        entries = {}
+
+        # Single-letter identifier keys:  M=685299-685257
+        for m in re.finditer(r'\b([A-Za-z_])\s*=\s*([-\d+*()\s]{3,60}?)(?=[,;\}]|$)', body):
+            key = m.group(1)
+            try:
+                val = int(eval(re.sub(r'\s+', '', m.group(2))))
+                if 0 <= val <= 63:
+                    entries[key] = val
+            except Exception:
+                pass
+
+        # Numeric-escape keys:  ["\055"]=135105-135089
+        for m in re.finditer(r'\["\\(\d{1,3})"\]\s*=\s*([-\d+*()\s]{3,60}?)(?=[,;\}]|$)', body):
+            key = chr(int(m.group(1)))
+            try:
+                val = int(eval(re.sub(r'\s+', '', m.group(2))))
+                if 0 <= val <= 63:
+                    entries[key] = val
+            except Exception:
+                pass
+
+        if len(entries) < 60:
+            continue
+
+        # Reconstruct alphabet string indexed 0..63
+        alpha_map = {v: k for k, v in entries.items()}
+        if len(alpha_map) < 60:
+            continue
+
+        alphabet = ''.join(alpha_map.get(i, '') for i in range(64))
+        if len(alphabet) == 64 and '?' not in alphabet and len(set(alphabet)) == 64:
+            return alphabet
+
+    # Fallback: look for a plain 64-char string literal
+    for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', source):
         candidate = m.group(1)
         if len(set(candidate)) == 64:
             return candidate
-    for m in re.finditer(r'local\s+\w+\s*=\s*["\'`]([A-Za-z0-9+/]{60,})[\"\'`]', source):
-        candidate = m.group(1)[:64]
-        if len(candidate) == 64 and len(set(candidate)) == 64:
-            return candidate
-    concat_m = re.search(r'["\'`]([A-Za-z0-9+/]{20,})[\"\'`]\s*\.\.\s*["\'`]([A-Za-z0-9+/]{20,})[\"\'`]', source)
-    if concat_m:
-        combined = concat_m.group(1) + concat_m.group(2)
-        if len(combined) >= 64 and len(set(combined[:64])) == 64:
-            return combined[:64]
+
     return None
 
 
 def _custom_b64_decode(s, alpha):
+    """Decode base64 string using a custom 64-char alphabet."""
     reverse = {c: i for i, c in enumerate(alpha)}
-    s_clean = s.rstrip('=')
-    bits = 0
-    bit_count = 0
-    out = bytearray()
-    for c in s_clean:
+    bits = 0; bit_count = 0; out = bytearray()
+    for c in s.rstrip('='):
         if c not in reverse:
             continue
         bits = (bits << 6) | reverse[c]
@@ -132,386 +194,211 @@ def _custom_b64_decode(s, alpha):
     return bytes(out)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WeAreDevs string-table decoder
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_r_table_strings(source):
+    """
+    Extract the R string table from WeAreDevs obfuscated Lua.
+    The table is: local R={"\076\049..."; "\108\084...", ...}
+    Entries are separated by ; or , and all are quoted strings of numeric escapes.
+    """
+    # Find the R table: starts right after "local R={"
+    m = re.search(r'local\s+R\s*=\s*\{(.*?)\}(?=local\s+function)', source, re.DOTALL)
+    if not m:
+        # Broader fallback: first large table of only quoted strings
+        m = re.search(r'\{((?:\s*"[^"]*"\s*[;,]?\s*){10,})\}', source, re.DOTALL)
+    if not m:
+        return None
+
+    body = m.group(1)
+    # Extract all quoted values
+    raw_entries = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+    if not raw_entries:
+        return None
+
+    # Decode numeric escapes to get the encoded b64 strings
+    return [_decode_numeric_escapes(s) for s in raw_entries]
+
+
+def _extract_shuffle_ops(source):
+    """
+    Extract swap operations from the shuffle loop.
+    Format: for E,l in ipairs({{A;B},{C;D},...}) do ... end
+    where A,B,C,D can be arithmetic expressions.
+    """
+    ops = []
+    m = re.search(r'ipairs\s*\(\s*\{(.*?)\}\s*\)', source, re.DOTALL)
+    if not m:
+        return ops
+    inner = m.group(1)
+    for pair in re.finditer(r'\{([^}]+)\}', inner):
+        parts = re.split(r'[;,]', pair.group(1))
+        if len(parts) >= 2:
+            try:
+                a = int(eval(re.sub(r'\s+', '', parts[0])))
+                b = int(eval(re.sub(r'\s+', '', parts[1])))
+                ops.append((a, b))
+            except Exception:
+                pass
+    return ops
+
+
+def _wearedevs_decode(source):
+    """
+    Full WeAreDevs v1.0.0 deobfuscation pipeline:
+      1. Extract the custom base64 alphabet from the N lookup table
+      2. Extract all encoded strings from the R table
+      3. Apply any shuffle operations
+      4. Decode each string with the custom alphabet
+      5. Return decoded strings and diagnostics
+    """
+    diag = {}
+
+    # Step 1: alphabet
+    alphabet = _extract_wearedevs_alphabet(source)
+    diag['custom_alphabet'] = alphabet is not None
+    diag['alphabet_preview'] = alphabet[:8] + '...' if alphabet else None
+
+    if not alphabet:
+        return {'success': False, 'reason': 'could not extract custom alphabet', 'diagnostics': diag}
+
+    # Step 2: string table
+    encoded_strings = _extract_r_table_strings(source)
+    if not encoded_strings:
+        return {'success': False, 'reason': 'could not extract R string table', 'diagnostics': diag}
+
+    diag['string_count'] = len(encoded_strings)
+
+    # Step 3: shuffle
+    shuffle_ops = _extract_shuffle_ops(source)
+    diag['shuffle_ops'] = len(shuffle_ops)
+    strings = list(encoded_strings)
+    for a, b in shuffle_ops:
+        ai, bi = a - 1, b - 1
+        if 0 <= ai < len(strings) and 0 <= bi < len(strings):
+            strings[ai], strings[bi] = strings[bi], strings[ai]
+
+    # Step 4: decode each string
+    decoded = []
+    for s in strings:
+        if not s:
+            decoded.append('')
+            continue
+        try:
+            raw = _custom_b64_decode(s, alphabet)
+            text = raw.decode('utf-8', errors='replace')
+            decoded.append(text)
+        except Exception:
+            decoded.append(s)  # keep as-is if decode fails
+
+    diag['decoded_count'] = len(decoded)
+
+    # Step 5: score the output
+    readable = [s for s in decoded if s and _is_probably_text(s)]
+    lua_hits  = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
+    diag['readable_strings'] = len(readable)
+    diag['lua_keyword_hits'] = lua_hits
+
+    if lua_hits < 2 and len(readable) < 3:
+        return {
+            'success': False,
+            'reason': f'decoded {len(decoded)} strings but only {lua_hits} contain Lua keywords',
+            'diagnostics': diag,
+            'decoded_strings': decoded,
+        }
+
+    return {
+        'success': True,
+        'decoded_strings': decoded,
+        'reason': f'decoded {len(decoded)} strings ({lua_hits} with Lua keywords)',
+        'diagnostics': diag,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Table helpers (for Prometheus)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _find_balanced_end(content, open_brace_index):
-    depth = 0
-    quote = None
-    in_long_string = False
-    long_match = None
+    depth = 0; quote = None; in_long_string = False; long_match = None
     idx = open_brace_index
     while idx < len(content):
         char = content[idx]
         if in_long_string:
             if char == ']' and content[idx:idx+len(long_match)] == long_match:
-                in_long_string = False
-                idx += len(long_match)
-                continue
-            idx += 1
-            continue
+                in_long_string = False; idx += len(long_match); continue
+            idx += 1; continue
         if quote:
-            if char == '\\':
-                idx += 2
-                continue
-            if char == quote:
-                quote = None
-            idx += 1
-            continue
+            if char == '\\': idx += 2; continue
+            if char == quote: quote = None
+            idx += 1; continue
         if char == '[':
             m = re.match(r'\[=*\[', content[idx:])
             if m:
-                long_match = ']' + m.group(0)[2:-1] + ']'
-                in_long_string = True
-                idx += len(m.group(0))
-                continue
-        if char in ("'", '"'):
-            quote = char
-        elif char == '{':
-            depth += 1
+                long_match = ']' + m.group(0)[2:-1] + ']'; in_long_string = True
+                idx += len(m.group(0)); continue
+        if char in ("'", '"'): quote = char
+        elif char == '{': depth += 1
         elif char == '}':
             depth -= 1
-            if depth == 0:
-                return idx + 1
+            if depth == 0: return idx + 1
         idx += 1
     return -1
 
 
-def _join_concat_literals(source):
-    pattern = r'"([^"]*)"\s*\.\.\s*"([^"]*)"'
-    while re.search(pattern, source):
-        source = re.sub(
-            pattern,
-            lambda m: '"' + m.group(1) + m.group(2) + '"',
-            source
-        )
-    return source
-
-
 def _find_all_table_bodies(source):
-    bodies = []
-    idx = 0
+    bodies = []; idx = 0
     while idx < len(source):
         brace_pos = source.find('{', idx)
-        if brace_pos == -1:
-            break
+        if brace_pos == -1: break
         end = _find_balanced_end(source, brace_pos)
         if end != -1:
-            bodies.append(source[brace_pos:end])
-            idx = end
+            bodies.append(source[brace_pos:end]); idx = end
         else:
             idx = brace_pos + 1
     return bodies
 
 
 def _parse_table_entries(body):
-    inner = body[1:-1]
-    entries = []
-    depth = 0
-    current = ""
-    in_str = False
-    quote = None
-    in_long_str = False
-    long_match = None
-    i = 0
+    inner = body[1:-1]; entries = []; depth = 0; current = ""
+    in_str = False; quote = None; in_long_str = False; long_match = None; i = 0
     while i < len(inner):
         c = inner[i]
         if in_long_str:
             current += c
             if c == ']' and i + len(long_match) <= len(inner) and inner[i:i+len(long_match)] == long_match:
-                in_long_str = False
-                current += long_match[1:]
-                i += len(long_match)
-                continue
-            i += 1
-            continue
+                in_long_str = False; current += long_match[1:]; i += len(long_match); continue
+            i += 1; continue
         if in_str:
             current += c
             if c == '\\':
-                if i + 1 < len(inner):
-                    current += inner[i+1]
-                    i += 2
-                    continue
-            elif c == quote:
-                in_str = False
-            i += 1
-            continue
+                if i + 1 < len(inner): current += inner[i+1]; i += 2; continue
+            elif c == quote: in_str = False
+            i += 1; continue
         if c == '[':
             m = re.match(r'\[=*\[', inner[i:])
             if m:
-                long_match = ']' + m.group(0)[2:-1] + ']'
-                in_long_str = True
-                current += m.group(0)
-                i += len(m.group(0))
-                continue
-        if c in ('"', "'"):
-            in_str = True
-            quote = c
-            current += c
-            i += 1
-            continue
-        if c == '{':
-            depth += 1
-            current += c
-            i += 1
-            continue
-        if c == '}':
-            depth -= 1
-            current += c
-            i += 1
-            continue
+                long_match = ']' + m.group(0)[2:-1] + ']'; in_long_str = True
+                current += m.group(0); i += len(m.group(0)); continue
+        if c in ('"', "'"): in_str = True; quote = c; current += c; i += 1; continue
+        if c == '{': depth += 1; current += c; i += 1; continue
+        if c == '}': depth -= 1; current += c; i += 1; continue
         if c in (',', ';') and depth == 0:
-            entries.append(current.strip())
-            current = ""
-            i += 1
-            continue
-        current += c
-        i += 1
-    if current.strip():
-        entries.append(current.strip())
+            entries.append(current.strip()); current = ""; i += 1; continue
+        current += c; i += 1
+    if current.strip(): entries.append(current.strip())
     parsed = []
     for e in entries:
-        if not e:
-            continue
+        if not e: continue
         e = e.strip()
-        if e.lstrip('-').isdigit():
-            parsed.append(int(e))
-        elif e.replace('.', '', 1).lstrip('-').isdigit():
-            parsed.append(float(e))
-        elif (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
-            parsed.append(e[1:-1])
-        elif e.startswith('[[') and e.endswith(']]'):
-            parsed.append(e[2:-2])
-        else:
-            parsed.append(e)
+        if e.lstrip('-').isdigit(): parsed.append(int(e))
+        elif e.replace('.', '', 1).lstrip('-').isdigit(): parsed.append(float(e))
+        elif (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")): parsed.append(e[1:-1])
+        elif e.startswith('[[') and e.endswith(']]'): parsed.append(e[2:-2])
+        else: parsed.append(e)
     return parsed
-
-
-def _decode_numeric_escapes(s):
-    return re.sub(
-        r'\\(\d{1,3})',
-        lambda m: chr(int(m.group(1)) % 256),
-        s
-    )
-
-
-def _extract_shuffle_pairs(source):
-    pairs = []
-    for body in _find_all_table_bodies(source):
-        if re.search(r'\{\s*\d+\s*,\s*\d+\s*\}', body):
-            nested = re.findall(r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}', body)
-            for a, b in nested:
-                pairs.append((int(a), int(b)))
-    return pairs
-
-
-def _extract_b64_substrings(s):
-    s = re.sub(r'"\s*\.\.\s*"', '', s)
-    s = re.sub(r"'\s*\.\.\s*'", '', s)
-    results = []
-    for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', s):
-        val = (m.group(1) or m.group(2)).strip()
-        if val and re.match(r'^[A-Za-z0-9+/]+=*$', val):
-            results.append(val)
-    if results:
-        return results
-    for part in re.split(r'[;,]', s):
-        part = part.strip().strip('"\'')
-        if part and re.match(r'^[A-Za-z0-9+/]+=*$', part):
-            results.append(part)
-    if results:
-        return results
-    cleaned = s.strip().strip('"\'')
-    if cleaned and re.match(r'^[A-Za-z0-9+/]+=*$', cleaned):
-        results.append(cleaned)
-    return results
-
-
-def _merge_b64_fragments(chunks):
-    merged = []
-    current = ""
-    for chunk in chunks:
-        current += chunk
-        if len(current) % 4 == 0:
-            merged.append(current)
-            current = ""
-    if current:
-        merged.append(current)
-    return merged
-
-
-def _recursive_decode(data, depth=0):
-    if depth > 4:
-        return data
-    original = data
-    if isinstance(data, str):
-        data = _decode_numeric_escapes(data)
-        b64 = _try_base64_decode(data)
-        if b64:
-            try:
-                data = b64.decode('utf-8', errors='replace')
-            except:
-                pass
-        rev = data[::-1]
-        if _lua_score(rev) > _lua_score(data):
-            data = rev
-        if re.fullmatch(r'[0-9a-fA-F]+', data):
-            try:
-                data = bytes.fromhex(data).decode('utf-8', errors='replace')
-            except:
-                pass
-        if data == original:
-            return data
-        return _recursive_decode(data, depth + 1)
-    return data
-
-
-def _lua_score(text):
-    score = 0
-    keyword_hits = sum(1 for kw in LUA_KEYWORDS if kw in text)
-    score += keyword_hits * 8
-    structural_patterns = [
-        r'local\s+\w+',
-        r'function\s*\(',
-        r'\w+\s*=\s*',
-        r'end\b',
-        r'return\b',
-        r'if\s+.+\s+then',
-    ]
-    for pattern in structural_patterns:
-        if re.search(pattern, text):
-            score += 15
-    entropy = _shannon_entropy(text.encode(errors='ignore'))
-    if entropy < 7:
-        score += 10
-    if len(text.splitlines()) > 3:
-        score += 10
-    if text.count("(") == text.count(")"):
-        score += 10
-    funcs = text.count("function")
-    ends = text.count("end")
-    if funcs > 0 and ends >= funcs:
-        score += 25
-    return score
-
-
-def _extract_loader_payloads(source):
-    payloads = []
-    patterns = [
-        r'loadstring\s*\((.*?)\)',
-        r'load\s*\((.*?)\)',
-    ]
-    for pattern in patterns:
-        for m in re.finditer(pattern, source, re.S):
-            payloads.append(m.group(1))
-    return payloads
-
-
-def _wearedevs_decode(source):
-    source = _join_concat_literals(source)
-    alphabet = _extract_custom_b64_alphabet(source)
-    diagnostics = {
-        "table_count": 0,
-        "candidate_tables": 0,
-        "base64_chunks": 0,
-        "decoded_chunks": 0,
-        "lua_score": 0,
-        "entropy": None,
-        "rejections": [],
-        "custom_alphabet": alphabet is not None
-    }
-    bodies = _find_all_table_bodies(source)
-    diagnostics["table_count"] = len(bodies)
-    if not bodies:
-        return {"success": False, "reason": "no table bodies found", "diagnostics": diagnostics}
-    for body_index, body in enumerate(bodies):
-        entries = _parse_table_entries(body)
-        strings = [e for e in entries if isinstance(e, str) and len(e) > 2]
-        string_count = len(strings)
-        if string_count < 3:
-            diagnostics["rejections"].append({
-                "table": body_index, "reason": "not enough strings",
-                "string_count": string_count
-            })
-            continue
-        diagnostics["candidate_tables"] += 1
-        step1 = [_decode_numeric_escapes(s) if '\\' in s else s for s in strings]
-        all_chunks = []
-        for s in step1:
-            decoded = _recursive_decode(s)
-            if isinstance(decoded, str) and re.match(r'^[A-Za-z0-9+/]+=*$', decoded.strip()):
-                all_chunks.append(decoded.strip())
-                diagnostics["base64_chunks"] += 1
-            else:
-                sub = _extract_b64_substrings(decoded if isinstance(decoded, str) else s)
-                if sub:
-                    all_chunks.extend(sub)
-                    diagnostics["base64_chunks"] += len(sub)
-        chunk_count = len(all_chunks)
-        if chunk_count < 3:
-            diagnostics["rejections"].append({
-                "table": body_index, "reason": "not enough base64 chunks",
-                "string_count": string_count,
-                "chunk_count": chunk_count
-            })
-            continue
-        all_chunks = _merge_b64_fragments(all_chunks)
-        swaps = _extract_shuffle_pairs(source)
-        for a, b in swaps:
-            ai, bi = a - 1, b - 1
-            if 0 <= ai < len(all_chunks) and 0 <= bi < len(all_chunks):
-                all_chunks[ai], all_chunks[bi] = all_chunks[bi], all_chunks[ai]
-        decoded_chunks = []
-        for chunk in all_chunks:
-            if alphabet:
-                try:
-                    b64 = _custom_b64_decode(chunk, alphabet)
-                except Exception:
-                    b64 = None
-            else:
-                b64 = _try_base64_decode(chunk)
-            if not b64:
-                continue
-            for enc in ('utf-8', 'latin-1'):
-                try:
-                    text = b64.decode(enc, errors='replace')
-                    decoded_chunks.append(text)
-                    diagnostics["decoded_chunks"] += 1
-                    break
-                except Exception:
-                    pass
-        if not decoded_chunks:
-            diagnostics["rejections"].append({
-                "table": body_index, "reason": "no decodable chunks",
-                "string_count": string_count,
-                "chunk_count": chunk_count
-            })
-            continue
-        candidates = []
-        for chunk in decoded_chunks:
-            score = _lua_score(chunk)
-            if score > 20:
-                candidates.append((score, chunk))
-        if candidates:
-            full_text = max(candidates, key=lambda x: x[0])[1]
-        else:
-            full_text = ''.join(decoded_chunks)
-        diagnostics["entropy"] = round(_shannon_entropy(full_text.encode()), 3)
-        score = _lua_score(full_text)
-        diagnostics["lua_score"] = score
-        if score < 15:
-            diagnostics["rejections"].append({
-                "table": body_index, "reason": "lua score too low",
-                "string_count": string_count,
-                "chunk_count": chunk_count,
-                "score": score
-            })
-            continue
-        loader_payloads = _extract_loader_payloads(full_text)
-        if loader_payloads:
-            for payload in loader_payloads:
-                rec_result = _recursive_decode(payload)
-                if isinstance(rec_result, str) and _lua_score(rec_result) > _lua_score(full_text):
-                    full_text = rec_result
-        return {"success": True, "output": full_text, "reason": "decoded successfully", "diagnostics": diagnostics}
-    return {"success": False, "reason": "all candidate tables rejected", "diagnostics": diagnostics}
 
 
 @dataclass
@@ -541,165 +428,260 @@ class DeobfEngine:
             'luaparser': HAS_LUAPARSER,
         }
 
-    def _trace(self, stage, success, message, line=None, column=None, snippet=None, exc=None):
-        self.trace.append(DiagnosticEvent(
-            stage=stage, success=success, message=message,
-            line=line, column=column, snippet=snippet,
-            exception_type=type(exc).__name__ if exc else None
-        ))
+    def _trace(self, stage, success, message):
+        self.trace.append(DiagnosticEvent(stage=stage, success=success, message=message))
 
-    def _validate_lua(self, code, stage="unknown"):
-        if not HAS_LUAPARSER:
-            self._trace(stage, True, "luaparser not available, skipping validation")
-            return {"valid": True}
+    def _set_process_limits(self):
         try:
-            with _suppress_stderr():
-                lua_ast.parse(code)
-            self._trace(stage, True, "lua validation passed")
-            return {"valid": True}
-        except Exception as e:
-            info = self._extract_parse_error(code, e)
-            self._trace(stage, False, str(e), line=info.get("line"),
-                       column=info.get("column"), snippet=info.get("snippet"), exc=e)
-            return {"valid": False, "error": str(e), "line": info.get("line"),
-                    "column": info.get("column"), "snippet": info.get("snippet")}
+            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (40, 45))
+            resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+        except Exception:
+            pass
 
-    def _extract_parse_error(self, code, error):
-        text = str(error)
-        line, column = None, None
-        m = re.search(r'line\s+(\d+)', text, re.I)
-        if m:
-            line = int(m.group(1))
-        c = re.search(r'column\s+(\d+)', text, re.I)
-        if c:
-            column = int(c.group(1))
-        snippet = None
-        if line:
-            lines = code.splitlines()
-            start = max(0, line - 3)
-            end = min(len(lines), line + 2)
-            context = []
-            for i in range(start, end):
-                prefix = ">>" if i + 1 == line else "  "
-                context.append(f"{prefix} {i+1}: {lines[i]}")
-            snippet = "\n".join(context)
-        return {"line": line, "column": column, "snippet": snippet}
-
-    def _token_diagnostics(self, code):
-        if not HAS_LUAPARSER:
-            return []
-        issues = []
+    def _run_lua_harness(self, source):
+        harness = r'''
+local captures = {}
+local hook_stats = {loadstring=0,load=0,char=0,concat=0,insert=0,pcall=0,bytecode=0,env_string=0,rejected_size=0}
+local CALL_DEPTH = 0
+local MAX_DEPTH = 25
+local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+local function b64encode(data)
+    local result = {}
+    local padding = ""
+    for i = 1, #data, 3 do
+        local a, b, c = data:byte(i, i+2)
+        b = b or 0; c = c or 0
+        local n = a * 65536 + b * 256 + c
+        local c1 = math.floor(n / 262144) % 64
+        local c2 = math.floor(n / 4096) % 64
+        local c3 = math.floor(n / 64) % 64
+        local c4 = n % 64
+        table.insert(result, b64chars:sub(c1+1, c1+1))
+        table.insert(result, b64chars:sub(c2+1, c2+1))
+        if i + 1 > #data then padding = "=="; break end
+        table.insert(result, b64chars:sub(c3+1, c3+1))
+        if i + 2 > #data then padding = "="; break end
+        table.insert(result, b64chars:sub(c4+1, c4+1))
+    end
+    return table.concat(result) .. padding
+end
+local real_insert = table.insert
+local function save(tag, data)
+    if type(data) ~= "string" then return end
+    if #data < 20 then hook_stats["rejected_size"] = (hook_stats["rejected_size"] or 0) + 1; return end
+    if CALL_DEPTH > MAX_DEPTH then return end
+    CALL_DEPTH = CALL_DEPTH + 1
+    real_insert(captures, {tag=tag, data=b64encode(data), raw_length=#data})
+    CALL_DEPTH = CALL_DEPTH - 1
+end
+local real_loadstring = loadstring
+local real_load = load or loadstring
+local INSIDE_LOAD = false
+_G.loadstring = function(code, ...)
+    hook_stats.loadstring = (hook_stats.loadstring or 0) + 1
+    if not INSIDE_LOAD then INSIDE_LOAD = true; save("loadstring", code); INSIDE_LOAD = false end
+    return real_loadstring(code, ...)
+end
+if load then
+    _G.load = function(code, ...)
+        hook_stats.load = (hook_stats.load or 0) + 1
+        if not INSIDE_LOAD then INSIDE_LOAD = true; save("load", code); INSIDE_LOAD = false end
+        return real_load(code, ...)
+    end
+end
+local real_char = string.char
+string.char = function(...)
+    hook_stats.char = (hook_stats.char or 0) + 1
+    local out = real_char(...)
+    if #out > 40 then save("string_char", out) end
+    return out
+end
+local real_concat = table.concat
+table.concat = function(t, sep, i, j)
+    hook_stats.concat = (hook_stats.concat or 0) + 1
+    local out = real_concat(t, sep, i, j)
+    if type(out) == "string" and #out > 80 then save("concat", out) end
+    return out
+end
+local real_insert_hook = table.insert
+table.insert = function(t, v, ...)
+    hook_stats.insert = (hook_stats.insert or 0) + 1
+    if type(v) == "string" and #v > 20 then save("table_insert", v) end
+    return real_insert_hook(t, v, ...)
+end
+local real_pcall = pcall
+_G.pcall = function(fn, ...)
+    hook_stats.pcall = (hook_stats.pcall or 0) + 1
+    if type(fn) == "function" and debug and debug.getinfo then
+        local info = debug.getinfo(fn)
+        if info and info.what == "Lua" then
+            local ok, dumped = real_pcall(string.dump, fn)
+            if ok and dumped and #dumped > 50 then save("pcall_fn", dumped) end
+        end
+    end
+    return real_pcall(fn, ...)
+end
+if string.dump then
+    local real_dump = string.dump
+    string.dump = function(fn, ...)
+        hook_stats.bytecode = (hook_stats.bytecode or 0) + 1
+        local bc = real_dump(fn, ...)
+        save("bytecode", bc)
+        return bc
+    end
+end
+os.execute = function() error("os.execute blocked") end
+io.popen = function() error("io.popen blocked") end
+local f, err = loadfile("_SRCFILE_")
+if not f then
+    print("ERR:COMPILE:" .. tostring(err))
+else
+    local bit32 = bit32 or nil
+    if not bit32 then
+        local function bxor(a,b) local r,m=0,1; while a>0 or b>0 do local ab,bb=a%2,b%2; if ab~=bb then r=r+m end; a,b,m=math.floor(a/2),math.floor(b/2),m*2 end; return r end
+        local function band(a,b) local r,m=0,1; while a>0 and b>0 do if a%2+b%2==2 then r=r+m end; a,b,m=math.floor(a/2),math.floor(b/2),m*2 end; return r end
+        local function bor(a,b)  local r,m=0,1; while a>0 or b>0  do if a%2+b%2>0  then r=r+m end; a,b,m=math.floor(a/2),math.floor(b/2),m*2 end; return r end
+        bit32={bxor=bxor,band=band,bor=bor,lshift=function(v,n) return math.floor(v*(2^n))%4294967296 end,rshift=function(v,n) return math.floor(v/(2^n)) end}
+        bit32.arshift=bit32.rshift
+    end
+    _G.bit32=bit32; _G.bit=bit32
+    if debug and debug.sethook then debug.sethook(function() error("instruction limit") end,"",500000) end
+    local success, result = pcall(f)
+    if debug and debug.sethook then debug.sethook() end
+    collectgarbage("collect")
+    pcall(function()
+        for k,v in pairs(_G) do
+            if type(v)=="string" and #v>20 then hook_stats.env_string=(hook_stats.env_string or 0)+1; save("env_string",v) end
+        end
+    end)
+    for _,cap in ipairs(captures) do print("CAP:"..cap.tag..":"..cap.data) end
+    if #captures==0 then
+        if not success then print("ERR:RUNTIME:"..tostring(result))
+        else print("ERR:NO_OUTPUT") end
+    end
+end
+'''
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as src_tmp:
+            src_tmp.write(source); src_path = src_tmp.name
+        harness = harness.replace('_SRCFILE_', src_path)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
+            tmp.write(harness); tmp_path = tmp.name
+        captures = []
         try:
-            lexer = LuaLexer()
-            tokens = list(lexer.get_tokens(code))
-            for i in range(len(tokens)-1):
-                cur = str(tokens[i][1])
-                nxt = str(tokens[i+1][1])
-                combo = cur + nxt
-                if re.search(r'\d+end\b', combo):
-                    issues.append({"type": "missing_separator_number_end", "tokens": combo})
-                if combo == "endlocal":
-                    issues.append({"type": "missing_separator_end_local", "tokens": combo})
-                if combo == "thenlocal":
-                    issues.append({"type": "missing_separator_then_local", "tokens": combo})
-                if combo == ".. ..":
-                    issues.append({"type": "broken_concat"})
-                if combo == "..." or combo == "....":
-                    issues.append({"type": "vararg_corruption"})
-        except Exception as e:
-            issues.append({"type": "tokenizer_failure", "error": str(e)})
-        return issues
+            for lua_bin in ['lua5.1', 'lua']:
+                try:
+                    proc = subprocess.Popen(
+                        [lua_bin, tmp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        preexec_fn=self._set_process_limits, start_new_session=True)
+                    try:
+                        stdout, _ = proc.communicate(timeout=45)
+                        stdout = stdout.decode('latin-1', errors='replace')
+                    except subprocess.TimeoutExpired:
+                        try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except: pass
+                        proc.wait(); break
+                    for line in stdout.splitlines():
+                        if line.startswith('CAP:'):
+                            captures.append(line[4:])
+                    if captures: break
+                except FileNotFoundError:
+                    continue
+        finally:
+            for p in (tmp_path, src_path):
+                try: os.unlink(p)
+                except OSError: pass
+        if captures:
+            candidates = []
+            for cap in captures:
+                tag, data = cap.split(':', 1) if ':' in cap else ('unknown', cap)
+                try:
+                    decoded_data = base64.b64decode(data).decode('latin-1', errors='replace')
+                except Exception:
+                    decoded_data = data
+                if _is_self_capture(decoded_data): continue
+                if not _is_probably_text(decoded_data):
+                    raw_check = decoded_data.encode('latin-1', errors='ignore')
+                    if _is_lua_bytecode(raw_check) and self._java_available:
+                        try:
+                            dec, _ = self._run_unluac(raw_check)
+                            if dec: decoded_data = dec
+                        except: pass
+                    else:
+                        if sum(1 for kw in LUA_KEYWORDS if kw in decoded_data) < 3: continue
+                candidates.append({'data': decoded_data, 'tag': tag})
+            if candidates:
+                return max(candidates, key=lambda x: len(x['data']))['data']
+        return None
 
-    def _auto_fix(self, code):
-        fixes = [
-            (r'(?<=\d)(end\b)', r'\n\1'),
-            (r'end\s+local', 'end\nlocal'),
-            (r'\.\s+\.', '..'),
-            (r',\s*,', ','),
-            (r'(?<=\))(local\b)', r'\n\1'),
-            (r'end(function\b)', r'end\n\1'),
-            (r'until(local\b)', r'until\n\1'),
-        ]
-        for pattern, repl in fixes:
-            code = re.sub(pattern, repl, code)
-        return code
+    def _run_unluac(self, bytecode):
+        if not self._java_available: return None, "no java"
+        if not os.path.isfile(self.unluac_path): self._ensure_unluac_jar()
+        if not os.path.isfile(self.unluac_path): return None, "no unluac.jar"
+        if bytecode[:4] != b'\x1bLua': return None, "not lua bytecode"
+        with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
+            tmp.write(bytecode); tmp_path = tmp.name
+        try:
+            r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path],
+                               capture_output=True, timeout=10)
+            stdout = r.stdout.decode('latin-1', errors='replace')
+            return (stdout, None) if r.returncode == 0 and stdout.strip() else (None, "unluac failed")
+        except subprocess.TimeoutExpired: return None, "timeout"
+        except Exception as e: return None, str(e)
+        finally:
+            try: os.unlink(tmp_path)
+            except: pass
 
-    def _save_snapshot(self, stage, content):
-        os.makedirs("snapshots", exist_ok=True)
-        path = os.path.join("snapshots", f"{int(time.time())}_{stage}.lua")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return path
+    def _ensure_unluac_jar(self):
+        try:
+            os.makedirs(os.path.dirname(self.unluac_path), exist_ok=True)
+            urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
+        except: pass
 
     def _detect_prometheus_vm(self, source):
-        vm_score = 0
-        patterns = [
-            r'pc\s*=',
-            r'opcode',
-            r'instructions?\[',
-            r'while\s+true\s+do',
-            r'bit32',
-            r'band\(',
-        ]
-        for p in patterns:
-            if re.search(p, source):
-                vm_score += 1
-        return vm_score >= 3
+        score = sum(1 for p in [r'pc\s*=', r'opcode', r'instructions?\[',
+                                  r'while\s+true\s+do', r'bit32', r'band\(']
+                    if re.search(p, source))
+        return score >= 3
 
     def _prometheus_decompile(self, source):
         bodies = _find_all_table_bodies(source)
         instructions = []
-        constants = []
         for body in bodies:
             entries = _parse_table_entries(body)
             nums = [e for e in entries if isinstance(e, int)]
-            if len(nums) >= 10:
-                instructions = nums
-                break
+            if len(nums) >= 10: instructions = nums; break
         if not instructions:
-            num_match = re.search(r'\{([\d,\s]{50,})\}', source)
-            if num_match:
-                nums_str = num_match.group(1)
-                instructions = [int(n.strip()) for n in nums_str.split(',') if n.strip().isdigit()]
-        const_match = re.search(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', source)
-        if const_match:
-            const_body = '{' + const_match.group(2) + '}'
-            const_entries = _parse_table_entries(const_body)
-            constants = [e for e in const_entries if isinstance(e, str)]
-        if not instructions:
-            return None
-        lines = []
-        ip = 0
+            m = re.search(r'\{([\d,\s]{50,})\}', source)
+            if m:
+                instructions = [int(n.strip()) for n in m.group(1).split(',') if n.strip().isdigit()]
+        constants = []
+        cm = re.search(r'local\s+\w+\s*=\s*\{([^}]+)\}', source)
+        if cm:
+            constants = [e for e in _parse_table_entries('{' + cm.group(1) + '}') if isinstance(e, str)]
+        if not instructions: return None
+        lines = []; ip = 0
         while ip < len(instructions):
-            op = instructions[ip]
-            ip += 1
+            op = instructions[ip]; ip += 1
             if op == 0:
-                idx = instructions[ip] if ip < len(instructions) else 0
-                ip += 1
-                val = constants[idx - 1] if 1 <= idx <= len(constants) else 'nil'
-                lines.append(f"loadk {json.dumps(val)}")
+                idx = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                lines.append(f"loadk {json.dumps(constants[idx-1] if 1 <= idx <= len(constants) else 'nil')}")
             elif op == 1:
-                a = instructions[ip] if ip < len(instructions) else 0
-                ip += 1
-                name = constants[a - 1] if 1 <= a <= len(constants) else f"var{a}"
-                b = instructions[ip] if ip < len(instructions) else 0
-                ip += 1
-                val = constants[b - 1] if 1 <= b <= len(constants) else f"var{b}"
-                lines.append(f"{name} = {val}")
+                a = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                b = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                lines.append(f"{constants[a-1] if 1<=a<=len(constants) else f'var{a}'} = {constants[b-1] if 1<=b<=len(constants) else f'var{b}'}")
             elif op == 2:
-                a = instructions[ip] if ip < len(instructions) else 0
-                ip += 1
-                name = constants[a - 1] if 1 <= a <= len(constants) else f"var{a}"
-                lines.append(f"call {name}")
+                a = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                lines.append(f"call {constants[a-1] if 1<=a<=len(constants) else f'var{a}'}")
             else:
                 lines.append(f"-- op {op}")
         return '\n'.join(lines)
 
     def process(self, source):
         self.trace = []
-        candidates = [source]
-        last_wd_diag = None
 
+        # Outer base64 peel
         cleaned = re.sub(r'\s+', '', source.strip())
         if re.match(r'^[A-Za-z0-9+/=]+$', cleaned):
             decoded = _try_base64_decode(cleaned)
@@ -708,87 +690,49 @@ class DeobfEngine:
                     try:
                         text = decoded.decode(enc, errors='replace')
                         if len(text) > 50:
-                            candidates.insert(0, text)
-                            self._trace("base64_peel", True, f"decoded outer base64, {len(text)} chars")
+                            source = text
+                            self._trace("base64_peel", True, f"outer base64 decoded ({len(text)} chars)")
                             break
-                    except:
-                        pass
-                else:
-                    self._trace("base64_peel", False, "base64 decoded but no text encoding succeeded")
+                    except: pass
 
-        for src in candidates:
-            if self._detect_prometheus_vm(src):
-                self._trace("prometheus_detect", True, "VM bytecode table detected")
-                result = self._prometheus_decompile(src)
-                if result:
-                    self._trace("prometheus_decompile", True, f"decompiled {len(result)} chars")
-                    if len(result) >= 50 and _is_probably_text(result):
-                        validation = self._validate_lua(result, "prometheus_output")
-                        if validation["valid"]:
-                            return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
-                        else:
-                            repaired = self._auto_fix(result)
-                            if self._validate_lua(repaired, "prometheus_repaired")["valid"]:
-                                return repaired, 'prometheus_vm_repaired', 'Prometheus VM decompiled (repaired)', [vars(t) for t in self.trace]
-                    else:
-                        self._trace("prometheus_output", False, f"output too short or non-textual ({len(result)} chars)")
-                else:
-                    self._trace("prometheus_decompile", False, "decompilation produced no output")
+        # WeAreDevs (primary strategy — runs before Prometheus)
+        self._trace("wearedevs_detect", True, "checking for WeAreDevs obfuscation")
+        wd = _wearedevs_decode(source)
+        if wd['success']:
+            decoded_strings = wd['decoded_strings']
+            diag = wd['diagnostics']
+            self._trace("wearedevs_decode", True,
+                        f"decoded {diag.get('decoded_count',0)} strings, "
+                        f"{diag.get('lua_keyword_hits',0)} with Lua keywords")
+            # Build a readable summary output of the string table
+            output_lines = []
+            for i, s in enumerate(decoded_strings):
+                if s:
+                    output_lines.append(f"-- [{i}] {s!r}")
+            result = '\n'.join(output_lines)
+            return result, 'wearedevs_decode', wd['reason'], [vars(t) for t in self.trace]
+        else:
+            self._trace("wearedevs_decode", False,
+                        f"{wd['reason']} | diag: {json.dumps(wd.get('diagnostics', {}))}")
 
-            self._trace("wearedevs_decode", True, "attempting WeAreDevs string table decode")
-            wd = _wearedevs_decode(src)
-            self._trace("wearedevs_decode", wd["success"], wd["reason"])
-            if not wd["success"]:
-                d = wd["diagnostics"]
-                diag_lines = [
-                    f"tables: {d.get('table_count', 0)} total",
-                    f"candidates: {d.get('candidate_tables', 0)}",
-                    f"custom_alphabet: {d.get('custom_alphabet', False)}",
-                    f"rejections:"
-                ]
-                for r in d.get("rejections", [])[:5]:
-                    diag_lines.append(f"  table {r.get('table', '?')}: {r.get('reason', 'unknown')} "
-                                      f"(strs={r.get('string_count', '?')} chunks={r.get('chunk_count', '?')} "
-                                      f"score={r.get('score', r.get('keyword_hits', '?'))} "
-                                      f"kw={r.get('keyword_hits', '?')})")
-                diag_lines.append(f"entropy: {d.get('entropy', '?')}")
-                diag_lines.append(f"decoded_chunks: {d.get('decoded_chunks', 0)}")
-                last_wd_diag = "\n".join(diag_lines)
-                self._trace("wearedevs_stats", False, last_wd_diag)
-            else:
-                wd_result = wd["output"]
-                wd_diag = wd.get("diagnostics", {})
-                d = wd_diag
-                diag_lines = [
-                    f"tables: {d.get('table_count', 0)} total",
-                    f"candidates: {d.get('candidate_tables', 0)}",
-                    f"custom_alphabet: {d.get('custom_alphabet', False)}",
-                    f"lua_score: {d.get('lua_score', '?')}",
-                    f"entropy: {d.get('entropy', '?')}",
-                    f"decoded_chunks: {d.get('decoded_chunks', 0)}",
-                    f"output_size: {len(wd_result)} chars",
-                ]
-                last_wd_diag = "\n".join(diag_lines)
+        # Prometheus VM
+        if self._detect_prometheus_vm(source):
+            self._trace("prometheus_detect", True, "Prometheus VM detected")
+            result = self._prometheus_decompile(source)
+            if result and len(result) >= 50 and _is_probably_text(result):
+                self._trace("prometheus_decompile", True, f"{len(result)} chars")
+                return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
 
-                if len(wd_result) < 50 or not _is_probably_text(wd_result):
-                    self._trace("wearedevs_output", False, f"output too short or non-textual ({len(wd_result)} chars), skipping")
-                    continue
-                token_issues = self._token_diagnostics(wd_result)
-                if token_issues:
-                    self._trace("token_issues", False, json.dumps(token_issues)[:1000])
-                validation = self._validate_lua(wd_result, "wearedevs_output")
-                if validation["valid"]:
-                    return wd_result, 'wearedevs_decode', 'WeAreDevs string table decoded', [vars(t) for t in self.trace]
-                else:
-                    repaired = self._auto_fix(wd_result)
-                    if self._validate_lua(repaired, "wearedevs_repaired")["valid"]:
-                        return repaired, 'wearedevs_decode_repaired', 'WeAreDevs decoded (repaired)', [vars(t) for t in self.trace]
-                    self._save_snapshot("failed_wearedevs", wd_result)
-                    self._trace("wearedevs_decode", False, "output failed lua validation and repair")
+        # Lua harness
+        self._trace("lua_harness", True, "running Lua execution harness")
+        harness_result = self._run_lua_harness(source)
+        if harness_result:
+            self._trace("lua_harness", True, f"captured {len(harness_result)} chars")
+            return harness_result, 'lua_harness', 'Lua harness capture', [vars(t) for t in self.trace]
+        self._trace("lua_harness", False, "harness produced no output")
 
-        failed_diag = last_wd_diag if last_wd_diag else "no strategies produced output"
-        self._trace("process", False, "all strategies exhausted")
-        return '', 'unable', failed_diag, [vars(t) for t in self.trace]
+        diag_msg = json.dumps(wd.get('diagnostics', {}), indent=2)
+        return '', 'unable', f'no strategies produced output\n{diag_msg}', [vars(t) for t in self.trace]
 
 
 job_store = {}
@@ -799,32 +743,25 @@ def _run_job(job_id, source):
     engine = DeobfEngine()
     try:
         result, method, diagnostic, trace = engine.process(source)
-        result_data = {
-            'status': 'complete',
-            'result': result,
-            'detected': method,
-            'diagnostic': diagnostic,
-            'trace': trace,
-            'result_length': len(result) if result else 0
-        }
         with job_lock:
-            job_store[job_id] = result_data
+            job_store[job_id] = {
+                'status': 'complete', 'result': result, 'detected': method,
+                'diagnostic': diagnostic, 'trace': trace,
+                'result_length': len(result) if result else 0
+            }
     except Exception as e:
-        error_data = {
-            'status': 'error',
-            'error': str(e),
-            'traceback': traceback.format_exc()[:4000]
-        }
         with job_lock:
-            job_store[job_id] = error_data
+            job_store[job_id] = {
+                'status': 'error', 'error': str(e),
+                'traceback': traceback.format_exc()[:4000]
+            }
 
 
 def submit_job(source):
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
-    thread = threading.Thread(target=_run_job, args=(job_id, source), daemon=True)
-    thread.start()
+    threading.Thread(target=_run_job, args=(job_id, source), daemon=True).start()
     return job_id
 
 
