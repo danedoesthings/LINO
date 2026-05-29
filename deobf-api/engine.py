@@ -656,6 +656,7 @@ class DeobfEngine:
     def process(self, source):
         self.trace = []
         candidates = [source]
+        last_wd_diag = None
 
         cleaned = re.sub(r'\s+', '', source.strip())
         if re.match(r'^[A-Za-z0-9+/=]+$', cleaned):
@@ -709,9 +710,22 @@ class DeobfEngine:
                                       f"kw={r.get('keyword_hits', '?')})")
                 diag_lines.append(f"entropy: {d.get('entropy', '?')}")
                 diag_lines.append(f"decoded_chunks: {d.get('decoded_chunks', 0)}")
-                self._trace("wearedevs_stats", False, "\n".join(diag_lines))
+                last_wd_diag = "\n".join(diag_lines)
+                self._trace("wearedevs_stats", False, last_wd_diag)
             else:
                 wd_result = wd["output"]
+                wd_diag = wd.get("diagnostics", {})
+                d = wd_diag
+                diag_lines = [
+                    f"tables: {d.get('table_count', 0)} total",
+                    f"candidates: {d.get('candidate_tables', 0)}",
+                    f"lua_score: {d.get('lua_score', '?')}",
+                    f"entropy: {d.get('entropy', '?')}",
+                    f"decoded_chunks: {d.get('decoded_chunks', 0)}",
+                    f"output_size: {len(wd_result)} chars",
+                ]
+                last_wd_diag = "\n".join(diag_lines)
+
                 if len(wd_result) < 50 or not _is_probably_text(wd_result):
                     self._trace("wearedevs_output", False, f"output too short or non-textual ({len(wd_result)} chars), skipping")
                     continue
@@ -728,10 +742,7 @@ class DeobfEngine:
                     self._save_snapshot("failed_wearedevs", wd_result)
                     self._trace("wearedevs_decode", False, "output failed lua validation and repair")
 
-        failed_diag = "no strategies produced output"
-        for event in self.trace:
-            if event.stage == "wearedevs_stats" and not event.success:
-                failed_diag = event.message
+        failed_diag = last_wd_diag if last_wd_diag else "no strategies produced output"
         self._trace("process", False, "all strategies exhausted")
         return '', 'unable', failed_diag, [vars(t) for t in self.trace]
 
