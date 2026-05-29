@@ -98,6 +98,40 @@ def _try_base64_decode(s):
         return None
 
 
+def _extract_custom_b64_alphabet(source):
+    for m in re.finditer(r'["\'`]([A-Za-z0-9+/]{64})[\"\'`]', source):
+        candidate = m.group(1)
+        if len(set(candidate)) == 64:
+            return candidate
+    for m in re.finditer(r'local\s+\w+\s*=\s*["\'`]([A-Za-z0-9+/]{60,})[\"\'`]', source):
+        candidate = m.group(1)[:64]
+        if len(candidate) == 64 and len(set(candidate)) == 64:
+            return candidate
+    concat_m = re.search(r'["\'`]([A-Za-z0-9+/]{20,})[\"\'`]\s*\.\.\s*["\'`]([A-Za-z0-9+/]{20,})[\"\'`]', source)
+    if concat_m:
+        combined = concat_m.group(1) + concat_m.group(2)
+        if len(combined) >= 64 and len(set(combined[:64])) == 64:
+            return combined[:64]
+    return None
+
+
+def _custom_b64_decode(s, alpha):
+    reverse = {c: i for i, c in enumerate(alpha)}
+    s_clean = s.rstrip('=')
+    bits = 0
+    bit_count = 0
+    out = bytearray()
+    for c in s_clean:
+        if c not in reverse:
+            continue
+        bits = (bits << 6) | reverse[c]
+        bit_count += 6
+        if bit_count >= 8:
+            bit_count -= 8
+            out.append((bits >> bit_count) & 0xFF)
+    return bytes(out)
+
+
 def _find_balanced_end(content, open_brace_index):
     depth = 0
     quote = None
@@ -372,6 +406,7 @@ def _extract_loader_payloads(source):
 
 def _wearedevs_decode(source):
     source = _join_concat_literals(source)
+    alphabet = _extract_custom_b64_alphabet(source)
     diagnostics = {
         "table_count": 0,
         "candidate_tables": 0,
@@ -379,7 +414,8 @@ def _wearedevs_decode(source):
         "decoded_chunks": 0,
         "lua_score": 0,
         "entropy": None,
-        "rejections": []
+        "rejections": [],
+        "custom_alphabet": alphabet is not None
     }
     bodies = _find_all_table_bodies(source)
     diagnostics["table_count"] = len(bodies)
@@ -424,7 +460,13 @@ def _wearedevs_decode(source):
                 all_chunks[ai], all_chunks[bi] = all_chunks[bi], all_chunks[ai]
         decoded_chunks = []
         for chunk in all_chunks:
-            b64 = _try_base64_decode(chunk)
+            if alphabet:
+                try:
+                    b64 = _custom_b64_decode(chunk, alphabet)
+                except Exception:
+                    b64 = None
+            else:
+                b64 = _try_base64_decode(chunk)
             if not b64:
                 continue
             for enc in ('utf-8', 'latin-1'):
@@ -701,6 +743,7 @@ class DeobfEngine:
                 diag_lines = [
                     f"tables: {d.get('table_count', 0)} total",
                     f"candidates: {d.get('candidate_tables', 0)}",
+                    f"custom_alphabet: {d.get('custom_alphabet', False)}",
                     f"rejections:"
                 ]
                 for r in d.get("rejections", [])[:5]:
@@ -719,6 +762,7 @@ class DeobfEngine:
                 diag_lines = [
                     f"tables: {d.get('table_count', 0)} total",
                     f"candidates: {d.get('candidate_tables', 0)}",
+                    f"custom_alphabet: {d.get('custom_alphabet', False)}",
                     f"lua_score: {d.get('lua_score', '?')}",
                     f"entropy: {d.get('entropy', '?')}",
                     f"decoded_chunks: {d.get('decoded_chunks', 0)}",
