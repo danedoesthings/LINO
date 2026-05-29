@@ -679,13 +679,16 @@ class DeobfEngine:
                 result = self._prometheus_decompile(src)
                 if result:
                     self._trace("prometheus_decompile", True, f"decompiled {len(result)} chars")
-                    validation = self._validate_lua(result, "prometheus_output")
-                    if validation["valid"]:
-                        return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
+                    if len(result) >= 50 and _is_probably_text(result):
+                        validation = self._validate_lua(result, "prometheus_output")
+                        if validation["valid"]:
+                            return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
+                        else:
+                            repaired = self._auto_fix(result)
+                            if self._validate_lua(repaired, "prometheus_repaired")["valid"]:
+                                return repaired, 'prometheus_vm_repaired', 'Prometheus VM decompiled (repaired)', [vars(t) for t in self.trace]
                     else:
-                        repaired = self._auto_fix(result)
-                        if self._validate_lua(repaired, "prometheus_repaired")["valid"]:
-                            return repaired, 'prometheus_vm_repaired', 'Prometheus VM decompiled (repaired)', [vars(t) for t in self.trace]
+                        self._trace("prometheus_output", False, f"output too short or non-textual ({len(result)} chars)")
                 else:
                     self._trace("prometheus_decompile", False, "decompilation produced no output")
 
@@ -709,6 +712,9 @@ class DeobfEngine:
                 self._trace("wearedevs_stats", False, "\n".join(diag_lines))
             else:
                 wd_result = wd["output"]
+                if len(wd_result) < 50 or not _is_probably_text(wd_result):
+                    self._trace("wearedevs_output", False, f"output too short or non-textual ({len(wd_result)} chars), skipping")
+                    continue
                 token_issues = self._token_diagnostics(wd_result)
                 if token_issues:
                     self._trace("token_issues", False, json.dumps(token_issues)[:1000])
