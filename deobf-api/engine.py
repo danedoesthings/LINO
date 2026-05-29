@@ -182,23 +182,23 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
-def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=10):
+def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=8):
     if depth > max_depth:
         return data if isinstance(data, str) else data.decode('latin-1', errors='replace')
-    if isinstance(data, bytes):
-        raw = data
-    else:
+    if isinstance(data, str):
         raw = data.encode('latin-1', errors='replace')
+    else:
+        raw = data
     try:
         text = raw.decode('utf-8')
-        if len(text) >= 2 and _is_probably_text(text) and _shannon_entropy(raw) < 6:
+        if len(text) > 1 and _is_probably_text(text) and _shannon_entropy(raw) < 6.5:
             return text
     except:
         pass
     try:
         s = raw.decode('latin-1', errors='replace')
         decoded = _custom_b64_decode(s, custom_alpha)
-        if decoded and decoded != raw:
+        if decoded and decoded != raw and len(decoded) >= 2:
             return _recursive_decode_bytes(decoded, custom_alpha, depth + 1, max_depth)
     except:
         pass
@@ -207,7 +207,7 @@ def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=10):
         if re.match(r'^[A-Za-z0-9+/=]+$', s):
             padded = s + '=' * (-len(s) % 4)
             std_decoded = base64.b64decode(padded, validate=True)
-            if std_decoded != raw:
+            if std_decoded != raw and len(std_decoded) >= 2:
                 return _recursive_decode_bytes(std_decoded, custom_alpha, depth + 1, max_depth)
     except:
         pass
@@ -1078,6 +1078,14 @@ def _is_wearedevs_vm(source):
         score += 1
     return score >= 5
 
+def _looks_like_real_code(text):
+    if not text or len(text) < 200:
+        return False
+    lines = text.splitlines()
+    structural_kw = {'function', 'while', 'for', 'if', 'repeat'}
+    count = sum(1 for line in lines if any(kw in line for kw in structural_kw))
+    return count >= 3
+
 class DeobfEngine:
     def __init__(self):
         self.unluac_path = UNLUAC_LOCAL_PATH
@@ -1354,8 +1362,14 @@ end
             vm_structure = _extract_vm_structure(source)
             instructions = _extract_instruction_stream(source, vm_structure)
             self._trace("vm_lift_instructions", True, f"extracted {len(instructions)} instructions")
+            if len(instructions) < 10:
+                self._trace("vm_lift_abort", False, "too few instructions for a meaningful VM")
+                return None
             opcode_to_handler, all_handlers = _build_handler_table(source, vm_structure)
             self._trace("vm_lift_handlers", True, f"identified {len(opcode_to_handler)} opcode handlers")
+            if not opcode_to_handler:
+                self._trace("vm_lift_abort", False, "no handlers could be built")
+                return None
             blocks, block_map = _build_cfg(instructions, opcode_to_handler)
             self._trace("vm_lift_cfg", True, f"built {len(blocks)} basic blocks")
             loop_headers, loops = _detect_loops(blocks)
@@ -1368,10 +1382,10 @@ end
                 state, instructions, opcode_to_handler,
                 blocks, block_map, loop_headers
             )
-            if lifted and len(lifted.strip()) >= 50 and _is_probably_text(lifted):
+            if lifted and _looks_like_real_code(lifted):
                 self._trace("vm_lift_complete", True, f"lifted {len(lifted)} chars of Lua")
                 return lifted
-            self._trace("vm_lift_complete", False, f"output too short or non-text: {len(lifted) if lifted else 0} chars")
+            self._trace("vm_lift_complete", False, f"output did not pass structural validation ({len(lifted) if lifted else 0} chars)")
         except Exception as e:
             self._trace("vm_lift_error", False, str(e))
         return None
@@ -1400,6 +1414,12 @@ end
                         f"decoded {diag.get('decoded_count',0)} strings, "
                         f"{diag.get('lua_keyword_hits',0)} with Lua keywords")
 
+            self._trace("lua_harness", True, "running Lua execution harness (primary for WeAreDevs VM)")
+            harness_result = self._run_lua_harness(source)
+            if harness_result and _looks_like_real_code(harness_result):
+                self._trace("lua_harness", True, f"captured {len(harness_result)} chars of real Lua")
+                return harness_result, 'lua_harness', 'Lua harness captured original source', [vars(t) for t in self.trace]
+
             vm_result = self._wearedevs_lift_vm(source, decoded_strings)
             if vm_result:
                 return vm_result, 'wearedevs_vm_lifted', 'VM lifted successfully', [vars(t) for t in self.trace]
@@ -1421,7 +1441,7 @@ end
                 self._trace("prometheus_decompile", True, f"{len(result)} chars")
                 return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
 
-        self._trace("lua_harness", True, "running Lua execution harness")
+        self._trace("lua_harness", True, "running Lua execution harness (fallback)")
         harness_result = self._run_lua_harness(source)
         if harness_result:
             self._trace("lua_harness", True, f"captured {len(harness_result)} chars")
