@@ -686,7 +686,20 @@ class DeobfEngine:
             wd = _wearedevs_decode(src)
             self._trace("wearedevs_decode", wd["success"], wd["reason"])
             if not wd["success"]:
-                self._trace("wearedevs_stats", False, json.dumps(wd["diagnostics"], indent=2)[:1500])
+                d = wd["diagnostics"]
+                diag_lines = [
+                    f"tables: {d.get('table_count', 0)} total",
+                    f"candidates: {d.get('candidate_tables', 0)}",
+                    f"rejections:"
+                ]
+                for r in d.get("rejections", [])[:5]:
+                    diag_lines.append(f"  table {r.get('table', '?')}: {r.get('reason', 'unknown')} "
+                                      f"(strs={r.get('string_count', '?')} chunks={r.get('chunk_count', '?')} "
+                                      f"score={r.get('score', r.get('keyword_hits', '?'))} "
+                                      f"kw={r.get('keyword_hits', '?')})")
+                diag_lines.append(f"entropy: {d.get('entropy', '?')}")
+                diag_lines.append(f"decoded_chunks: {d.get('decoded_chunks', 0)}")
+                self._trace("wearedevs_stats", False, "\n".join(diag_lines))
             else:
                 wd_result = wd["output"]
                 token_issues = self._token_diagnostics(wd_result)
@@ -702,8 +715,12 @@ class DeobfEngine:
                     self._save_snapshot("failed_wearedevs", wd_result)
                     self._trace("wearedevs_decode", False, "output failed lua validation and repair")
 
+        failed_diag = "no strategies produced output"
+        for event in self.trace:
+            if event.stage == "wearedevs_stats" and not event.success:
+                failed_diag = event.message
         self._trace("process", False, "all strategies exhausted")
-        return '', 'unable', 'no strategies produced output', [vars(t) for t in self.trace]
+        return '', 'unable', failed_diag, [vars(t) for t in self.trace]
 
 
 job_store = {}
