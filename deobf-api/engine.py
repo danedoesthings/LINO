@@ -93,7 +93,7 @@ def _try_base64_decode(s):
     try:
         s = s.replace('-', '+').replace('_', '/')
         padded = s + '=' * (-len(s) % 4)
-        return base64.b64decode(padded)
+        return base64.b64decode(padded, validate=True)
     except:
         return None
 
@@ -138,6 +138,17 @@ def _find_balanced_end(content, open_brace_index):
                 return idx + 1
         idx += 1
     return -1
+
+
+def _join_concat_literals(source):
+    pattern = r'"([^"]*)"\s*\.\.\s*"([^"]*)"'
+    while re.search(pattern, source):
+        source = re.sub(
+            pattern,
+            lambda m: '"' + m.group(1) + m.group(2) + '"',
+            source
+        )
+    return source
 
 
 def _find_all_table_bodies(source):
@@ -247,7 +258,19 @@ def _decode_numeric_escapes(s):
     )
 
 
+def _extract_shuffle_pairs(source):
+    pairs = []
+    for body in _find_all_table_bodies(source):
+        if re.search(r'\{\s*\d+\s*,\s*\d+\s*\}', body):
+            nested = re.findall(r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}', body)
+            for a, b in nested:
+                pairs.append((int(a), int(b)))
+    return pairs
+
+
 def _extract_b64_substrings(s):
+    s = re.sub(r'"\s*\.\.\s*"', '', s)
+    s = re.sub(r"'\s*\.\.\s*'", '', s)
     results = []
     for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', s):
         val = (m.group(1) or m.group(2)).strip()
@@ -267,56 +290,179 @@ def _extract_b64_substrings(s):
     return results
 
 
+def _merge_b64_fragments(chunks):
+    merged = []
+    current = ""
+    for chunk in chunks:
+        current += chunk
+        if len(current) % 4 == 0:
+            merged.append(current)
+            current = ""
+    if current:
+        merged.append(current)
+    return merged
+
+
+def _recursive_decode(data, depth=0):
+    if depth > 4:
+        return data
+    original = data
+    if isinstance(data, str):
+        data = _decode_numeric_escapes(data)
+        b64 = _try_base64_decode(data)
+        if b64:
+            try:
+                data = b64.decode('utf-8', errors='replace')
+            except:
+                pass
+        rev = data[::-1]
+        if _lua_score(rev) > _lua_score(data):
+            data = rev
+        if re.fullmatch(r'[0-9a-fA-F]+', data):
+            try:
+                data = bytes.fromhex(data).decode('utf-8', errors='replace')
+            except:
+                pass
+        if data == original:
+            return data
+        return _recursive_decode(data, depth + 1)
+    return data
+
+
+def _lua_score(text):
+    score = 0
+    keyword_hits = sum(1 for kw in LUA_KEYWORDS if kw in text)
+    score += keyword_hits * 8
+    structural_patterns = [
+        r'local\s+\w+',
+        r'function\s*\(',
+        r'\w+\s*=\s*',
+        r'end\b',
+        r'return\b',
+        r'if\s+.+\s+then',
+    ]
+    for pattern in structural_patterns:
+        if re.search(pattern, text):
+            score += 15
+    entropy = _shannon_entropy(text.encode(errors='ignore'))
+    if entropy < 7:
+        score += 10
+    if len(text.splitlines()) > 3:
+        score += 10
+    if text.count("(") == text.count(")"):
+        score += 10
+    funcs = text.count("function")
+    ends = text.count("end")
+    if funcs > 0 and ends >= funcs:
+        score += 25
+    return score
+
+
+def _extract_loader_payloads(source):
+    payloads = []
+    patterns = [
+        r'loadstring\s*\((.*?)\)',
+        r'load\s*\((.*?)\)',
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, source, re.S):
+            payloads.append(m.group(1))
+    return payloads
+
+
 def _wearedevs_decode(source):
+    source = _join_concat_literals(source)
+    diagnostics = {
+        "table_count": 0,
+        "candidate_tables": 0,
+        "base64_chunks": 0,
+        "decoded_chunks": 0,
+        "lua_score": 0,
+        "entropy": None,
+        "rejections": []
+    }
     bodies = _find_all_table_bodies(source)
-    for body in bodies:
+    diagnostics["table_count"] = len(bodies)
+    if not bodies:
+        return {"success": False, "reason": "no table bodies found", "diagnostics": diagnostics}
+    for body_index, body in enumerate(bodies):
         entries = _parse_table_entries(body)
         strings = [e for e in entries if isinstance(e, str) and len(e) > 2]
         if len(strings) < 3:
+            diagnostics["rejections"].append({
+                "table": body_index, "reason": "not enough strings",
+                "string_count": len(strings)
+            })
             continue
+        diagnostics["candidate_tables"] += 1
         step1 = [_decode_numeric_escapes(s) if '\\' in s else s for s in strings]
         all_chunks = []
         for s in step1:
-            if re.match(r'^[A-Za-z0-9+/]+=*$', s.strip()):
-                all_chunks.append(s.strip())
+            decoded = _recursive_decode(s)
+            if isinstance(decoded, str) and re.match(r'^[A-Za-z0-9+/]+=*$', decoded.strip()):
+                all_chunks.append(decoded.strip())
+                diagnostics["base64_chunks"] += 1
             else:
-                sub = _extract_b64_substrings(s)
+                sub = _extract_b64_substrings(decoded if isinstance(decoded, str) else s)
                 if sub:
                     all_chunks.extend(sub)
-                else:
-                    all_chunks.append(s)
+                    diagnostics["base64_chunks"] += len(sub)
         if len(all_chunks) < 3:
+            diagnostics["rejections"].append({
+                "table": body_index, "reason": "not enough base64 chunks",
+                "chunk_count": len(all_chunks)
+            })
             continue
-        shuffle_data = re.findall(
-            r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}', source
-        )
-        if shuffle_data:
-            for sd in shuffle_data:
-                pairs = re.findall(r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}', '{' + sd + '}')
-                swaps = [(int(a), int(b)) for a, b in pairs]
-                for a, b in swaps:
-                    ai, bi = a - 1, b - 1
-                    if 0 <= ai < len(all_chunks) and 0 <= bi < len(all_chunks):
-                        all_chunks[ai], all_chunks[bi] = all_chunks[bi], all_chunks[ai]
+        all_chunks = _merge_b64_fragments(all_chunks)
+        swaps = _extract_shuffle_pairs(source)
+        for a, b in swaps:
+            ai, bi = a - 1, b - 1
+            if 0 <= ai < len(all_chunks) and 0 <= bi < len(all_chunks):
+                all_chunks[ai], all_chunks[bi] = all_chunks[bi], all_chunks[ai]
         decoded_chunks = []
         for chunk in all_chunks:
             b64 = _try_base64_decode(chunk)
-            if b64:
-                for enc in ('utf-8', 'latin-1'):
-                    try:
-                        decoded_chunks.append(b64.decode(enc, errors='replace'))
-                        break
-                    except Exception:
-                        pass
-                else:
-                    decoded_chunks.append(chunk)
-            else:
-                decoded_chunks.append(chunk)
-        full_text = ''.join(decoded_chunks)
-        kw_hits = sum(1 for kw in LUA_KEYWORDS if kw in full_text)
-        if kw_hits >= 2 or (_is_probably_text(full_text) and kw_hits >= 1):
-            return full_text
-    return None
+            if not b64:
+                continue
+            for enc in ('utf-8', 'latin-1'):
+                try:
+                    text = b64.decode(enc, errors='replace')
+                    decoded_chunks.append(text)
+                    diagnostics["decoded_chunks"] += 1
+                    break
+                except Exception:
+                    pass
+        if not decoded_chunks:
+            diagnostics["rejections"].append({
+                "table": body_index, "reason": "no decodable chunks"
+            })
+            continue
+        candidates = []
+        for chunk in decoded_chunks:
+            score = _lua_score(chunk)
+            if score > 20:
+                candidates.append((score, chunk))
+        if candidates:
+            full_text = max(candidates, key=lambda x: x[0])[1]
+        else:
+            full_text = ''.join(decoded_chunks)
+        diagnostics["entropy"] = round(_shannon_entropy(full_text.encode()), 3)
+        score = _lua_score(full_text)
+        diagnostics["lua_score"] = score
+        if score < 25:
+            diagnostics["rejections"].append({
+                "table": body_index, "reason": "lua score too low",
+                "score": score
+            })
+            continue
+        loader_payloads = _extract_loader_payloads(full_text)
+        if loader_payloads:
+            for payload in loader_payloads:
+                rec_result = _recursive_decode(payload)
+                if isinstance(rec_result, str) and _lua_score(rec_result) > _lua_score(full_text):
+                    full_text = rec_result
+        return {"success": True, "output": full_text, "reason": "decoded successfully", "diagnostics": diagnostics}
+    return {"success": False, "reason": "all candidate tables rejected", "diagnostics": diagnostics}
 
 
 @dataclass
@@ -356,17 +502,18 @@ class DeobfEngine:
     def _validate_lua(self, code, stage="unknown"):
         if not HAS_LUAPARSER:
             self._trace(stage, True, "luaparser not available, skipping validation")
-            return True
+            return {"valid": True}
         try:
             with _suppress_stderr():
                 lua_ast.parse(code)
             self._trace(stage, True, "lua validation passed")
-            return True
+            return {"valid": True}
         except Exception as e:
             info = self._extract_parse_error(code, e)
             self._trace(stage, False, str(e), line=info.get("line"),
                        column=info.get("column"), snippet=info.get("snippet"), exc=e)
-            return False
+            return {"valid": False, "error": str(e), "line": info.get("line"),
+                    "column": info.get("column"), "snippet": info.get("snippet")}
 
     def _extract_parse_error(self, code, error):
         text = str(error)
@@ -389,17 +536,66 @@ class DeobfEngine:
             snippet = "\n".join(context)
         return {"line": line, "column": column, "snippet": snippet}
 
+    def _token_diagnostics(self, code):
+        if not HAS_LUAPARSER:
+            return []
+        issues = []
+        try:
+            lexer = LuaLexer()
+            tokens = list(lexer.get_tokens(code))
+            for i in range(len(tokens)-1):
+                cur = str(tokens[i][1])
+                nxt = str(tokens[i+1][1])
+                combo = cur + nxt
+                if re.search(r'\d+end\b', combo):
+                    issues.append({"type": "missing_separator_number_end", "tokens": combo})
+                if combo == "endlocal":
+                    issues.append({"type": "missing_separator_end_local", "tokens": combo})
+                if combo == "thenlocal":
+                    issues.append({"type": "missing_separator_then_local", "tokens": combo})
+                if combo == ".. ..":
+                    issues.append({"type": "broken_concat"})
+                if combo == "..." or combo == "....":
+                    issues.append({"type": "vararg_corruption"})
+        except Exception as e:
+            issues.append({"type": "tokenizer_failure", "error": str(e)})
+        return issues
+
+    def _auto_fix(self, code):
+        fixes = [
+            (r'(?<=\d)(end\b)', r'\n\1'),
+            (r'end\s+local', 'end\nlocal'),
+            (r'\.\s+\.', '..'),
+            (r',\s*,', ','),
+            (r'(?<=\))(local\b)', r'\n\1'),
+            (r'end(function\b)', r'end\n\1'),
+            (r'until(local\b)', r'until\n\1'),
+        ]
+        for pattern, repl in fixes:
+            code = re.sub(pattern, repl, code)
+        return code
+
+    def _save_snapshot(self, stage, content):
+        os.makedirs("snapshots", exist_ok=True)
+        path = os.path.join("snapshots", f"{int(time.time())}_{stage}.lua")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
     def _detect_prometheus_vm(self, source):
-        bodies = _find_all_table_bodies(source)
-        for body in bodies:
-            entries = _parse_table_entries(body)
-            nums = [e for e in entries if isinstance(e, int)]
-            if len(nums) >= 10:
-                return True
-        num_table_pattern = re.search(r'\{[\d,\s]{50,}\}', source)
-        if num_table_pattern:
-            return True
-        return False
+        vm_score = 0
+        patterns = [
+            r'pc\s*=',
+            r'opcode',
+            r'instructions?\[',
+            r'while\s+true\s+do',
+            r'bit32',
+            r'band\(',
+        ]
+        for p in patterns:
+            if re.search(p, source):
+                vm_score += 1
+        return vm_score >= 3
 
     def _prometheus_decompile(self, source):
         bodies = _find_all_table_bodies(source)
@@ -476,20 +672,35 @@ class DeobfEngine:
                 result = self._prometheus_decompile(src)
                 if result:
                     self._trace("prometheus_decompile", True, f"decompiled {len(result)} chars")
-                    if self._validate_lua(result, "prometheus_output"):
+                    validation = self._validate_lua(result, "prometheus_output")
+                    if validation["valid"]:
                         return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
+                    else:
+                        repaired = self._auto_fix(result)
+                        if self._validate_lua(repaired, "prometheus_repaired")["valid"]:
+                            return repaired, 'prometheus_vm_repaired', 'Prometheus VM decompiled (repaired)', [vars(t) for t in self.trace]
                 else:
                     self._trace("prometheus_decompile", False, "decompilation produced no output")
 
             self._trace("wearedevs_decode", True, "attempting WeAreDevs string table decode")
-            wd_result = _wearedevs_decode(src)
-            if wd_result:
-                self._trace("wearedevs_decode", True, f"decoded {len(wd_result)} chars")
-                if self._validate_lua(wd_result, "wearedevs_output"):
-                    return wd_result, 'wearedevs_decode', 'WeAreDevs string table decoded', [vars(t) for t in self.trace]
-                self._trace("wearedevs_decode", False, "output failed lua validation")
+            wd = _wearedevs_decode(src)
+            self._trace("wearedevs_decode", wd["success"], wd["reason"])
+            if not wd["success"]:
+                self._trace("wearedevs_stats", False, json.dumps(wd["diagnostics"], indent=2)[:1500])
             else:
-                self._trace("wearedevs_decode", False, "no string table found or decoding produced no output")
+                wd_result = wd["output"]
+                token_issues = self._token_diagnostics(wd_result)
+                if token_issues:
+                    self._trace("token_issues", False, json.dumps(token_issues)[:1000])
+                validation = self._validate_lua(wd_result, "wearedevs_output")
+                if validation["valid"]:
+                    return wd_result, 'wearedevs_decode', 'WeAreDevs string table decoded', [vars(t) for t in self.trace]
+                else:
+                    repaired = self._auto_fix(wd_result)
+                    if self._validate_lua(repaired, "wearedevs_repaired")["valid"]:
+                        return repaired, 'wearedevs_decode_repaired', 'WeAreDevs decoded (repaired)', [vars(t) for t in self.trace]
+                    self._save_snapshot("failed_wearedevs", wd_result)
+                    self._trace("wearedevs_decode", False, "output failed lua validation and repair")
 
         self._trace("process", False, "all strategies exhausted")
         return '', 'unable', 'no strategies produced output', [vars(t) for t in self.trace]
