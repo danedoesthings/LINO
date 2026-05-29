@@ -106,6 +106,19 @@ def _lua_score(text):
         score += 25
     return score
 
+def _is_readable_identifier(s):
+    if not s:
+        return False
+    if len(s) > 50:
+        return False
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s):
+        return True
+    if s in LUA_KEYWORDS:
+        return True
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', s) and len(s) <= 30:
+        return True
+    return False
+
 def _extract_wearedevs_alphabet(source):
     for table_match in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{400,})\}', source):
         body = table_match.group(1)
@@ -182,36 +195,59 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
-def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=8):
+def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=6):
     if depth > max_depth:
-        return data if isinstance(data, str) else data.decode('latin-1', errors='replace')
+        if isinstance(data, bytes):
+            return data.decode('latin-1', errors='replace')
+        return data
+
     if isinstance(data, str):
         raw = data.encode('latin-1', errors='replace')
     else:
         raw = data
+
+    if len(raw) < 2:
+        return raw.decode('latin-1', errors='replace')
+
     try:
         text = raw.decode('utf-8')
-        if len(text) > 1 and _is_probably_text(text) and _shannon_entropy(raw) < 6.5:
+        if len(text) >= 2 and _is_probably_text(text) and _shannon_entropy(raw) < 6.5:
             return text
     except:
         pass
+
     try:
-        s = raw.decode('latin-1', errors='replace')
-        decoded = _custom_b64_decode(s, custom_alpha)
-        if decoded and decoded != raw and len(decoded) >= 2:
-            return _recursive_decode_bytes(decoded, custom_alpha, depth + 1, max_depth)
+        text = raw.decode('utf-8')
+        if _is_readable_identifier(text):
+            return text
     except:
         pass
+
+    s = raw.decode('latin-1', errors='replace')
+
+    if not re.match(r'^[A-Za-z0-9+/=]+$', s.strip()):
+        return s
+
     try:
-        s = raw.decode('latin-1', errors='replace').strip()
-        if re.match(r'^[A-Za-z0-9+/=]+$', s):
-            padded = s + '=' * (-len(s) % 4)
-            std_decoded = base64.b64decode(padded, validate=True)
-            if std_decoded != raw and len(std_decoded) >= 2:
-                return _recursive_decode_bytes(std_decoded, custom_alpha, depth + 1, max_depth)
+        decoded = _custom_b64_decode(s.strip(), custom_alpha)
+        if decoded and len(decoded) >= 2 and decoded != raw:
+            result = _recursive_decode_bytes(decoded, custom_alpha, depth + 1, max_depth)
+            if result != s:
+                return result
     except:
         pass
-    return raw.decode('latin-1', errors='replace')
+
+    try:
+        padded = s.strip() + '=' * (-len(s.strip()) % 4)
+        std_decoded = base64.b64decode(padded, validate=True)
+        if std_decoded and len(std_decoded) >= 2 and std_decoded != raw:
+            result = _recursive_decode_bytes(std_decoded, custom_alpha, depth + 1, max_depth)
+            if result != s:
+                return result
+    except:
+        pass
+
+    return s
 
 def _wearedevs_decode(source):
     diag = {}
@@ -236,10 +272,19 @@ def _wearedevs_decode(source):
         if not s:
             decoded.append('')
             continue
+        if _is_readable_identifier(s):
+            decoded.append(s)
+            continue
+        if _is_probably_text(s):
+            decoded.append(s)
+            continue
         try:
             raw = _custom_b64_decode(s, alphabet)
-            final = _recursive_decode_bytes(raw, alphabet)
-            decoded.append(final)
+            if raw and len(raw) >= 2:
+                final = _recursive_decode_bytes(raw, alphabet)
+                decoded.append(final)
+            else:
+                decoded.append(s)
         except Exception:
             if re.match(r'^[A-Za-z0-9+/=]+$', s):
                 try:
