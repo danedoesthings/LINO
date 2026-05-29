@@ -117,13 +117,13 @@ def _lua_score(text):
     return score
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 # WeAreDevs alphabet extraction
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _extract_wearedevs_alphabet(source):
     """
-    WeAreDevs stores the custom base64 alphabet as a Lua char→index lookup table.
+    WeAreDevs stores the custom base64 alphabet as a Lua charâindex lookup table.
     Every entry is: identifier = arithmetic_expr  OR  ["\\NNN"] = arithmetic_expr
     where the value evaluates to an integer 0..63.
 
@@ -131,7 +131,7 @@ def _extract_wearedevs_alphabet(source):
         local N={M=685299-685257; V=615891+-615871, ["\055"]=135105-135089, ...}
 
     We parse all 64 entries, evaluate their arithmetic, and reconstruct the
-    alphabet string (index 0 → char, index 1 → char, …, index 63 → char).
+    alphabet string (index 0 â char, index 1 â char, â¦, index 63 â char).
     """
     # Find all large Lua table blocks in the source
     for table_match in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{400,})\}', source):
@@ -194,9 +194,9 @@ def _custom_b64_decode(s, alpha):
     return bytes(out)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 # WeAreDevs string-table decoder
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _extract_r_table_strings(source):
     """
@@ -317,9 +317,9 @@ def _wearedevs_decode(source):
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 # Table helpers (for Prometheus)
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _find_balanced_end(content, open_brace_index):
     depth = 0; quote = None; in_long_string = False; long_match = None
@@ -695,7 +695,7 @@ end
                             break
                     except: pass
 
-        # WeAreDevs (primary strategy — runs before Prometheus)
+        # WeAreDevs (primary strategy â runs before Prometheus)
         self._trace("wearedevs_detect", True, "checking for WeAreDevs obfuscation")
         wd = _wearedevs_decode(source)
         if wd['success']:
