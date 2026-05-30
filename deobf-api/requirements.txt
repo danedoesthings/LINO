@@ -3,3 +3,4 @@ gunicorn
 httpx
 discord.py
 luaparser
+lupa>=2.0
