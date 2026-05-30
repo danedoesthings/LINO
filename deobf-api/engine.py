@@ -589,6 +589,22 @@ class Unveiler:
         if wd['success']:
             decoded_strings = wd['decoded_strings']
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
+
+            self._log("harness", True, "executing Lua harness with artifact capture")
+            harness_result = self._run_lua_harness(source)
+            if harness_result and _looks_like_real_code(harness_result):
+                self._log("harness_success", True, f"captured {len(harness_result)} chars of real code")
+                return harness_result, 'lua_harness', 'Harness captured original source'
+
+            self._log("print_capture", True, "trying print/warn capture via lua5.1 subprocess")
+            lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
+            for t in lupa_trace:
+                self._log("print_capture_trace", True, t)
+            if lupa_out and len(lupa_out.strip()) > 0:
+                self._log("print_capture_success", True, f"captured {len(lupa_out)} chars of output")
+                header = "-- [Deobfuscated via print/warn capture]\n"
+                return header + lupa_out, 'print_capture', 'Captured runtime output'
+
             subst_result = _wearedevs_string_substitution(source, decoded_strings)
             if subst_result:
                 self._log("string_substitution", True, f"produced {len(subst_result)} chars")
@@ -601,22 +617,11 @@ class Unveiler:
                 self._log("vm_lift", False, "VM lift produced no meaningful output, using substitution result")
                 header = "-- Deobfuscated via string-table substitution\n"
                 return header + subst_result, 'wearedevs_string_substitution', 'String-table substitution complete'
-            self._log("print_capture", True, "trying print/warn capture via lua5.1 subprocess")
-            lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
-            for t in lupa_trace:
-                self._log("print_capture_trace", True, t)
-            if lupa_out and len(lupa_out.strip()) > 0:
-                self._log("print_capture_success", True, f"captured {len(lupa_out)} chars of output")
-                header = "-- [Deobfuscated via print/warn capture]\n"
-                return header + lupa_out, 'print_capture', 'Captured runtime output'
-            self._log("harness", True, "executing Lua harness for VM")
-            harness_result = self._run_lua_harness(source)
-            if harness_result and _looks_like_real_code(harness_result):
-                self._log("harness_success", True, f"captured {len(harness_result)} chars of real code")
-                return harness_result, 'lua_harness', 'Harness captured original source'
+
             vm_result = self._attempt_vm_lift(source, decoded_strings)
             if vm_result:
                 return vm_result, 'wearedevs_vm_lifted', 'VM lifted'
+
             lines = [f"-- [{i}] {s!r}" for i, s in enumerate(decoded_strings) if s]
             return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table (no harness capture)'
         if self._detect_prometheus_vm(source):
