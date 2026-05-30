@@ -66,6 +66,11 @@ REJECT_SIGNATURES = [
     "UNLUAC_JAR_URL",
 ]
 
+JOB_STORAGE_DIR = '/data'
+JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
+
+os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
+
 @contextlib.contextmanager
 def _suppress_stderr():
     old_stderr = sys.stderr
@@ -1289,6 +1294,45 @@ end
 job_store = {}
 job_lock = threading.Lock()
 
+def _save_jobs():
+    try:
+        completed_jobs = {k: v for k, v in job_store.items() if v.get('status') != 'processing'}
+        with open(JOB_STORAGE_FILE, 'w') as f:
+            json.dump(completed_jobs, f)
+    except Exception as e:
+        print(f"Failed to save jobs: {e}")
+
+def _load_jobs():
+    try:
+        if os.path.exists(JOB_STORAGE_FILE):
+            with open(JOB_STORAGE_FILE, 'r') as f:
+                loaded = json.load(f)
+                job_store.update(loaded)
+                print(f"Loaded {len(loaded)} persisted jobs")
+    except Exception as e:
+        print(f"Failed to load jobs: {e}")
+
+def _cleanup_old_jobs():
+    while True:
+        try:
+            time.sleep(3600)
+            current_time = time.time()
+            with job_lock:
+                to_delete = []
+                for job_id, job in job_store.items():
+                    created = job.get('created', 0)
+                    if current_time - created > 86400:
+                        to_delete.append(job_id)
+                for job_id in to_delete:
+                    del job_store[job_id]
+            _save_jobs()
+        except Exception:
+            pass
+
+_load_jobs()
+cleanup_thread = threading.Thread(target=_cleanup_old_jobs, daemon=True)
+cleanup_thread.start()
+
 def _run_job(job_id, source):
     engine = DeobfEngine()
     logger = JobLogger()
@@ -1303,8 +1347,10 @@ def _run_job(job_id, source):
                 'diagnostic': diagnostic,
                 'trace': trace,
                 'result_length': len(result) if result else 0,
+                'created': job_store.get(job_id, {}).get('created', time.time()),
                 'log_json': logger.to_json()
             }
+        _save_jobs()
     except Exception as e:
         logger.add_error(str(e), e)
         logger.finish()
@@ -1313,16 +1359,20 @@ def _run_job(job_id, source):
                 'status': 'error',
                 'error': str(e),
                 'traceback': traceback.format_exc()[:4000],
+                'created': job_store.get(job_id, {}).get('created', time.time()),
                 'log_json': logger.to_json()
             }
+        _save_jobs()
 
 def submit_job(source):
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
+    _save_jobs()
     threading.Thread(target=_run_job, args=(job_id, source), daemon=True).start()
     return job_id
 
 def get_job(job_id):
     with job_lock:
+        _load_jobs()
         return job_store.get(job_id)
