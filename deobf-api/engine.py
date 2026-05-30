@@ -412,729 +412,109 @@ class DiagnosticEvent:
     exception_type: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
 
-@dataclass
-class VMInstruction:
-    opcode: int
-    pc: int
-    operands: List[int] = field(default_factory=list)
-    handler_idx: int = -1
+def _get_e_offset(source):
+    m = re.search(r'local\s+function\s+E\s*\(E\)\s*return\s+R\[E\+\((-?\d+(?:[+\-]\d+)*)\)\]', source)
+    if m:
+        try:
+            return int(eval(re.sub(r'\s+', '', m.group(1))))
+        except Exception:
+            pass
+    return None
 
-@dataclass
-class VMBasicBlock:
-    id: int
-    start_pc: int
-    end_pc: int
-    instructions: List[VMInstruction] = field(default_factory=list)
-    successors: List[int] = field(default_factory=list)
-    predecessors: List[int] = field(default_factory=list)
-    branch_condition: Optional[Any] = None
-    branch_target: Optional[int] = None
-    fallthrough_target: Optional[int] = None
-
-class VMOpcodeHandler:
-    def __init__(self, opcode, handler_idx, handler_body, operand_count, handler_type):
-        self.opcode = opcode
-        self.handler_idx = handler_idx
-        self.handler_body = handler_body
-        self.operand_count = operand_count
-        self.handler_type = handler_type
-        self.register_ops = []
-        self.stack_ops = []
-        self.branch_ops = []
-        self._analyze()
-
-    def _analyze(self):
-        body = self.handler_body
-        if 'Q[I[B+' in body:
-            operands = re.findall(r'I\s*\[\s*B\s*([+-]\s*\d+)\s*\]', body)
-            self.operand_count = len(operands)
-        if re.search(r'B\s*=\s*I\s*\[\s*B', body) or re.search(r'B\s*=\s*\w+\s*\[\s*B', body):
-            self.branch_ops.append('direct_jump')
-        if re.search(r'if\s+Q\s*\[', body):
-            self.branch_ops.append('conditional_jump')
-        if 'Q[I[B+' in body and '=' in body:
-            self.register_ops.append('store')
-        src_count = len(re.findall(r'Q\s*\[\s*I\s*\[\s*B\s*[+-]', body))
-        if src_count >= 2 and '=' in body:
-            self.register_ops.append('binary_op')
-        if 'R[I[B+' in body:
-            self.register_ops.append('loadk')
-        if 'function' in body and '(' in body:
-            self.stack_ops.append('closure')
-        if 'table' in body and 'insert' in body:
-            self.stack_ops.append('table_insert')
-        if 'concat' in body:
-            self.stack_ops.append('concat')
-        if 'pcall' in body or 'xpcall' in body:
-            self.stack_ops.append('pcall')
-
-class VMLifterState:
-    def __init__(self):
-        self.registers = {}
-        self.stack = []
-        self.constants = []
-        self.instructions = []
-        self.ip = 0
-        self.globals = {}
-        self.upvalues = {}
-        self.locals = {}
-        self.ast_output = []
-        self.label_counter = 0
-        self.visited = set()
-        self.loop_headers = set()
-        self.loop_exits = set()
-        self.blocks = {}
-        self.current_scope = 0
-        self.scope_stack = []
-
-def _escape_lua_string(s):
+def _lua_escape_string(s):
     if not isinstance(s, str):
         s = str(s)
-    s = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+    s = s.replace('\\', '\\\\').replace('"', '\\"')
+    s = s.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
     return f'"{s}"'
 
-def _extract_vm_structure(source):
-    result = {
-        'dispatch_loop': None,
-        'instruction_table': None,
-        'register_table': None,
-        'constant_table': None,
-        'handlers': [],
-        'handler_map': {},
-        'ip_variable': 'B',
-        'dispatch_variable': 'l',
-        'handler_table_var': 'C',
-        'instruction_table_var': 'I',
-        'register_table_var': 'Q',
-        'constant_table_var': 'R',
-        'dispatch_map': {},
-    }
-
-    ip_match = re.search(r'while\s+(\w+)\s+do\s+local\s+(\w+)\s*=\s*\{[^}]*\}\s*\[\s*(\w+)\s*\[\s*(\w+)\s*\]\s*\]', source, re.DOTALL)
-    if ip_match:
-        result['dispatch_variable'] = ip_match.group(1)
-        result['handler_table_var'] = ip_match.group(2)
-        result['instruction_table'] = ip_match.group(3)
-        result['ip_variable'] = ip_match.group(4)
-
-    while_match = re.search(r'(while\s+(\w+)\s+do\s+.*?end\s*(?:\)\s*\)|$))', source, re.DOTALL)
-    if while_match:
-        result['dispatch_loop'] = while_match.group(1)
-
-    inst_match = re.search(r'local\s+(\w+)\s*=\s*\{([\d,\s]{50,})\}', source)
-    if inst_match:
-        result['instruction_table_var'] = inst_match.group(1)
-        nums = [int(n.strip()) for n in inst_match.group(2).split(',') if n.strip().lstrip('-').isdigit()]
-        result['instruction_table'] = nums
-
-    reg_match = re.search(r'local\s+(\w+)\s*=\s*\{(\s*(?:\d+\s*,\s*)*\d+\s*)\}', source)
-    if reg_match:
-        result['register_table_var'] = reg_match.group(1)
-
-    handler_blocks = re.findall(r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;]', source, re.DOTALL)
-    for idx_str, body in handler_blocks:
-        idx = int(idx_str)
-        result['handlers'].append((idx, body.strip()))
-        result['handler_map'][idx] = body.strip()
-
-    dispatch_table = re.findall(r'\[(\d+)\]\s*=\s*(\d+)', source)
-    dispatch_map = {}
-    for idx_str, handler_idx_str in dispatch_table:
-        dispatch_map[int(idx_str)] = int(handler_idx_str)
-    result['dispatch_map'] = dispatch_map
-
-    return result
-
-def _extract_instruction_stream(source, vm_structure):
-    instructions = []
-    inst_data = vm_structure.get('instruction_table', [])
-    if not inst_data or not isinstance(inst_data, list):
-        inst_match = re.search(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', source)
-        if inst_match:
-            inst_data = [int(n.strip()) for n in inst_match.group(1).split(',') if n.strip().lstrip('-').isdigit()]
-        else:
-            table_bodies = _find_all_table_bodies(source)
-            for body in table_bodies:
-                entries = _parse_table_entries(body)
-                nums = [e for e in entries if isinstance(e, int) and e >= 0]
-                if len(nums) >= 20:
-                    inst_data = nums
-                    break
-
-    if not inst_data:
-        return instructions
-
-    dispatch_map = vm_structure.get('dispatch_map', {})
-    if not dispatch_map:
-        for m in re.finditer(r'\[(\d+)\]\s*=\s*(\d+)', source):
-            dispatch_map[int(m.group(1))] = int(m.group(2))
-
-    dispatch_keys = set(dispatch_map.keys())
-    pc = 0
-    while pc < len(inst_data):
-        opcode = inst_data[pc]
-        handler_idx = dispatch_map.get(opcode, -1)
-        instr = VMInstruction(opcode=opcode, pc=pc, handler_idx=handler_idx)
-
-        operands = []
-        temp_pc = pc + 1
-        while temp_pc < len(inst_data):
-            next_val = inst_data[temp_pc]
-            if next_val in dispatch_keys:
-                break
-            if next_val < 256 and next_val >= 0:
-                operands.append(next_val)
-                temp_pc += 1
-            else:
-                operands.append(next_val)
-                temp_pc += 1
-                break
-            if len(operands) >= 4:
-                break
-
-        instr.operands = operands
-        instructions.append(instr)
-        pc += 1 + len(operands)
-
-    return instructions
-
-def _classify_handler(body):
-    features = set()
-    if 'Q[I[B+' in body and 'R[I[B+' in body:
-        features.add('loadk')
-    if body.count('Q[I[B+') >= 3:
-        if '+' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('add')
-        elif '-' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('sub')
-        elif '*' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('mul')
-        elif '/' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('div')
-        elif '%' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('mod')
-        elif '^' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('pow')
-        elif '..' in body.split('=')[1] if '=' in body and len(body.split('=')) > 1 else False:
-            features.add('concat')
-        else:
-            features.add('move')
-    if body.count('Q[I[B+') == 2 and '=' in body:
-        features.add('move')
-    if re.search(r'B\s*=\s*I\s*\[\s*B', body):
-        features.add('jump')
-    if re.search(r'if\s+Q\s*\[', body):
-        features.add('cjump')
-    if 'table' in body and 'insert' in body:
-        features.add('table_insert')
-    if 'pcall' in body:
-        features.add('pcall')
-    if 'return' in body:
-        features.add('return')
-    if 'string.char' in body:
-        features.add('strchar')
-    if 'loadstring' in body:
-        features.add('loadstring')
-    if 'setmetatable' in body:
-        features.add('setmeta')
-    if 'getmetatable' in body:
-        features.add('getmeta')
-    if '#' in body and 'Q' in body:
-        features.add('len')
-    if 'not' in body and 'Q' in body:
-        features.add('not_op')
-    if '==' in body:
-        features.add('eq')
-    if '<' in body and '>' not in body and '<=' not in body:
-        features.add('lt')
-    if '<=' in body:
-        features.add('le')
-    if 'function' in body and '(' in body:
-        features.add('closure')
-    return features
-
-def _build_handler_table(source, vm_structure):
-    handlers = {}
-    handler_bodies = vm_structure.get('handler_map', {})
-
-    if not handler_bodies:
-        handler_blocks = re.findall(r'(\w+)\s*\[\s*(\d+)\s*\]\s*=\s*function\s*\([^)]*\)(.*?)end', source, re.DOTALL)
-        for var_name, idx_str, body in handler_blocks:
-            idx = int(idx_str)
-            handler_bodies[idx] = body
-
-    if not handler_bodies:
-        func_defs = re.findall(r'function\s*(\w*)\s*\([^)]*\)(.*?)end', source, re.DOTALL)
-        for i, func_def in enumerate(func_defs):
-            if len(func_def[1].strip()) > 20:
-                handler_bodies[i] = func_def[1]
-
-    for idx, body in handler_bodies.items():
-        features = _classify_handler(body)
-        handler = VMOpcodeHandler(
-            opcode=idx,
-            handler_idx=idx,
-            handler_body=body,
-            operand_count=len(re.findall(r'I\s*\[\s*B\s*[+-]', body)),
-            handler_type=features
-        )
-        handlers[idx] = handler
-
-    dispatch_map = vm_structure.get('dispatch_map', {})
-    if not dispatch_map and handlers:
-        for opcode, handler in handlers.items():
-            dispatch_map[opcode] = handler.handler_idx
-
-    opcode_to_handler = {}
-    for opcode, handler_idx in dispatch_map.items():
-        if handler_idx in handlers:
-            opcode_to_handler[opcode] = handlers[handler_idx]
-        elif opcode in handlers:
-            opcode_to_handler[opcode] = handlers[opcode]
-
-    return opcode_to_handler, handlers
-
-def _build_cfg(instructions, opcode_to_handler):
-    blocks = {}
-    block_map = {}
-    jump_targets = set()
-
-    for instr in instructions:
-        handler = opcode_to_handler.get(instr.opcode)
-        if handler:
-            if 'jump' in handler.handler_type:
-                if instr.operands:
-                    target_pc = instr.operands[0]
-                    if isinstance(target_pc, int):
-                        jump_targets.add(target_pc)
-            if 'cjump' in handler.handler_type:
-                if len(instr.operands) >= 2:
-                    target_pc = instr.operands[1] if isinstance(instr.operands[1], int) else instr.operands[0]
-                    if isinstance(target_pc, int):
-                        jump_targets.add(target_pc)
-
-    current_block_id = 0
-    current_block = VMBasicBlock(id=current_block_id, start_pc=0, end_pc=0)
-    block_starts = {0}
-    block_starts.update(jump_targets)
-
-    for instr in instructions:
-        if instr.pc in block_starts and current_block.instructions:
-            current_block.end_pc = current_block.instructions[-1].pc
-            blocks[current_block.id] = current_block
-            block_map[current_block.start_pc] = current_block.id
-            current_block_id = len(blocks)
-            current_block = VMBasicBlock(id=current_block_id, start_pc=instr.pc, end_pc=instr.pc)
-        current_block.instructions.append(instr)
-
-    if current_block.instructions:
-        current_block.end_pc = current_block.instructions[-1].pc
-        blocks[current_block.id] = current_block
-        block_map[current_block.start_pc] = current_block.id
-
-    for block_id, block in blocks.items():
-        if not block.instructions:
-            continue
-        last_instr = block.instructions[-1]
-        handler = opcode_to_handler.get(last_instr.opcode)
-        if handler:
-            handler_types = handler.handler_type
-            if 'jump' in handler_types and 'cjump' not in handler_types:
-                if last_instr.operands:
-                    target = last_instr.operands[0]
-                    target_instrs = [i for i in instructions if i.pc == target]
-                    if target_instrs:
-                        target_block_start = target_instrs[0].pc
-                        for bid, blk in blocks.items():
-                            if blk.start_pc == target_block_start:
-                                block.successors.append(bid)
-                                blocks[bid].predecessors.append(block_id)
-                                block.branch_target = target
-                                break
-            elif 'cjump' in handler_types:
-                fallthrough_pc = last_instr.pc + 1 + len(last_instr.operands)
-                if last_instr.operands:
-                    target = last_instr.operands[0]
-                    if isinstance(target, int):
-                        for bid, blk in blocks.items():
-                            if blk.start_pc == target:
-                                block.successors.append(bid)
-                                blocks[bid].predecessors.append(block_id)
-                                block.branch_target = target
-                                break
-                for bid, blk in blocks.items():
-                    if blk.start_pc == fallthrough_pc:
-                        block.successors.append(bid)
-                        blocks[bid].predecessors.append(block_id)
-                        block.fallthrough_target = fallthrough_pc
-                        break
-            elif 'return' not in handler_types:
-                fallthrough_pc = last_instr.pc + 1 + len(last_instr.operands)
-                for bid, blk in blocks.items():
-                    if blk.start_pc == fallthrough_pc:
-                        block.successors.append(bid)
-                        blocks[bid].predecessors.append(block_id)
-                        break
-
-    return blocks, block_map
-
-def _detect_loops(blocks):
-    visited = set()
-    stack = []
-    on_stack = set()
-    loop_headers = set()
-    back_edges = []
-
-    def dfs(block_id):
-        visited.add(block_id)
-        stack.append(block_id)
-        on_stack.add(block_id)
-        block = blocks.get(block_id)
-        if block:
-            for succ_id in block.successors:
-                if succ_id not in visited:
-                    dfs(succ_id)
-                elif succ_id in on_stack:
-                    back_edges.append((block_id, succ_id))
-                    loop_headers.add(succ_id)
-        stack.pop()
-        on_stack.discard(block_id)
-
-    for block_id in blocks:
-        if block_id not in visited:
-            dfs(block_id)
-
-    loops = {}
-    for header in loop_headers:
-        loop_blocks = {header}
-        queue = deque([header])
-        while queue:
-            current = queue.popleft()
-            block = blocks.get(current)
-            if block:
-                for succ_id in block.successors:
-                    if succ_id not in loop_blocks:
-                        loop_blocks.add(succ_id)
-                        queue.append(succ_id)
-        loops[header] = loop_blocks
-
-    return loop_headers, loops
-
-def _symbolic_execute(state, instructions, opcode_to_handler, blocks, block_map, loop_headers):
-    output_lines = []
-    state.visited = set()
-    state.blocks = blocks
-    state.loop_headers = loop_headers
-
-    def get_register(idx):
-        if idx in state.registers:
-            return state.registers[idx]
+def _eval_arith(expr):
+    expr = re.sub(r'\s+', '', str(expr))
+    if not re.match(r'^[\-\d+*()\s]+$', expr):
         return None
+    try:
+        result = eval(expr)
+        if isinstance(result, (int, float)):
+            return int(result)
+    except Exception:
+        pass
+    return None
 
-    def set_register(idx, value):
-        state.registers[idx] = value
+def _replace_e_calls(code, strings, offset):
+    def repl(m):
+        n = _eval_arith(m.group(1))
+        if n is None:
+            return m.group(0)
+        idx = n + offset
+        if 0 <= idx < len(strings):
+            return _lua_escape_string(strings[idx])
+        return m.group(0)
+    return re.sub(r'\bE\s*\((-?\d+(?:[+\-*]\d+)*)\)', repl, code)
 
-    def get_constant(idx):
-        if 0 <= idx < len(state.constants):
-            return state.constants[idx]
-        return f'R[{idx}]'
+def _simplify_arithmetic(code):
+    def repl(m):
+        inner = m.group(1)
+        if re.match(r'^[\-\d +*()\t]+$', inner):
+            val = _eval_arith(inner)
+            if val is not None:
+                return str(val)
+        return m.group(0)
+    prev = None
+    while prev != code:
+        prev = code
+        code = re.sub(r'\(([^\(\)]+)\)', repl, code)
+    return code
 
-    def execute_block(block_id, indent=0):
-        if block_id in state.visited:
-            return
-        state.visited.add(block_id)
-
-        block = blocks.get(block_id)
-        if not block:
-            return
-
-        is_loop_header = block_id in loop_headers
-        if is_loop_header:
-            output_lines.append('  ' * indent + 'while true do')
-            indent += 1
-
-        for instr in block.instructions:
-            handler = opcode_to_handler.get(instr.opcode)
-            if not handler:
-                output_lines.append('  ' * indent + f'-- unknown opcode {instr.opcode} at pc {instr.pc}')
-                continue
-
-            features = handler.handler_type
-            ops = instr.operands
-
-            if 'loadk' in features:
-                if len(ops) >= 2:
-                    dest_reg = ops[0]
-                    const_idx = ops[1]
-                    const_val = get_constant(const_idx)
-                    set_register(dest_reg, const_val)
-                    val_repr = _escape_lua_string(const_val) if isinstance(const_val, str) else str(const_val)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {val_repr}')
-
-            elif 'add' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} + {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'sub' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} - {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'mul' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} * {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'div' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} / {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'mod' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} % {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'pow' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} ^ {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'concat' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    result = f'{left_val} .. {right_val}'
-                    set_register(dest_reg, result)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = {result}')
-
-            elif 'move' in features:
-                if len(ops) >= 2:
-                    dest_reg = ops[0]
-                    src_reg = ops[1]
-                    src_val = get_register(src_reg)
-                    if src_val is not None:
-                        set_register(dest_reg, src_val)
-                        output_lines.append('  ' * indent + f'local reg_{dest_reg} = reg_{src_reg}')
-                    else:
-                        set_register(dest_reg, f'reg_{src_reg}')
-                        output_lines.append('  ' * indent + f'local reg_{dest_reg} = reg_{src_reg}')
-
-            elif 'strchar' in features:
-                if len(ops) >= 1:
-                    dest_reg = ops[0]
-                    char_args = ops[1:] if len(ops) > 1 else [ops[0]]
-                    chars = ', '.join(str(a) for a in char_args)
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = string.char({chars})')
-
-            elif 'table_insert' in features:
-                if len(ops) >= 2:
-                    output_lines.append('  ' * indent + f'table.insert(reg_{ops[0]}, reg_{ops[1]})')
-                else:
-                    output_lines.append('  ' * indent + f'table.insert(reg_{ops[0]})')
-
-            elif 'pcall' in features:
-                if len(ops) >= 1:
-                    func_name = get_constant(ops[0]) if ops[0] < len(state.constants) else f'reg_{ops[0]}'
-                    arg_count = ops[1] if len(ops) > 1 else 0
-                    args = []
-                    for i in range(arg_count):
-                        arg_reg = ops[2 + i] if len(ops) > 2 + i else None
-                        if arg_reg is not None:
-                            arg_val = get_register(arg_reg)
-                            args.append(str(arg_val) if arg_val is not None else f'reg_{arg_reg}')
-                    output_lines.append('  ' * indent + f'pcall({func_name}, {", ".join(args)})')
-
-            elif 'call' in features:
-                if len(ops) >= 1:
-                    func_name = get_constant(ops[0]) if ops[0] < len(state.constants) else f'reg_{ops[0]}'
-                    arg_count = ops[1] if len(ops) > 1 else 0
-                    args = []
-                    for i in range(arg_count):
-                        arg_reg = ops[2 + i] if len(ops) > 2 + i else None
-                        if arg_reg is not None:
-                            arg_val = get_register(arg_reg)
-                            args.append(str(arg_val) if arg_val is not None else f'reg_{arg_reg}')
-                    output_lines.append('  ' * indent + f'{func_name}({", ".join(args)})')
-
-            elif 'jump' in features and 'cjump' not in features:
-                break
-
-            elif 'cjump' in features:
-                if ops:
-                    cond_reg = ops[0]
-                    output_lines.append('  ' * indent + f'if reg_{cond_reg} then')
-
-            elif 'eq' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = ({left_val} == {right_val})')
-
-            elif 'lt' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = ({left_val} < {right_val})')
-
-            elif 'le' in features:
-                if len(ops) >= 3:
-                    dest_reg = ops[0]
-                    left_val = get_register(ops[1]) if ops[1] in state.registers else str(ops[1])
-                    right_val = get_register(ops[2]) if ops[2] in state.registers else str(ops[2])
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = ({left_val} <= {right_val})')
-
-            elif 'len' in features:
-                if len(ops) >= 2:
-                    dest_reg = ops[0]
-                    src_reg = ops[1]
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = #reg_{src_reg}')
-
-            elif 'not_op' in features:
-                if len(ops) >= 2:
-                    dest_reg = ops[0]
-                    src_reg = ops[1]
-                    output_lines.append('  ' * indent + f'local reg_{dest_reg} = not reg_{src_reg}')
-
-            elif 'setmeta' in features:
-                if len(ops) >= 2:
-                    output_lines.append('  ' * indent + f'setmetatable(reg_{ops[0]}, reg_{ops[1]})')
-
-            elif 'getmeta' in features:
-                if len(ops) >= 2:
-                    output_lines.append('  ' * indent + f'local reg_{ops[0]} = getmetatable(reg_{ops[1]})')
-
-            elif 'closure' in features:
-                if len(ops) >= 1:
-                    output_lines.append('  ' * indent + f'local reg_{ops[0]} = function() end')
-
-            elif 'loadstring' in features:
-                if len(ops) >= 1:
-                    src = get_register(ops[0]) if ops[0] in state.registers else f'reg_{ops[0]}'
-                    output_lines.append('  ' * indent + f'local loaded = loadstring({src})')
-
-            elif 'return' in features:
-                if ops:
-                    ret_vals = []
-                    for op in ops:
-                        val = get_register(op) if op in state.registers else str(op)
-                        ret_vals.append(str(val))
-                    output_lines.append('  ' * indent + f'return {", ".join(ret_vals)}')
-                else:
-                    output_lines.append('  ' * indent + 'return')
-
-            else:
-                output_lines.append('  ' * indent + f'-- opcode {instr.opcode}: {", ".join(str(o) for o in ops)}')
-
-        if is_loop_header:
-            indent -= 1
-            output_lines.append('  ' * indent + 'end')
-
-        for succ_id in block.successors:
-            if succ_id not in state.visited:
-                execute_block(succ_id, indent)
-
-    if blocks:
-        first_block = min(blocks.keys())
-        execute_block(first_block)
-
-    if not output_lines:
-        output_lines.append('local R = {')
-        for i, s in enumerate(state.constants or []):
-            if s and len(str(s)) > 1:
-                output_lines.append(f'\t[{i}] = {_escape_lua_string(str(s))},')
-        output_lines.append('}')
-        for instr in instructions[:40]:
-            handler = opcode_to_handler.get(instr.opcode)
-            if handler:
-                features = handler.handler_type
-                ops = instr.operands
-                if 'loadk' in features and len(ops) >= 2:
-                    const_val = state.constants[ops[1]] if ops[1] < len(state.constants) else f'R[{ops[1]}]'
-                    output_lines.append(f'-- [{instr.pc}] LOADK reg_{ops[0]} = {_escape_lua_string(str(const_val))}')
-                elif 'move' in features and len(ops) >= 2:
-                    output_lines.append(f'-- [{instr.pc}] MOVE reg_{ops[0]} = reg_{ops[1]}')
-                elif 'add' in features and len(ops) >= 3:
-                    output_lines.append(f'-- [{instr.pc}] ADD reg_{ops[0]} = reg_{ops[1]} + reg_{ops[2]}')
-                elif 'jump' in features and 'cjump' not in features and ops:
-                    output_lines.append(f'-- [{instr.pc}] JMP -> {ops[0]}')
-                elif 'cjump' in features and ops:
-                    output_lines.append(f'-- [{instr.pc}] CJMP reg_{ops[0]} -> {ops[0] if len(ops) > 0 else "?"}')
-                elif 'call' in features and ops:
-                    func = state.constants[ops[0]] if ops and ops[0] < len(state.constants) else f'reg_{ops[0]}'
-                    output_lines.append(f'-- [{instr.pc}] CALL {func}')
-                else:
-                    output_lines.append(f'-- [{instr.pc}] OP_{instr.opcode} {ops}')
-
-    return '\n'.join(output_lines)
-
-def _extract_all_constants(source, decoded_strings):
-    all_constants = list(decoded_strings) if decoded_strings else []
-    numeric_constants = re.findall(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', source)
-    for match in numeric_constants:
-        nums = [int(n.strip()) for n in match.split(',') if n.strip().lstrip('-').isdigit()]
-        all_constants.extend(nums)
-    string_literals = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', source)
-    for s in string_literals[:50]:
+def _simplify_bare_arithmetic(code):
+    def repl(m):
         try:
-            decoded = _decode_numeric_escapes(s)
-            if len(decoded) > 1 and len(decoded) < 100:
-                all_constants.append(decoded)
-        except:
-            pass
-    return all_constants
+            val = int(eval(m.group(0)))
+            return str(val)
+        except Exception:
+            return m.group(0)
+    code = re.sub(r'-?\d+\s*\+\s*-\d+', repl, code)
+    code = re.sub(r'-?\d+\s*-\s*-\d+', repl, code)
+    return code
 
-def _is_wearedevs_vm(source):
-    score = 0
-    if re.search(r'while\s+\w+\s+do\s+local\s+\w+\s*=\s*\{', source):
-        score += 3
-    if re.search(r'local\s+\w+\s*=\s*\{[\d,\s]{50,}\}', source):
-        score += 2
-    if re.search(r'local\s+R\s*=\s*\{', source):
-        score += 2
-    if re.search(r'local\s+N\s*=\s*\{', source):
-        score += 2
-    if re.search(r'Q\s*\[\s*I\s*\[\s*B', source):
-        score += 3
-    if re.search(r'for\s+E,l\s+in\s+ipairs', source):
-        score += 1
-    return score >= 3
+def _strip_bootstrap(source):
+    markers = [
+        'return(function(R,M,Y,r,m,N,h,d,o,l,q,I,w,g,S,z,Q,T,e,O,J)',
+        'return(function(R,M,Y,r,m,N,h,d,o,l,q,I,w,g',
+        'return(function(',
+    ]
+    for marker in markers:
+        pos = source.find(marker)
+        if pos != -1:
+            return source[pos:]
+    return source
 
-def _looks_like_real_code(text):
-    if not text or len(text) < 200:
-        return False
-    lines = text.splitlines()
-    structural_kw = {'function', 'while', 'for', 'if', 'repeat'}
-    count = sum(1 for line in lines if any(kw in line for kw in structural_kw))
-    return count >= 3
+def _add_spacing(code):
+    code = re.sub(r'(?<!\n)(end\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)(local\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)(return\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)(if\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)(else\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)(while\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)(for\s)', r'\n\1', code)
+    code = re.sub(r'\n{3,}', '\n\n', code)
+    return code
+
+def _wearedevs_string_substitution(source, decoded_strings):
+    alphabet = _extract_wearedevs_alphabet(source)
+    if not alphabet:
+        return None
+    offset = _get_e_offset(source)
+    if offset is None:
+        return None
+    result = source
+    result = _replace_e_calls(result, decoded_strings, offset)
+    result = _simplify_arithmetic(result)
+    result = _simplify_bare_arithmetic(result)
+    result = _strip_bootstrap(result)
+    result = _add_spacing(result)
+    if len(result) > 200 and _looks_like_real_code(result):
+        return result
+    return None
 
 class Unveiler:
     def __init__(self, java_available, unluac_path, lua_harness_fn, run_unluac_fn):
@@ -1157,15 +537,21 @@ class Unveiler:
 
         wd = _wearedevs_decode(source)
         if wd['success']:
+            decoded_strings = wd['decoded_strings']
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
+
+            subst_result = _wearedevs_string_substitution(source, decoded_strings)
+            if subst_result:
+                self._log("string_substitution", True, f"produced {len(subst_result)} chars of clean Lua")
+                header = "-- Deobfuscated via string-table substitution (WeAreDevs layer removed)\n"
+                return header + subst_result, 'wearedevs_string_substitution', 'String-table substitution complete'
 
             self._log("print_capture", True, "trying print/warn capture via lua5.1 subprocess")
             lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
             for t in lupa_trace:
                 self._log("print_capture_trace", True, t)
             if lupa_out and len(lupa_out.strip()) > 0:
-                self._log("print_capture_success", True,
-                          f"captured {len(lupa_out)} chars of output")
+                self._log("print_capture_success", True, f"captured {len(lupa_out)} chars of output")
                 header = "-- [Deobfuscated via print/warn capture]\n"
                 return header + lupa_out, 'print_capture', 'Captured runtime output'
 
@@ -1175,18 +561,11 @@ class Unveiler:
                 self._log("harness_success", True, f"captured {len(harness_result)} chars of real code")
                 return harness_result, 'lua_harness', 'Harness captured original source'
 
-            vm_result = self._attempt_vm_lift(source, wd['decoded_strings'])
+            vm_result = self._attempt_vm_lift(source, decoded_strings)
             if vm_result:
                 return vm_result, 'wearedevs_vm_lifted', 'VM lifted'
 
-            self._log("string_subst", True, "applying string substitution fallback")
-            substituted = self._apply_string_substitution(source, wd['decoded_strings'])
-            if substituted and substituted != source:
-                self._log("string_subst_ok", True,
-                          f"substitution produced {len(substituted)} chars")
-                return substituted, 'wearedevs_string_subst', 'String substitution (no VM)'
-
-            lines = [f"-- [{i}] {s!r}" for i, s in enumerate(wd['decoded_strings']) if s]
+            lines = [f"-- [{i}] {s!r}" for i, s in enumerate(decoded_strings) if s]
             return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table (no harness capture)'
 
         if _detect_prometheus_vm(source):
@@ -1198,8 +577,7 @@ class Unveiler:
         self._log("print_capture_fallback", True, "trying print/warn capture as fallback")
         lupa_out, _ = _lupa_decode_wearedevs(source)
         if lupa_out and len(lupa_out.strip()) > 0:
-            self._log("print_capture_fallback_success", True,
-                      f"captured {len(lupa_out)} chars")
+            self._log("print_capture_fallback_success", True, f"captured {len(lupa_out)} chars")
             return lupa_out, 'print_capture', 'Captured runtime output (fallback)'
 
         self._log("harness_fallback", True, "running harness as final attempt")
@@ -1230,17 +608,13 @@ class Unveiler:
     def _attempt_vm_lift(self, source, decoded_strings):
         self._log("vm_lift_attempt", True, "trying static VM lift")
         if not _is_wearedevs_vm(source):
-            self._log("vm_lift_detect", False,
-                      "no VM dispatch pattern — string-obfuscation only, skipping VM lift")
+            self._log("vm_lift_detect", False, "no VM dispatch pattern — string-obfuscation only, skipping VM lift")
             return None
         try:
             vm = _extract_vm_structure(source)
             insts = _extract_instruction_stream(source, vm)
             if len(insts) < 5:
-                self._log("vm_lift_abort", False,
-                          f"only {len(insts)} instructions extracted — "
-                          "script uses string-table obfuscation without a "
-                          "numeric bytecode VM; VM lift not applicable")
+                self._log("vm_lift_abort", False, f"only {len(insts)} instructions extracted")
                 return None
             op_handlers, _ = _build_handler_table(source, vm)
             if not op_handlers:
@@ -1257,33 +631,6 @@ class Unveiler:
         except Exception:
             pass
         return None
-
-    def _apply_string_substitution(self, source, decoded_strings):
-        if not decoded_strings:
-            return source
-
-        def _lua_str(s):
-            if not isinstance(s, str):
-                s = str(s)
-            s2 = s.replace('\\', '\\\\').replace('"', '\\"')
-            s2 = s2.replace('\n', '\\n').replace('\r', '\\r')
-            return f'"{s2}"'
-
-        const_map = {i: _lua_str(v) for i, v in enumerate(decoded_strings) if v}
-
-        def repl(m):
-            idx = int(m.group(1))
-            return const_map.get(idx, m.group(0))
-
-        result = re.sub(r'\bR\s*\[\s*(\d+)\s*\]', repl, source)
-
-        for varname in ('l', 'N', 'S', 'T'):
-            def repl_v(m, _v=varname):
-                idx = int(m.group(1))
-                return const_map.get(idx, m.group(0))
-            result = re.sub(rf'\b{varname}\s*\[\s*(\d+)\s*\]', repl_v, result)
-
-        return result
 
     def _recursive_unveil(self, source, depth=0):
         if depth > self.max_layers:
@@ -1671,10 +1018,7 @@ end
             instructions = _extract_instruction_stream(source, vm_structure)
             self._trace("vm_lift_instructions", True, f"extracted {len(instructions)} instructions")
             if len(instructions) < 5:
-                self._trace("vm_lift_abort", False,
-                            f"only {len(instructions)} instructions — "
-                            "script is string-table obfuscation only, "
-                            "not a numeric bytecode VM; VM lift skipped")
+                self._trace("vm_lift_abort", False, f"only {len(instructions)} instructions")
                 return None
             opcode_to_handler, all_handlers = _build_handler_table(source, vm_structure)
             self._trace("vm_lift_handlers", True, f"identified {len(opcode_to_handler)} opcode handlers")
@@ -1715,7 +1059,7 @@ end
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
 
-        if result and method in ('lua_harness', 'wearedevs_vm_lifted', 'recursive_unveil'):
+        if result and method in ('lua_harness', 'wearedevs_vm_lifted', 'recursive_unveil', 'wearedevs_string_substitution'):
             self._trace("var_rename", True, "applying variable renamer")
             result = self._apply_var_renamer(result)
             self._hook_stats['var_rename_applied'] = 1
