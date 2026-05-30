@@ -42,6 +42,7 @@ SUCCESS_METHODS = (
     'recursive_base64', 'harness_diag',
     'prometheus_vm', 'prometheus_vm_raw',
     'wearedevs_decode', 'wearedevs_vm_lifted', 'recursive_unveil',
+    'wearedevs_string_subst',
 )
 
 async def call_api(source_b64):
