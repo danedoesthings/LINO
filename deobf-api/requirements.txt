@@ -1,6 +1,7 @@
-flask
-gunicorn
-httpx
-discord.py
-luaparser
-lupa>=2.0
+flask>=2.3.0
+flask-cors>=4.0.0
+gunicorn>=21.0.0
+httpx>=0.24.0
+discord.py>=2.3.0
+luaparser>=1.2.0
+lupa>=2.0.0
