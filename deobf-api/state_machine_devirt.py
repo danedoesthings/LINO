@@ -1,213 +1,187 @@
 import re
 import json
-import math
-import base64
 from collections import defaultdict, deque
-from typing import Dict, List, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Set, Any
 
 class StateMachineLifter:
     def __init__(self, source: str, decoded_strings: List[str]):
         self.source = source
         self.strings = decoded_strings
-        self.register_state: Dict[int, Any] = {}
-        self.stack = []
-        self.output_lines = []
-        self.handlers: Dict[int, Dict] = {}
-        self.state_transitions: Dict[int, List[int]] = defaultdict(list)
-        self.visited_states = set()
-        self.indent_level = 0
-        self.loop_headers = set()
+        self.state_handlers: Dict[int, Dict[str, Any]] = {}
+        self.entry_state: Optional[int] = None
+        self.register_state: Dict[int, str] = {}
+        self.output_lines: List[str] = []
+        self.indent_level: int = 0
         
     def lift(self) -> Optional[str]:
-        if not self._extract_state_handlers():
+        if not self._extract_state_machine():
             return None
-        if not self._build_control_flow():
-            return None
-        self._simulate_execution()
+        self._simulate_states()
         if not self.output_lines:
             return None
-        return '\n'.join(self.output_lines)
+        return self._format_output()
     
-    def _extract_state_handlers(self) -> bool:
-        state_pattern = r'if\s+l\s*<\s*(\d+)\s+then\s*(.*?)elseif\s+l\s*<\s*(\d+)\s+then\s*(.*?)(?:else\s*(.*?))?end'
+    def _extract_state_machine(self) -> bool:
+        while_match = re.search(r'while\s+(\w+)\s+do\s+(.*?)end\s*(?:\)\s*\)|$)', self.source, re.DOTALL)
+        if not while_match:
+            return False
         
-        matches = list(re.finditer(state_pattern, self.source, re.DOTALL))
+        state_var = while_match.group(1)
+        body = while_match.group(2)
+        
+        if_pattern = r'if\s+' + state_var + r'\s*<\s*(\d+)\s+then\s*(.*?)(?:elseif\s+' + state_var + r'\s*<\s*(\d+)\s+then\s*(.*?))*?\s*else\s*(.*?)\s*end'
+        
+        matches = list(re.finditer(if_pattern, body, re.DOTALL))
         if not matches:
             return False
         
         for match in matches:
-            for i in range(1, len(match.groups()), 2):
-                if match.group(i):
-                    state_id = int(match.group(i))
-                    body = match.group(i+1) if i+1 < len(match.groups()) else ''
-                    if state_id not in self.handlers:
-                        self.handlers[state_id] = self._parse_handler_body(body)
+            state_num = int(match.group(1))
+            handler_body = match.group(2).strip()
+            self.state_handlers[state_num] = {
+                'body': handler_body,
+                'transitions': self._extract_transitions(handler_body, state_var)
+            }
         
-        entry_match = re.search(r'l\s*=\s*(\d+)', self.source)
-        if entry_match:
-            self.entry_state = int(entry_match.group(1))
+        if 0 not in self.state_handlers:
+            for state_num in sorted(self.state_handlers.keys()):
+                if state_num > 0:
+                    self.entry_state = state_num
+                    break
         else:
-            self.entry_state = min(self.handlers.keys())
+            self.entry_state = 0
         
-        return len(self.handlers) > 0
+        return self.entry_state is not None
     
-    def _parse_handler_body(self, body: str) -> Dict:
-        handler = {'operations': [], 'next_state': None, 'type': 'normal'}
+    def _extract_transitions(self, handler_body: str, state_var: str) -> List[Tuple[int, Optional[str]]]:
+        transitions = []
+        assign_pattern = r'\b' + state_var + r'\s*=\s*(-?\d+(?:\s*[+\-]\s*\d+)*)'
+        for assign_match in re.finditer(assign_pattern, handler_body):
+            expr = assign_match.group(1).replace(' ', '')
+            try:
+                next_state = eval(expr)
+                if isinstance(next_state, int):
+                    transitions.append((next_state, None))
+            except:
+                pass
         
-        reg_pattern = r'I\s*\[\s*(\w+)\s*\]\s*=\s*([^;\n]+)'
-        for match in re.finditer(reg_pattern, body):
-            reg_idx = self._extract_register_index(match.group(1))
-            value = match.group(2).strip()
-            handler['operations'].append(('set_reg', reg_idx, value))
+        call_pattern = r'I\s*\[\s*r\s*\[\s*(\d+)\s*\]\s*\]'
+        for call_match in re.finditer(call_pattern, handler_body):
+            idx = int(call_match.group(1))
+            if 1 <= idx <= len(self.strings):
+                transitions.append((-1, self.strings[idx - 1]))
         
-        call_pattern = r'(\w+)\s*\(\s*([^)]+)\s*\)'
-        for match in re.finditer(call_pattern, body):
-            func = match.group(1)
-            args = match.group(2)
-            handler['operations'].append(('call', func, args))
-        
-        state_change = re.search(r'l\s*=\s*(\d+)', body)
-        if state_change:
-            handler['next_state'] = int(state_change.group(1))
-        
-        print_match = re.search(r'print\s*\(\s*([^)]+)\s*\)', body)
-        if print_match:
-            handler['operations'].append(('print', print_match.group(1)))
-        
-        return handler
+        return transitions
     
-    def _extract_register_index(self, expr: str) -> Optional[int]:
-        if expr.isdigit():
-            return int(expr)
-        bracket_match = re.search(r'r\[(\d+)\]', expr)
-        if bracket_match:
-            return int(bracket_match.group(1))
-        return None
-    
-    def _build_control_flow(self) -> bool:
-        for state_id, handler in self.handlers.items():
-            if handler['next_state'] is not None:
-                self.state_transitions[state_id].append(handler['next_state'])
-        
-        for state_id in self.handlers:
-            if state_id not in self.state_transitions:
-                self.state_transitions[state_id] = []
-        
-        for transitions in self.state_transitions.values():
-            if len(transitions) > 1:
-                self.loop_headers.add(transitions[0])
-        
-        return True
-    
-    def _simulate_execution(self):
-        if not self.entry_state:
-            return
-        
+    def _simulate_states(self) -> None:
+        visited = set()
         stack = [(self.entry_state, 0)]
-        visited_depth = {}
         
         while stack:
-            state_id, depth = stack.pop()
+            state_num, depth = stack.pop()
+            if state_num in visited:
+                continue
+            visited.add(state_num)
             
-            if state_id in visited_depth and visited_depth[state_id] <= depth:
+            handler = self.state_handlers.get(state_num)
+            if not handler:
                 continue
             
-            visited_depth[state_id] = depth
-            
-            if state_id not in self.handlers:
-                continue
-            
-            self.visited_states.add(state_id)
             self.indent_level = depth
+            self._emit_handler(handler, state_num)
             
-            handler = self.handlers[state_id]
-            
-            for op in handler['operations']:
-                self._execute_operation(op)
-            
-            if handler['next_state'] is not None:
-                next_state = handler['next_state']
-                if next_state not in self.visited_states:
-                    stack.append((next_state, depth))
-                elif next_state in self.loop_headers:
-                    self.output_lines.append('  ' * depth + 'end')
+            for next_state, call_name in handler['transitions']:
+                if next_state >= 0 and next_state not in visited:
+                    stack.append((next_state, depth + 1))
+                elif call_name:
+                    self.output_lines.append(f"{'  ' * self.indent_level}{call_name}()")
     
-    def _execute_operation(self, op: Tuple):
-        prefix = '  ' * self.indent_level
+    def _emit_handler(self, handler: Dict[str, Any], state_num: int) -> None:
+        body = handler['body']
         
-        if op[0] == 'set_reg':
-            _, reg_idx, value = op
-            resolved = self._resolve_value(value)
-            self.register_state[reg_idx] = resolved
-            self.output_lines.append(f'{prefix}local reg_{reg_idx} = {resolved}')
+        if 'print' in body or 'warn' in body or 'error' in body:
+            self._extract_api_calls(body)
         
-        elif op[0] == 'call':
-            _, func, args = op
-            resolved_args = self._resolve_arguments(args)
-            if func == 'print':
-                self.output_lines.append(f'{prefix}print({", ".join(resolved_args)})')
-            elif func == 'pcall':
-                self.output_lines.append(f'{prefix}local success, result = pcall(function()')
-                self.indent_level += 1
-            else:
-                self.output_lines.append(f'{prefix}{func}({", ".join(resolved_args)})')
+        assign_pattern = r'(\w+)\s*=\s*Q\s*\[\s*I\s*\[\s*B\s*\+\s*(\d+)\s*\]\s*\]'
+        for match in re.finditer(assign_pattern, body):
+            var_name = match.group(1)
+            offset = int(match.group(2))
+            const_idx = offset + 1
+            if 1 <= const_idx <= len(self.strings):
+                const_value = self.strings[const_idx - 1]
+                if isinstance(const_value, str) and const_value and const_value[0].isalpha():
+                    self.output_lines.append(f"{'  ' * self.indent_level}local {var_name} = {const_value}")
         
-        elif op[0] == 'print':
-            _, arg = op
-            resolved = self._resolve_value(arg)
-            self.output_lines.append(f'{prefix}print({resolved})')
+        load_pattern = r'local\s+(\w+)\s*=\s*Q\s*\[\s*I\s*\[\s*B\s*\+\s*(\d+)\s*\]\s*\]'
+        for match in re.finditer(load_pattern, body):
+            var_name = match.group(1)
+            offset = int(match.group(2))
+            const_idx = offset + 1
+            if 1 <= const_idx <= len(self.strings):
+                const_value = self.strings[const_idx - 1]
+                if const_value and len(const_value) < 200:
+                    self.output_lines.append(f"{'  ' * self.indent_level}local {var_name} = {json.dumps(const_value)}")
+        
+        call_pattern = r'(\w+)\s*=\s*(\w+)\(\)'
+        for match in re.finditer(call_pattern, body):
+            dest_var = match.group(1)
+            func_name = match.group(2)
+            self.output_lines.append(f"{'  ' * self.indent_level}local {dest_var} = {func_name}()")
+        
+        if 'pcall' in body:
+            self._extract_pcall(body)
     
-    def _resolve_value(self, expr: str) -> str:
-        expr = expr.strip()
+    def _extract_api_calls(self, body: str) -> None:
+        print_pattern = r'print\s*\(\s*([^)]+)\s*\)'
+        for match in re.finditer(print_pattern, body):
+            args = match.group(1)
+            resolved_args = self._resolve_strings(args)
+            self.output_lines.append(f"{'  ' * self.indent_level}print({resolved_args})")
         
-        if expr.isdigit():
-            return expr
+        error_pattern = r'error\s*\(\s*([^)]+)\s*\)'
+        for match in re.finditer(error_pattern, body):
+            msg = match.group(1)
+            resolved_msg = self._resolve_strings(msg)
+            self.output_lines.append(f"{'  ' * self.indent_level}error({resolved_msg})")
         
-        const_match = re.search(r'R\[(\d+)\]', expr)
-        if const_match:
-            idx = int(const_match.group(1)) - 1
-            if 0 <= idx < len(self.strings):
-                return json.dumps(self.strings[idx])
+        warn_pattern = r'warn\s*\(\s*([^)]+)\s*\)'
+        for match in re.finditer(warn_pattern, body):
+            msg = match.group(1)
+            resolved_msg = self._resolve_strings(msg)
+            self.output_lines.append(f"{'  ' * self.indent_level}warn({resolved_msg})")
+    
+    def _extract_pcall(self, body: str) -> None:
+        pcall_pattern = r'pcall\s*\(\s*(\w+)\s*,\s*\.\.\.\s*\)'
+        for match in re.finditer(pcall_pattern, body):
+            func_name = match.group(1)
+            self.output_lines.append(f"{'  ' * self.indent_level}pcall({func_name}, ...)")
+    
+    def _resolve_strings(self, expr: str) -> str:
+        for i, s in enumerate(self.strings):
+            if s and len(s) > 2 and s.isprintable():
+                placeholder = f'R[{i + 1}]'
+                if placeholder in expr:
+                    expr = expr.replace(placeholder, json.dumps(s))
         
-        reg_match = re.search(r'I\[(\d+)\]', expr)
-        if reg_match:
-            reg_idx = int(reg_match.group(1))
-            if reg_idx in self.register_state:
-                return str(self.register_state[reg_idx])
-        
-        if expr.startswith('"') and expr.endswith('"'):
-            return expr
-        
-        if expr.startswith("'") and expr.endswith("'"):
-            return expr
-        
-        try:
-            evaluated = eval(expr, {'math': math})
-            if isinstance(evaluated, (int, float, str)):
-                return json.dumps(evaluated) if isinstance(evaluated, str) else str(evaluated)
-        except:
-            pass
+        const_pattern = r'R\[(\d+)\]'
+        for match in re.finditer(const_pattern, expr):
+            idx = int(match.group(1))
+            if 1 <= idx <= len(self.strings):
+                const_value = self.strings[idx - 1]
+                if const_value:
+                    expr = expr.replace(match.group(0), json.dumps(const_value))
         
         return expr
     
-    def _resolve_arguments(self, args: str) -> List[str]:
-        if not args.strip():
-            return []
+    def _format_output(self) -> str:
+        header = "-- Deobfuscated via state machine devirtualization\n"
+        header += "-- Extracted from WeAreDevs while-state VM\n\n"
         
-        results = []
-        for arg in args.split(','):
-            results.append(self._resolve_value(arg.strip()))
-        return results
-    
-    def _generate_lua(self) -> str:
-        lines = ['-- Deobfuscated via state machine devirtualization', '']
-        lines.extend(self.output_lines)
+        unique_lines = []
+        seen = set()
+        for line in self.output_lines:
+            if line not in seen:
+                unique_lines.append(line)
+                seen.add(line)
         
-        if not any('print' in line for line in self.output_lines):
-            lines.append('')
-            lines.append('-- Reconstructed string table:')
-            for i, s in enumerate(self.strings):
-                if s and len(s) < 100:
-                    lines.append(f'--   [{i}] = {json.dumps(s)}')
-        
-        return '\n'.join(lines)
+        return header + '\n'.join(unique_lines)
