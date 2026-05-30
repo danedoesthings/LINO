@@ -206,80 +206,6 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
-def _apply_shuffle_range_reversal(strings, ops):
-    """
-    WeAreDevs obfuscator uses a two-pointer range-reversal shuffle:
-        while l[1]<l[2] do R[l[1]],R[l[2]],l[1],l[2] = R[l[2]],R[l[1]],l[1]+1,l[2]-1
-    Each (a,b) pair means: reverse the sub-array from index a to b (1-indexed).
-    """
-    result = list(strings)
-    for lo, hi in ops:
-        lo -= 1; hi -= 1          # convert to 0-indexed
-        while lo < hi:
-            result[lo], result[hi] = result[hi], result[lo]
-            lo += 1; hi -= 1
-    return result
-
-def _decode_string_fully(s, alphabet):
-    """
-    Attempt all decode strategies in order and return the first readable result.
-    Handles: short readable identifiers, plain text, custom-b64, standard b64.
-    """
-    if not s:
-        return ''
-    # Already a clean readable string
-    if _is_readable_identifier(s):
-        return s
-    # Single-char operators/separators that are already readable
-    if len(s) == 1:
-        return s
-    # Already readable text (e.g. error messages with spaces)
-    if _is_probably_text(s) and _shannon_entropy(s.encode('latin-1', errors='ignore')) < 6.5:
-        return s
-    # Try custom base64 first (primary encoding used by WeAreDevs)
-    try:
-        raw = _custom_b64_decode(s, alphabet)
-        if raw and len(raw) >= 1:
-            try:
-                text = raw.decode('utf-8')
-                if text and (re.match(r'^[\x20-\x7E]+$', text) or
-                             _is_readable_identifier(text) or
-                             _is_probably_text(text)):
-                    return text
-            except Exception:
-                pass
-            # Latin-1 fallback
-            try:
-                text = raw.decode('latin-1', errors='replace')
-                if _is_probably_text(text):
-                    return text
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # Standard base64 fallback
-    if re.match(r'^[A-Za-z0-9+/=]+$', s.strip()):
-        try:
-            padded = s.strip() + '=' * (-len(s.strip()) % 4)
-            raw = base64.b64decode(padded, validate=False)
-            if raw:
-                try:
-                    text = raw.decode('utf-8')
-                    if text and (re.match(r'^[\x20-\x7E]+$', text) or _is_probably_text(text)):
-                        return text
-                except Exception:
-                    pass
-                try:
-                    text = raw.decode('latin-1', errors='replace')
-                    if _is_probably_text(text):
-                        return text
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    return s
-
-
 def _wearedevs_decode(source):
     diag = {}
     alphabet = _extract_wearedevs_alphabet(source)
@@ -293,10 +219,56 @@ def _wearedevs_decode(source):
     diag['string_count'] = len(encoded_strings)
     shuffle_ops = _extract_shuffle_ops(source)
     diag['shuffle_ops'] = len(shuffle_ops)
-    # WeAreDevs uses range-reversal shuffle (two-pointer while lo<hi swap)
-    strings = _apply_shuffle_range_reversal(encoded_strings, shuffle_ops)
-    # Fully decode each string using all available methods
-    decoded = [_decode_string_fully(s, alphabet) for s in strings]
+    strings = list(encoded_strings)
+    for a, b in shuffle_ops:
+        ai, bi = a - 1, b - 1
+        if 0 <= ai < len(strings) and 0 <= bi < len(strings):
+            strings[ai], strings[bi] = strings[bi], strings[ai]
+    decoded = []
+    for s in strings:
+        if not s:
+            decoded.append('')
+            continue
+        if _is_readable_identifier(s):
+            decoded.append(s)
+            continue
+        if _is_probably_text(s):
+            decoded.append(s)
+            continue
+        try:
+            raw = _custom_b64_decode(s, alphabet)
+            if raw and len(raw) >= 2:
+                try:
+                    final = raw.decode('utf-8')
+                    if _is_probably_text(final):
+                        decoded.append(final)
+                        continue
+                except:
+                    pass
+                try:
+                    final = raw.decode('latin-1', errors='replace')
+                    if _is_probably_text(final):
+                        decoded.append(final)
+                        continue
+                except:
+                    pass
+                decoded.append(s)
+            else:
+                decoded.append(s)
+        except Exception:
+            if re.match(r'^[A-Za-z0-9+/=]+$', s):
+                try:
+                    raw = base64.b64decode(s + '=' * (-len(s) % 4), validate=True)
+                    try:
+                        final = raw.decode('utf-8')
+                        if _is_probably_text(final):
+                            decoded.append(final)
+                            continue
+                    except:
+                        pass
+                except:
+                    pass
+            decoded.append(s)
     diag['decoded_count'] = len(decoded)
     readable = [s for s in decoded if s and _is_probably_text(s)]
     lua_hits = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
@@ -430,9 +402,8 @@ def _replace_e_calls(code, strings, offset):
         n = _eval_arith(m.group(1))
         if n is None:
             return m.group(0)
-        # R[] is 1-indexed in Lua; convert to 0-indexed Python list
-        lua_idx = n + offset      # 1-based Lua index
-        py_idx  = lua_idx - 1     # 0-based Python index
+        lua_idx = n + offset
+        py_idx = lua_idx - 1
         if 0 <= py_idx < len(strings):
             return json.dumps(strings[py_idx])
         return m.group(0)
@@ -486,125 +457,14 @@ def _add_spacing(code):
     code = re.sub(r'\n{3,}', '\n\n', code)
     return code
 
-def _extract_real_code_from_vm(source, decoded_strings):
-    """
-    Extract and reconstruct readable Lua code from a WeAreDevs-obfuscated script.
-    This identifies the API calls, variable assignments, and function references
-    embedded in the VM dispatch table to reconstruct the original script structure.
-    """
-    lines = []
-    # Identify what the script does by analysing the decoded string table
-    # and looking for patterns in the VM dispatch section
-    api_calls = []
-    fenv_vars = {}
-
-    # Look for getfenv pattern (accessing _ENV globals)
-    if 'getfenv' in source or 'getfenv' in decoded_strings:
-        lines.append('local fenv = getfenv and getfenv() or _ENV')
-
-    # Look for pcall patterns
-    pcall_idx = None
-    for i, s in enumerate(decoded_strings):
-        if s == 'pcall':
-            pcall_idx = i + 1
-            break
-
-    # Look for named string constants that reveal API structure
-    named_keys = []
-    for s in decoded_strings:
-        if s and re.match(r'^[A-Za-z_][A-Za-z0-9_]{3,}$', s) and s not in {
-            'error','table','string','math','print','pcall','tostring','tonumber',
-            'setmetatable','getmetatable','unpack','select','type','assert',
-            'floor','ceil','random','concat','insert','remove','byte','char',
-            'sub','gsub','gmatch','find','format','byte','char','upper','lower',
-        }:
-            named_keys.append(s)
-
-    # Extract env variable references from the obfuscated code
-    # These appear as R["string"] patterns after substitution
-    string_refs = re.findall(r'R\["([A-Za-z_][A-Za-z0-9_]{3,})"\]', source)
-    for ref in sorted(set(string_refs)):
-        if ref not in fenv_vars:
-            fenv_vars[ref] = f'local {ref} = fenv["{ref}"]' if 'fenv' in '\n'.join(lines) else f'local {ref} = _ENV["{ref}"]'
-
-    return lines, fenv_vars, named_keys
-
-def _format_substituted_lua(code, decoded_strings):
-    """
-    Post-process the string-substituted code to make it as readable as possible.
-    Strips the obfuscator bootstrap, resolves remaining references, and formats.
-    """
-    # Remove the outer bootstrap wrapper (the string table decode loop + IIFE)
-    # Find where the REAL inner function starts (the main VM dispatch)
-    inner_start = None
-    # Pattern: the inner function that takes R,M,Y,r,m,... parameters
-    m = re.search(r'return\s*\(function\s*\(R,M,Y,r,m,N,h,d,o,l,q,I,w,g,S,z,Q,T,e,O,J\)', code)
-    if m:
-        inner_start = m.start()
-
-    if inner_start is not None:
-        # Find the end of the outer wrapper by counting parens backwards
-        # The structure is: ...)(getfenv and getfenv() or _ENV, unpack or table.unpack, ...)
-        # Trim to just the inner function call
-        code = code[inner_start:]
-
-    # Now extract the content between the VM function's parameters and the dispatch loop
-    # Build a readable summary of what the script does
-
-    # Look for what globals the script accesses
-    accessed = sorted(set(re.findall(r'R\["([^"]+)"\]', code)))
-    print_found = 'print' in decoded_strings
-    error_found = 'error' in decoded_strings
-    setmeta_found = 'setmetatable' in decoded_strings
-
-    result_lines = []
-    result_lines.append('-- Deobfuscated via WeAreDevs string substitution')
-    result_lines.append('-- Original script accesses the following globals:')
-    for a in accessed:
-        result_lines.append(f'--   {a}')
-    result_lines.append('')
-
-    # Generate the reconstructed skeleton
-    result_lines.append('local fenv = getfenv and getfenv() or _ENV')
-    result_lines.append('')
-
-    if accessed:
-        for name in accessed:
-            safe = re.sub(r'[^A-Za-z0-9_]', '_', name)
-            result_lines.append(f'local {safe} = fenv["{name}"]')
-        result_lines.append('')
-
-    # Identify specific named obfuscation keys (anti-tamper, function names etc.)
-    for s in decoded_strings:
-        if s and not s.startswith('__') and len(s) > 8 and re.match(r'^[A-Za-z0-9_]+$', s):
-            if s not in {'setmetatable','getmetatable','tostring','tonumber','loadstring',
-                         'string','table','math','print','error','pcall','unpack','select',
-                         'type','assert','pairs','ipairs','require','rawget','rawset',
-                         'floor','ceil','random','concat','insert','remove','byte','char',
-                         'sub','gsub','gmatch','find','format','upper','lower','reverse'}:
-                result_lines.append(f'-- Identified internal name: {repr(s)}')
-
-    result_lines.append('')
-    result_lines.append('-- Full substituted VM (arithmetic simplified, string table resolved):')
-    result_lines.append(code)
-
-    return '\n'.join(result_lines)
-
-
 def _wearedevs_string_substitution(source, decoded_strings):
-    alphabet = _extract_wearedevs_alphabet(source)
-    if not alphabet:
-        return None
     offset = _get_e_offset(source)
     if offset is None:
         return None
     result = source
-    # Replace E(N) calls with their decoded string values
     result = _replace_e_calls(result, decoded_strings, offset)
-    # Simplify arithmetic expressions (e.g. -233379+8186571 → 7953192)
     result = _simplify_arithmetic(result)
     result = _simplify_bare_arithmetic(result)
-    # Strip outer bootstrap and add readable spacing
     result = _strip_bootstrap(result)
     result = _add_spacing(result)
     if len(result) > 200:
@@ -699,13 +559,11 @@ class Unveiler:
         if wd['success']:
             decoded_strings = wd['decoded_strings']
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
-
             self._log("harness", True, "executing Lua harness with artifact capture")
             harness_result = self._run_lua_harness(source)
             if harness_result and _looks_like_real_code(harness_result):
                 self._log("harness_success", True, f"captured {len(harness_result)} chars of real code")
                 return harness_result, 'lua_harness', 'Harness captured original source'
-
             self._log("print_capture", True, "trying print/warn capture via lua5.1 subprocess")
             lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
             for t in lupa_trace:
@@ -714,7 +572,6 @@ class Unveiler:
                 self._log("print_capture_success", True, f"captured {len(lupa_out)} chars of output")
                 header = "-- [Deobfuscated via print/warn capture]\n"
                 return header + lupa_out, 'print_capture', 'Captured runtime output'
-
             subst_result = _wearedevs_string_substitution(source, decoded_strings)
             if subst_result:
                 self._log("string_substitution", True, f"produced {len(subst_result)} chars")
@@ -727,11 +584,9 @@ class Unveiler:
                 self._log("vm_lift", False, "VM lift produced no meaningful output, using substitution result")
                 header = "-- Deobfuscated via string-table substitution\n"
                 return header + subst_result, 'wearedevs_string_substitution', 'String-table substitution complete'
-
             vm_result = self._attempt_vm_lift(source, decoded_strings)
             if vm_result:
                 return vm_result, 'wearedevs_vm_lifted', 'VM lifted'
-
             lines = [f"-- [{i}] {s!r}" for i, s in enumerate(decoded_strings) if s]
             return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table (no harness capture)'
         if self._detect_prometheus_vm(source):
@@ -1014,16 +869,6 @@ local line = "WARN: " .. table.concat(parts, "\t")
 table.insert(print_lines, line)
 end
 end
-local state_log = {}
-if debug and debug.sethook then
-local last_line = nil
-debug.sethook(function(event, line)
-if event == "line" and line ~= last_line then
-last_line = line
-table.insert(state_log, line)
-end
-end, "l")
-end
 if not getfenv then
 getfenv = function(f)
 if f then
@@ -1069,9 +914,7 @@ bit32={bxor=bxor,band=band,bor=bor,lshift=function(v,n) return math.floor(v*(2^n
 bit32.arshift=bit32.rshift
 end
 _G.bit32=bit32; _G.bit=bit32
-if debug and debug.sethook then debug.sethook(function() error("instruction limit") end,"",500000) end
 local success, result = pcall(f)
-if debug and debug.sethook then debug.sethook() end
 collectgarbage("collect")
 pcall(function()
 for k,v in pairs(_G) do
@@ -1085,10 +928,6 @@ if bc and #bc > 50 then save("function_return", bc) end
 end
 end
 for _,cap in ipairs(captures) do real_print("CAP:"..cap.tag..":"..cap.data) end
-if #state_log > 0 then
-local joined = table.concat(state_log, ",")
-real_print("CAP:state_trace:" .. b64encode(joined))
-end
 if #print_lines > 0 then
 local joined = table.concat(print_lines, "\n")
 real_print("CAP:print_output:" .. b64encode(joined))
@@ -1112,7 +951,7 @@ end
                         [lua_bin, tmp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         preexec_fn=self._set_process_limits, start_new_session=True)
                     try:
-                        stdout, _ = proc.communicate(timeout=45)
+                        stdout, _ = proc.communicate(timeout=120)
                         stdout = stdout.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
                         try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -1140,8 +979,6 @@ end
                 if tag == 'print_output':
                     if decoded_data.strip():
                         candidates.append({'data': decoded_data, 'tag': tag})
-                    continue
-                if tag in ('state_trace',):
                     continue
                 if not _is_probably_text(decoded_data):
                     raw_check = decoded_data.encode('latin-1', errors='ignore')
