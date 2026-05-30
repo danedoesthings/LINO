@@ -8,6 +8,7 @@ import base64
 import datetime
 import asyncio
 import json
+import time
 from discord.ext import commands
 
 logging.basicConfig(
@@ -37,38 +38,84 @@ SUCCESS_METHODS = (
     'prometheus_vm', 'wearedevs_decode'
 )
 
-async def call_api(source_b64, sync=False):
-    async with httpx.AsyncClient(timeout=300) as client:
-        if sync:
-            response = await client.post(f'{API_URL}/deobf/sync', json={'source_b64': source_b64})
-            response.raise_for_status()
-            return response.json()
-        
-        response = await client.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
-        response.raise_for_status()
-        data = response.json()
-        
-        job_id = data.get('job_id', '').strip()
-        if not job_id:
-            return data
-        
-        for attempt in range(180):
-            await asyncio.sleep(1)
-            try:
-                poll = await client.get(f'{API_URL}/deobf/{job_id}')
-                if poll.status_code == 404:
-                    return {'error': f'Job {job_id} not found. The API may have restarted.'}
-                poll.raise_for_status()
-                poll_data = poll.json()
+class ExponentialBackoff:
+    def __init__(self, base=1, max_retries=5):
+        self.base = base
+        self.max_retries = max_retries
+        self._exp = 0
+    
+    def delay(self):
+        self._exp = min(self._exp + 1, self.max_retries)
+        return self.base * (2 ** (self._exp - 1))
+    
+    def reset(self):
+        self._exp = 0
+
+async def call_api_with_retry(source_b64, max_retries=5):
+    backoff = ExponentialBackoff(base=1, max_retries=max_retries)
+    
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
                 
-                if poll_data.get('status') != 'processing':
-                    return poll_data
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    return {'error': f'Job {job_id} expired or not found'}
-                raise
-        
-        return {'error': 'Deobfuscation timed out after 180 seconds'}
+                if response.status_code == 429:
+                    retry_after = response.headers.get('Retry-After', 5)
+                    await asyncio.sleep(float(retry_after))
+                    continue
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                job_id = data.get('job_id', '').strip()
+                if not job_id:
+                    return data
+                
+                for poll_attempt in range(180):
+                    await asyncio.sleep(1)
+                    try:
+                        poll = await client.get(f'{API_URL}/deobf/{job_id}')
+                        
+                        if poll.status_code == 404:
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(backoff.delay())
+                                break
+                            return {'error': f'Job {job_id} not found after {max_retries} attempts. The API may have restarted. Please resubmit.'}
+                        
+                        poll.raise_for_status()
+                        poll_data = poll.json()
+                        
+                        if poll_data.get('status') != 'processing':
+                            return poll_data
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 404 and attempt < max_retries - 1:
+                            await asyncio.sleep(backoff.delay())
+                            break
+                        raise
+                
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code >= 500 and attempt < max_retries - 1:
+                await asyncio.sleep(backoff.delay())
+                continue
+            return {'error': f'HTTP {e.response.status_code}: {e.response.text[:200]}'}
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(backoff.delay())
+                continue
+            return {'error': f'Connection error after {max_retries} attempts: {str(e)}'}
+        except Exception as e:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(backoff.delay())
+                continue
+            return {'error': str(e)}
+    
+    return {'error': f'Failed after {max_retries} retry attempts'}
+
+async def call_api_sync(source_b64):
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(f'{API_URL}/deobf/sync', json={'source_b64': source_b64})
+        response.raise_for_status()
+        return response.json()
 
 def _extract_inline_code(content):
     m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
@@ -99,27 +146,7 @@ async def run_deobf(raw_bytes, filename):
     
     try:
         source_b64 = base64.b64encode(raw_bytes).decode('ascii')
-        data = await call_api(source_b64, sync=False)
-    except httpx.TimeoutException:
-        return {
-            'embed': discord.Embed(
-                title='API Timeout',
-                description='Deobfuscation API did not respond within 300 seconds',
-                color=0xe74c3c
-            ),
-            'files': [],
-            'full_diag': None,
-        }
-    except httpx.ConnectError:
-        return {
-            'files': [],
-            'full_diag': None,
-            'embed': discord.Embed(
-                title='API Unreachable',
-                description=f'Cannot connect to {API_URL}. Is the API running?',
-                color=0xe74c3c
-            ),
-        }
+        data = await call_api_with_retry(source_b64, max_retries=3)
     except Exception as e:
         log.error(f"API call failed: {e}")
         return {
@@ -133,10 +160,7 @@ async def run_deobf(raw_bytes, filename):
         }
     
     if 'error' in data:
-        tb = data.get('traceback', '')
         desc = data['error'][:1500]
-        if tb:
-            desc += f'\n```\n{_truncate(tb, 800)}\n```'
         return {
             'embed': discord.Embed(
                 title='Deobfuscation Failed',
@@ -144,7 +168,7 @@ async def run_deobf(raw_bytes, filename):
                 color=0xe74c3c
             ),
             'files': [],
-            'full_diag': _sanitize_diag(data.get('diagnostic', '')),
+            'full_diag': None,
         }
     
     result = data.get('result', '')
@@ -265,13 +289,9 @@ async def prefix_ping(ctx):
 async def deobf_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f'Cooldown active. Try again in {error.retry_after:.0f}s')
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send('Missing required argument. Usage: `=deobf <file>` or paste code.')
-    elif isinstance(error, commands.CommandInvokeError):
-        log.error(f"Command invoke error: {error.original}")
-        await ctx.send(f'An internal error occurred. Check the logs.')
     else:
-        log.error(f"Unhandled command error: {error}")
+        log.error(f"Command error: {error}")
+        await ctx.send(f'An error occurred: {str(error)[:500]}')
 
 @tree.command(name='deobf', description='Deobfuscate a Lua file')
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
@@ -300,14 +320,6 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
         diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
         await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file)
-
-@slash_deobf.error
-async def slash_deobf_error(interaction: discord.Interaction, error):
-    log.error(f"Slash command error: {error}")
-    try:
-        await interaction.followup.send(f'An error occurred: {str(error)[:1000]}', ephemeral=True)
-    except Exception:
-        pass
 
 @bot.event
 async def on_ready():
