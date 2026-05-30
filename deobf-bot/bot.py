@@ -1,4 +1,4 @@
-import discord, io, os, re, logging, httpx, base64, datetime, asyncio
+import discord, io, os, re, logging, httpx, base64, datetime, asyncio, json
 from discord.ext import commands
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%H:%M:%S')
@@ -41,7 +41,7 @@ SUCCESS_METHODS = (
     'recursive_decode', 'lua_harness_readable',
     'recursive_base64', 'harness_diag',
     'prometheus_vm', 'prometheus_vm_raw',
-    'wearedevs_decode', 'wearedevs_vm_lifted',
+    'wearedevs_decode', 'wearedevs_vm_lifted', 'recursive_unveil',
 )
 
 async def call_api(source_b64):
@@ -153,6 +153,21 @@ async def run_deobf(raw_bytes, filename):
         stages = [t.get('stage', '?') for t in trace[:10]]
         stage_text = ' -> '.join(stages)
         em.add_field(name='Pipeline', value=_truncate(stage_text, 1000), inline=False)
+
+    if data.get('log_json'):
+        try:
+            log_info = json.loads(data['log_json'])
+            duration = log_info.get('duration', 0)
+            env = log_info.get('environment', {})
+            hook_stats = log_info.get('hook_stats', {})
+            em.add_field(name='Duration', value=f'{duration:.2f}s', inline=True)
+            em.add_field(name='Platform', value=env.get('platform','?'), inline=True)
+            em.add_field(name='Lua', value=env.get('lua_version','?'), inline=True)
+            if hook_stats:
+                stats_str = ', '.join(f'{k}: {v}' for k, v in hook_stats.items())
+                em.add_field(name='Hooks', value=_truncate(stats_str, 500), inline=False)
+        except:
+            pass
 
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
 
