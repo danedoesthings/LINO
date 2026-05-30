@@ -5,7 +5,6 @@ import subprocess
 import tempfile
 import base64
 import urllib.request
-import asyncio
 import struct
 import hashlib
 import json
@@ -36,7 +35,7 @@ except ImportError:
 from env_logger import JobLogger
 from var_renamer import VarRenamer
 from instruction_decoder import WeAreDevsVMLifter
-from state_machine_devirt import StateMachineLifter
+from state_machine_devirt import StateMachineLifter, StateMachineAnalyzer
 
 try:
     from lupa_executor import _lupa_decode_wearedevs, _lupa_run, HAS_LUPA
@@ -58,6 +57,15 @@ LUA_KEYWORDS = {
     'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
 }
 
+REJECT_SIGNATURES = [
+    "class DeobfEngine",
+    "_run_lua_harness",
+    "LuaASTWalker",
+    "def _beautify",
+    "import os, re",
+    "UNLUAC_JAR_URL",
+]
+
 @contextlib.contextmanager
 def _suppress_stderr():
     old_stderr = sys.stderr
@@ -76,6 +84,14 @@ def _shannon_entropy(data):
 
 def _is_lua_bytecode(raw):
     return raw[:4] == b'\x1bLua'
+
+def _is_self_capture(text):
+    if not text:
+        return False
+    for sig in REJECT_SIGNATURES:
+        if sig in text:
+            return True
+    return False
 
 def _is_probably_text(data):
     if not data:
@@ -536,6 +552,69 @@ def _add_spacing(code):
     code = re.sub(r'\n{3,}', '\n\n', code)
     return code
 
+def _extract_real_code_from_vm(source, decoded_strings):
+    lines = []
+    api_calls = []
+    fenv_vars = {}
+    if 'getfenv' in source or 'getfenv' in decoded_strings:
+        lines.append('local fenv = getfenv and getfenv() or _ENV')
+    pcall_idx = None
+    for i, s in enumerate(decoded_strings):
+        if s == 'pcall':
+            pcall_idx = i + 1
+            break
+    named_keys = []
+    for s in decoded_strings:
+        if s and re.match(r'^[A-Za-z_][A-Za-z0-9_]{3,}$', s) and s not in {
+            'error','table','string','math','print','pcall','tostring','tonumber',
+            'setmetatable','getmetatable','unpack','select','type','assert',
+            'floor','ceil','random','concat','insert','remove','byte','char',
+            'sub','gsub','gmatch','find','format','byte','char','upper','lower',
+        }:
+            named_keys.append(s)
+    string_refs = re.findall(r'R\["([A-Za-z_][A-Za-z0-9_]{3,})"\]', source)
+    for ref in sorted(set(string_refs)):
+        if ref not in fenv_vars:
+            fenv_vars[ref] = f'local {ref} = fenv["{ref}"]' if 'fenv' in '\n'.join(lines) else f'local {ref} = _ENV["{ref}"]'
+    return lines, fenv_vars, named_keys
+
+def _format_substituted_lua(code, decoded_strings):
+    inner_start = None
+    m = re.search(r'return\s*\(function\s*\(R,M,Y,r,m,N,h,d,o,l,q,I,w,g,S,z,Q,T,e,O,J\)', code)
+    if m:
+        inner_start = m.start()
+    if inner_start is not None:
+        code = code[inner_start:]
+    accessed = sorted(set(re.findall(r'R\["([^"]+)"\]', code)))
+    print_found = 'print' in decoded_strings
+    error_found = 'error' in decoded_strings
+    setmeta_found = 'setmetatable' in decoded_strings
+    result_lines = []
+    result_lines.append('-- Deobfuscated via WeAreDevs string substitution')
+    result_lines.append('-- Original script accesses the following globals:')
+    for a in accessed:
+        result_lines.append(f'--   {a}')
+    result_lines.append('')
+    result_lines.append('local fenv = getfenv and getfenv() or _ENV')
+    result_lines.append('')
+    if accessed:
+        for name in accessed:
+            safe = re.sub(r'[^A-Za-z0-9_]', '_', name)
+            result_lines.append(f'local {safe} = fenv["{name}"]')
+        result_lines.append('')
+    for s in decoded_strings:
+        if s and not s.startswith('__') and len(s) > 8 and re.match(r'^[A-Za-z0-9_]+$', s):
+            if s not in {'setmetatable','getmetatable','tostring','tonumber','loadstring',
+                         'string','table','math','print','error','pcall','unpack','select',
+                         'type','assert','pairs','ipairs','require','rawget','rawset',
+                         'floor','ceil','random','concat','insert','remove','byte','char',
+                         'sub','gsub','gmatch','find','format','upper','lower','reverse'}:
+                result_lines.append(f'-- Identified internal name: {repr(s)}')
+    result_lines.append('')
+    result_lines.append('-- Full substituted VM (arithmetic simplified, string table resolved):')
+    result_lines.append(code)
+    return '\n'.join(result_lines)
+
 def _wearedevs_string_substitution(source, decoded_strings):
     alphabet = _extract_wearedevs_alphabet(source)
     if not alphabet:
@@ -552,6 +631,50 @@ def _wearedevs_string_substitution(source, decoded_strings):
     if len(result) > 200:
         return result
     return None
+
+def _extract_vm_structure(source):
+    result = {
+        'dispatch_loop': None, 'instruction_table': None, 'register_table': None,
+        'constant_table': None, 'handlers': [], 'handler_map': {},
+        'ip_variable': 'B', 'dispatch_variable': 'l', 'handler_table_var': 'C',
+        'instruction_table_var': 'I', 'register_table_var': 'Q', 'constant_table_var': 'R',
+        'dispatch_map': {},
+    }
+    ip_match = re.search(r'while\s+(\w+)\s+do\s+local\s+(\w+)\s*=\s*\{[^}]*\}\s*\[\s*(\w+)\s*\[\s*(\w+)\s*\]\s*\]', source, re.DOTALL)
+    if ip_match:
+        result['dispatch_variable'] = ip_match.group(1)
+        result['handler_table_var'] = ip_match.group(2)
+        result['instruction_table'] = ip_match.group(3)
+        result['ip_variable'] = ip_match.group(4)
+    while_match = re.search(r'(while\s+(\w+)\s+do\s+.*?end\s*(?:\)\s*\)|$))', source, re.DOTALL)
+    if while_match:
+        result['dispatch_loop'] = while_match.group(1)
+    inst_match = re.search(r'local\s+(\w+)\s*=\s*\{([\d,\s]{50,})\}', source)
+    if inst_match:
+        result['instruction_table_var'] = inst_match.group(1)
+        nums = [int(n.strip()) for n in inst_match.group(2).split(',') if n.strip().lstrip('-').isdigit()]
+        result['instruction_table'] = nums
+    reg_match = re.search(r'local\s+(\w+)\s*=\s*\{(\s*(?:\d+\s*,\s*)*\d+\s*)\}', source)
+    if reg_match:
+        result['register_table_var'] = reg_match.group(1)
+    return result
+
+def _extract_instruction_stream(source, vm_structure):
+    instructions = []
+    inst_data = vm_structure.get('instruction_table', [])
+    if not inst_data or not isinstance(inst_data, list):
+        inst_match = re.search(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', source)
+        if inst_match:
+            inst_data = [int(n.strip()) for n in inst_match.group(1).split(',') if n.strip().lstrip('-').isdigit()]
+        else:
+            table_bodies = _find_all_table_bodies(source)
+            for body in table_bodies:
+                entries = _parse_table_entries(body)
+                nums = [e for e in entries if isinstance(e, int) and e >= 0]
+                if len(nums) >= 20:
+                    inst_data = nums
+                    break
+    return inst_data
 
 def _is_wearedevs_vm(source):
     score = 0
@@ -603,6 +726,14 @@ class Unveiler:
         if wd['success']:
             decoded_strings = wd['decoded_strings']
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
+            
+            analyzer = StateMachineAnalyzer(source, decoded_strings)
+            if analyzer.detect_state_machine():
+                self._log("state_machine_detected", True, "state machine VM pattern found")
+                state_lifted = analyzer.full_reconstruct()
+                if state_lifted and len(state_lifted) > 100:
+                    self._log("state_machine_reconstruct", True, f"reconstructed {len(state_lifted)} chars of original code")
+                    return state_lifted, 'state_machine_devirt', 'State machine fully reconstructed'
             
             self._log("harness", True, "executing Lua harness with artifact capture")
             harness_result = self._run_lua_harness(source)
@@ -832,7 +963,7 @@ class DeobfEngine:
     def _set_process_limits(self):
         try:
             resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (120, 125))
+            resource.setrlimit(resource.RLIMIT_CPU, (300, 305))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except Exception:
@@ -1045,7 +1176,7 @@ end
                         [lua_bin, tmp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         preexec_fn=self._set_process_limits, start_new_session=True)
                     try:
-                        stdout, _ = proc.communicate(timeout=120)
+                        stdout, _ = proc.communicate(timeout=300)
                         stdout = stdout.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
                         try:
@@ -1074,6 +1205,8 @@ end
                     decoded_data = base64.b64decode(data).decode('latin-1', errors='replace')
                 except Exception:
                     decoded_data = data
+                if _is_self_capture(decoded_data):
+                    continue
                 if tag == 'print_output':
                     if decoded_data.strip():
                         candidates.append({'data': decoded_data, 'tag': tag})
@@ -1110,7 +1243,7 @@ end
             tmp.write(bytecode)
             tmp_path = tmp.name
         try:
-            r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, timeout=10)
+            r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, timeout=30)
             stdout = r.stdout.decode('latin-1', errors='replace')
             return (stdout, None) if r.returncode == 0 and stdout.strip() else (None, "unluac failed")
         except subprocess.TimeoutExpired:
