@@ -28,34 +28,11 @@ CORS(app)
 
 engine = DeobfEngine()
 
-JOB_STORAGE_FILE = '/tmp/deobf_jobs.json'
-
-def _save_jobs():
-    try:
-        from engine import job_store
-        with open(JOB_STORAGE_FILE, 'w') as f:
-            json.dump({k: v for k, v in job_store.items() if v.get('status') != 'processing'}, f)
-    except Exception as e:
-        log.error(f"Failed to save jobs: {e}")
-
-def _load_jobs():
-    try:
-        if os.path.exists(JOB_STORAGE_FILE):
-            with open(JOB_STORAGE_FILE, 'r') as f:
-                loaded = json.load(f)
-                from engine import job_store
-                job_store.update(loaded)
-                log.info(f"Loaded {len(loaded)} persisted jobs")
-    except Exception as e:
-        log.error(f"Failed to load jobs: {e}")
-
-_load_jobs()
-
 @app.route('/health')
 def health():
     return jsonify({
         'ok': True,
-        'version': '9.0.0',
+        'version': '9.1.0',
         'capabilities': engine.get_capabilities(),
         'java_available': engine._java_available,
         'unluac_path': engine.unluac_path,
@@ -109,17 +86,12 @@ def deobf_status(job_id):
     job_id = re.sub(r'\s+', '', job_id)
     log.info(f"Status check for job: {job_id}")
     
-    from engine import job_store
-    
-    if job_id not in job_store:
-        _load_jobs()
-    
-    job = job_store.get(job_id)
+    job = get_job(job_id)
     
     if not job:
         return jsonify({
             'error': f'Job not found: {job_id}',
-            'tip': 'Jobs expire after completion. Resubmit your file.'
+            'tip': 'The API may have restarted. Please resubmit your file. Jobs expire after 24 hours.'
         }), 404
     
     if job.get('status') == 'processing':
@@ -211,7 +183,8 @@ def list_jobs():
 
 @app.route('/clear_jobs', methods=['POST'])
 def clear_jobs():
-    from engine import job_store, job_lock
+    from engine import job_store, job_lock, JOB_STORAGE_FILE
+    import os
     with job_lock:
         job_store.clear()
         if os.path.exists(JOB_STORAGE_FILE):
