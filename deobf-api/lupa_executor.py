@@ -46,28 +46,37 @@ end
 """
 
 
-def _capture_via_subprocess(source: str, timeout: int = 45) -> Tuple[Optional[str], str]:
-    src_fd, src_path = tempfile.mkstemp(suffix='.lua', text=True)
-    harness_fd, harness_path = tempfile.mkstemp(suffix='.lua', text=True)
+def _capture_via_subprocess(source, timeout=45):
+    src_path = None
+    harness_path = None
     try:
-        with os.fdopen(src_fd, 'w', encoding='utf-8') as f:
+        src_fd, src_path = tempfile.mkstemp(suffix='.lua', text=True)
+        harness_fd, harness_path = tempfile.mkstemp(suffix='.lua', text=True)
+        
+        with open(src_path, 'w', encoding='utf-8') as f:
             f.write(source)
-        with os.fdopen(harness_fd, 'w', encoding='utf-8') as f:
-            f.write(PRINT_CAPTURE_LUA.replace('_SRCFILE_', src_path))
+        os.close(src_fd)
+        
+        harness_code = PRINT_CAPTURE_LUA.replace('_SRCFILE_', src_path)
+        with open(harness_path, 'w', encoding='utf-8') as f:
+            f.write(harness_code)
+        os.close(harness_fd)
         
         for lua_bin in ['lua5.1', 'lua']:
             try:
                 proc = subprocess.Popen(
                     [lua_bin, harness_path],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    preexec_fn=lambda: None, start_new_session=True
+                    start_new_session=True
                 )
                 try:
                     stdout_b, _ = proc.communicate(timeout=timeout)
                     stdout = stdout_b.decode('latin-1', errors='replace')
                 except subprocess.TimeoutExpired:
-                    try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except: pass
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except:
+                        pass
                     proc.wait()
                     return None, "timeout"
                 
@@ -88,11 +97,14 @@ def _capture_via_subprocess(source: str, timeout: int = 45) -> Tuple[Optional[st
         return None, "no lua binary found"
     finally:
         for p in (src_path, harness_path):
-            try: os.unlink(p)
-            except: pass
+            if p:
+                try:
+                    os.unlink(p)
+                except:
+                    pass
 
 
-def _capture_via_lupa(source: str) -> Tuple[Optional[str], str]:
+def _capture_via_lupa(source):
     if not HAS_LUPA:
         return None, "lupa not installed"
     captured = []
@@ -107,7 +119,7 @@ def _capture_via_lupa(source: str) -> Tuple[Optional[str], str]:
     try:
         lua.execute("os.execute = function() error('blocked') end")
         lua.execute("io = nil")
-    except Exception:
+    except:
         pass
     
     try:
@@ -119,7 +131,7 @@ def _capture_via_lupa(source: str) -> Tuple[Optional[str], str]:
     return None, "no output"
 
 
-def _lupa_decode_wearedevs(source: str) -> Tuple[Optional[str], List[str]]:
+def _lupa_decode_wearedevs(source):
     trace = []
     out, msg = _capture_via_subprocess(source)
     trace.append(f"subprocess: {msg}")
