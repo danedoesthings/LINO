@@ -1,7 +1,20 @@
-import discord, io, os, re, logging, httpx, base64, datetime, asyncio, json
+import discord
+import io
+import os
+import re
+import logging
+import httpx
+import base64
+import datetime
+import asyncio
+import json
 from discord.ext import commands
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%H:%M:%S')
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s %(message)s',
+    datefmt='%H:%M:%S'
+)
 log = logging.getLogger('deobf-bot')
 
 TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
@@ -19,50 +32,43 @@ ALLOWED_EXTENSIONS = ('.lua', '.txt', '.luau')
 MAX_BYTES = 5 * 1024 * 1024
 
 SUCCESS_METHODS = (
-    'wearedevs_unluac', 'wearedevs_source', 'sandbox_unluac', 'sandbox_source',
-    'sandbox_capture', 'sandbox_strings', 'lune_unluac', 'lune_capture',
-    'deep_scan_unluac', 'rapid_decode_unluac', 'string_decode',
-    'string_decode_unluac', 'static_unluac', 'static_source',
-    'AdvancedWeAreDevsLifter_unluac', 'AdvancedWeAreDevsLifter_source',
-    'IronBrewLifter_unluac', 'IronBrewLifter_source',
-    'MoonSecLifter_unluac', 'PSULifter_unluac',
-    'XORStringDecoder_unluac', 'NumberArrayDecoder_unluac',
-    'StandardBase64Decoder_unluac', 'recursive_unluac',
-    'recursive_sandbox_capture', 'recursive_lune_capture',
-    'lifter_unluac', 'lifter_source',
-    'roblox_execution', 'semantic_full', 'semantic_raw',
-    'static_decode', 'static_decode_raw', 'static_decode_highscore',
-    'lua_harness', 'lua_harness_raw', 'lua_harness_raw_score',
-    'lua_harness_repaired', 'lua_harness_beautified', 'lua_harness_fallback',
-    'lua_harness_highscore', 'lua_harness_validated',
-    'raw_base64_decode', 'raw_base64_decode_raw',
-    'runtime_execution', 'sandbox_raw',
-    'roblox_raw', 'prometheus_execution',
-    'recursive_decode', 'lua_harness_readable',
-    'recursive_base64', 'harness_diag',
-    'prometheus_vm', 'prometheus_vm_raw',
-    'wearedevs_decode', 'wearedevs_vm_lifted', 'recursive_unveil',
-    'wearedevs_string_subst',
+    'lua_harness', 'print_capture', 'wearedevs_string_substitution',
+    'wearedevs_vm_lifted', 'state_machine_devirt', 'recursive_unveil',
+    'prometheus_vm', 'wearedevs_decode'
 )
 
-async def call_api(source_b64):
-    async with httpx.AsyncClient(timeout=300) as c:
-        r = await c.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
-        r.raise_for_status()
-        data = r.json()
-        job_id = re.sub(r'\s+', '', data.get('job_id', ''))
+async def call_api(source_b64, sync=False):
+    async with httpx.AsyncClient(timeout=300) as client:
+        if sync:
+            response = await client.post(f'{API_URL}/deobf/sync', json={'source_b64': source_b64})
+            response.raise_for_status()
+            return response.json()
+        
+        response = await client.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
+        response.raise_for_status()
+        data = response.json()
+        
+        job_id = data.get('job_id', '').strip()
         if not job_id:
             return data
-        for _ in range(120):
+        
+        for attempt in range(180):
             await asyncio.sleep(1)
-            poll = await c.get(f'{API_URL}/deobf/{job_id}')
-            poll.raise_for_status()
-            poll_data = poll.json()
-            if poll_data.get('status') != 'processing':
-                if 'error' in poll_data:
+            try:
+                poll = await client.get(f'{API_URL}/deobf/{job_id}')
+                if poll.status_code == 404:
+                    return {'error': f'Job {job_id} not found. The API may have restarted.'}
+                poll.raise_for_status()
+                poll_data = poll.json()
+                
+                if poll_data.get('status') != 'processing':
                     return poll_data
-                return poll_data
-        raise httpx.TimeoutException("Deobfuscation timed out after 120 seconds")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    return {'error': f'Job {job_id} expired or not found'}
+                raise
+        
+        return {'error': 'Deobfuscation timed out after 180 seconds'}
 
 def _extract_inline_code(content):
     m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
@@ -84,14 +90,23 @@ async def run_deobf(raw_bytes, filename):
         return {
             'files': [],
             'full_diag': None,
-            'embed': discord.Embed(title='Error', description=f'Input exceeds 5 MB limit ({len(raw_bytes)} bytes)', color=0xe74c3c),
+            'embed': discord.Embed(
+                title='Error',
+                description=f'Input exceeds 5 MB limit ({len(raw_bytes)} bytes)',
+                color=0xe74c3c
+            ),
         }
+    
     try:
         source_b64 = base64.b64encode(raw_bytes).decode('ascii')
-        data = await call_api(source_b64)
+        data = await call_api(source_b64, sync=False)
     except httpx.TimeoutException:
         return {
-            'embed': discord.Embed(title='API Timeout', description='Deobfuscation API did not respond within 120 seconds', color=0xe74c3c),
+            'embed': discord.Embed(
+                title='API Timeout',
+                description='Deobfuscation API did not respond within 300 seconds',
+                color=0xe74c3c
+            ),
             'files': [],
             'full_diag': None,
         }
@@ -99,89 +114,91 @@ async def run_deobf(raw_bytes, filename):
         return {
             'files': [],
             'full_diag': None,
-            'embed': discord.Embed(title='API Unreachable', description=f'Cannot connect to {API_URL}. Is the API running?', color=0xe74c3c),
+            'embed': discord.Embed(
+                title='API Unreachable',
+                description=f'Cannot connect to {API_URL}. Is the API running?',
+                color=0xe74c3c
+            ),
         }
     except Exception as e:
         log.error(f"API call failed: {e}")
         return {
             'files': [],
             'full_diag': None,
-            'embed': discord.Embed(title='API Error', description=_truncate(str(e), 1800), color=0xe74c3c),
+            'embed': discord.Embed(
+                title='API Error',
+                description=_truncate(str(e), 1800),
+                color=0xe74c3c
+            ),
         }
-
+    
     if 'error' in data:
         tb = data.get('traceback', '')
         desc = data['error'][:1500]
         if tb:
             desc += f'\n```\n{_truncate(tb, 800)}\n```'
         return {
-            'embed': discord.Embed(title='Deobfuscation Failed', description=desc, color=0xe74c3c),
+            'embed': discord.Embed(
+                title='Deobfuscation Failed',
+                description=desc,
+                color=0xe74c3c
+            ),
             'files': [],
             'full_diag': _sanitize_diag(data.get('diagnostic', '')),
         }
-
+    
     result = data.get('result', '')
     detected = data.get('detected', 'unknown')
     diagnostic = data.get('diagnostic', '')
     trace = data.get('trace', [])
-    warning = data.get('warning', '')
-
+    
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
     elif detected == 'bytecode':
         title, color = 'Bytecode Extracted', 0xe67e22
     else:
-        title, color = 'Deobfuscation Failed', 0xe74c3c
-
-    if warning:
-        title = f'{title} (with warnings)'
-        color = 0xf1c40f
-
-    em = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
+        title, color = 'Deobfuscation Partial', 0xf1c40f
+    
+    em = discord.Embed(
+        title=title,
+        color=color,
+        timestamp=datetime.datetime.utcnow()
+    )
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
     em.add_field(name='Input', value=filename, inline=True)
     em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
-
+    
     if diagnostic:
         clean = _sanitize_diag(diagnostic)
         short_diag = clean[:900] + ('...' if len(clean) > 900 else '')
         em.add_field(name='Diagnostic', value=f'```\n{short_diag}\n```', inline=False)
-
-    if warning:
-        em.add_field(name='Warning', value=f'```\n{warning[:900]}\n```', inline=False)
-
+    
     if trace:
         stages = [t.get('stage', '?') for t in trace[:10]]
         stage_text = ' -> '.join(stages)
         em.add_field(name='Pipeline', value=_truncate(stage_text, 1000), inline=False)
-
-    if data.get('log_json'):
-        try:
-            log_info = json.loads(data['log_json'])
-            duration = log_info.get('duration', 0)
-            env = log_info.get('environment', {})
-            hook_stats = log_info.get('hook_stats', {})
-            em.add_field(name='Duration', value=f'{duration:.2f}s', inline=True)
-            em.add_field(name='Platform', value=env.get('platform','?'), inline=True)
-            em.add_field(name='Lua', value=env.get('lua_version','?'), inline=True)
-            if hook_stats:
-                stats_str = ', '.join(f'{k}: {v}' for k, v in hook_stats.items())
-                em.add_field(name='Hooks', value=_truncate(stats_str, 500), inline=False)
-        except:
-            pass
-
+    
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
-
+    
     files = []
     if result and detected != 'bytecode':
-        files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'deobfuscated_{filename}'))
+        files.append(discord.File(
+            fp=io.BytesIO(result.encode('utf-8', errors='replace')),
+            filename=f'deobfuscated_{filename}'
+        ))
     elif detected == 'bytecode' and result:
         try:
             raw_out = base64.b64decode(result)
-            files.append(discord.File(fp=io.BytesIO(raw_out), filename=f'extracted_{filename}.luac'))
+            files.append(discord.File(
+                fp=io.BytesIO(raw_out),
+                filename=f'extracted_{filename}.luac'
+            ))
         except:
-            files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'extracted_{filename}.txt'))
-
+            files.append(discord.File(
+                fp=io.BytesIO(result.encode('utf-8', errors='replace')),
+                filename=f'extracted_{filename}.txt'
+            ))
+    
     full_diag = diagnostic if len(diagnostic) > 900 else None
     return {'embed': em, 'files': files, 'full_diag': full_diag}
 
@@ -191,6 +208,7 @@ last_results = {}
 @commands.cooldown(1, 30, commands.BucketType.user)
 async def prefix_deobf(ctx):
     raw, filename = None, 'input.lua'
+    
     if ctx.message.attachments:
         att = ctx.message.attachments[0]
         if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
@@ -207,18 +225,25 @@ async def prefix_deobf(ctx):
         if not code:
             return await ctx.send('Attach a `.lua` file or paste code after `=deobf`.')
         raw = code.encode('utf-8')
-
+    
     log.info(f"Deobf request from {ctx.author} ({filename}, {len(raw)} bytes)")
-    msg = await ctx.send(embed=discord.Embed(title='Deobfuscating...', description=f'Processing {filename} ({len(raw)} bytes)', color=0x3498db))
+    
+    msg = await ctx.send(embed=discord.Embed(
+        title='Deobfuscating...',
+        description=f'Processing {filename} ({len(raw)} bytes)',
+        color=0x3498db
+    ))
+    
     res = await run_deobf(raw, filename)
     last_results[ctx.channel.id] = res
-
+    
     try:
         await msg.delete()
     except (discord.NotFound, discord.Forbidden):
         pass
-
+    
     await ctx.send(embed=res['embed'], files=res.get('files', []))
+    
     if res.get('full_diag'):
         await ctx.send('Diagnostic was truncated. Use `=fulldiag` to get the full diagnostic as a file.')
 
@@ -227,9 +252,14 @@ async def prefix_fulldiag(ctx):
     res = last_results.get(ctx.channel.id)
     if not res or not res.get('full_diag'):
         return await ctx.send('No truncated diagnostic available. Run `=deobf` first.')
+    
     diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
     file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
     await ctx.send('Full diagnostic:', file=file)
+
+@bot.command(name='ping')
+async def prefix_ping(ctx):
+    await ctx.send(f'Pong! Latency: {round(bot.latency * 1000)}ms')
 
 @prefix_deobf.error
 async def deobf_error(ctx, error):
@@ -246,16 +276,26 @@ async def deobf_error(ctx, error):
 @tree.command(name='deobf', description='Deobfuscate a Lua file')
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
     if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
-        return await interaction.response.send_message('Please attach a `.lua`, `.luau`, or `.txt` file.', ephemeral=True)
+        return await interaction.response.send_message(
+            'Please attach a `.lua`, `.luau`, or `.txt` file.',
+            ephemeral=True
+        )
+    
     if file.size > MAX_BYTES:
-        return await interaction.response.send_message(f'File too large ({file.size} bytes, max {MAX_BYTES})', ephemeral=True)
-
+        return await interaction.response.send_message(
+            f'File too large ({file.size} bytes, max {MAX_BYTES})',
+            ephemeral=True
+        )
+    
     await interaction.response.defer(thinking=True)
+    
     raw = await file.read()
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
+    
     res = await run_deobf(raw, file.filename)
-
+    
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
+    
     if res.get('full_diag'):
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
         diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
@@ -273,7 +313,7 @@ async def slash_deobf_error(interaction: discord.Interaction, error):
 async def on_ready():
     try:
         await tree.sync()
-        log.info(f'Synced commands globally')
+        log.info('Synced commands globally')
     except Exception as e:
         log.error(f"Failed to sync commands: {e}")
     log.info(f'Ready: {bot.user} | API: {API_URL}')
