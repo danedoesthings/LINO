@@ -14,6 +14,13 @@ except ImportError:
 from env_logger import JobLogger
 from var_renamer import VarRenamer
 
+try:
+    from lupa_executor import _lupa_decode_wearedevs, _lupa_run, HAS_LUPA
+except ImportError:
+    HAS_LUPA = False
+    def _lupa_decode_wearedevs(source): return None, ["lupa_executor not found"]
+    def _lupa_run(source, timeout_seconds=30): return None, ["lupa_executor not found"]
+
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
@@ -1151,6 +1158,25 @@ class Unveiler:
         wd = _wearedevs_decode(source)
         if wd['success']:
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
+
+            # ── NEW: try lupa in-process execution first ──────────────────────
+            # The Lua Land Hub / wearedevs VM outputs its payload via print()
+            # rather than loadstring(), so the file-based harness misses it.
+            # lupa lets us hook print/warn directly and capture anything the
+            # deobfuscated VM produces at runtime.
+            if HAS_LUPA:
+                self._log("lupa_exec", True, "trying in-process lupa execution")
+                lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
+                for t in lupa_trace:
+                    self._log("lupa_trace", True, t)
+                if lupa_out and len(lupa_out.strip()) > 0:
+                    self._log("lupa_success", True,
+                              f"lupa captured {len(lupa_out)} chars of output")
+                    # Wrap in a nice comment header so it's clearly labelled
+                    header = "-- [Deobfuscated via lupa in-process execution]\n"
+                    return header + lupa_out, 'lupa_exec', 'lupa captured runtime output'
+            # ─────────────────────────────────────────────────────────────────
+
             self._log("harness", True, "executing Lua harness for VM")
             harness_result = self._run_lua_harness(source)
             if harness_result and _looks_like_real_code(harness_result):
@@ -1176,6 +1202,16 @@ class Unveiler:
             result = _prometheus_decompile(source)
             if result and len(result) >= 50:
                 return result, 'prometheus_vm', 'Prometheus VM decompiled'
+
+        # ── NEW: lupa fallback for non-wearedevs scripts too ─────────────────
+        if HAS_LUPA:
+            self._log("lupa_fallback", True, "trying lupa as fallback executor")
+            lupa_out, _ = _lupa_decode_wearedevs(source)
+            if lupa_out and len(lupa_out.strip()) > 0:
+                self._log("lupa_fallback_success", True,
+                          f"lupa fallback captured {len(lupa_out)} chars")
+                return lupa_out, 'lupa_exec', 'lupa captured runtime output (fallback)'
+        # ─────────────────────────────────────────────────────────────────────
 
         self._log("harness_fallback", True, "running harness as final attempt")
         harness_result = self._run_lua_harness(source)
@@ -1454,6 +1490,29 @@ end
 end
 os.execute = function() error("os.execute blocked") end
 io.popen = function() error("io.popen blocked") end
+local print_lines = {}
+local real_print = print
+_G.print = function(...)
+local parts = {}
+for i = 1, select('#', ...) do
+local v = select(i, ...)
+parts[i] = tostring(v)
+end
+local line = table.concat(parts, "\t")
+table.insert(print_lines, line)
+end
+local real_warn = warn
+if warn then
+_G.warn = function(...)
+local parts = {}
+for i = 1, select('#', ...) do
+local v = select(i, ...)
+parts[i] = tostring(v)
+end
+local line = "WARN: " .. table.concat(parts, "\t")
+table.insert(print_lines, line)
+end
+end
 local f, err = loadfile("_SRCFILE_")
 if not f then
 print("ERR:COMPILE:" .. tostring(err))
@@ -1482,10 +1541,14 @@ local bc = string.dump(result)
 if bc and #bc > 50 then save("function_return", bc) end
 end
 end
-for _,cap in ipairs(captures) do print("CAP:"..cap.tag..":"..cap.data) end
-if #captures==0 then
-if not success then print("ERR:RUNTIME:"..tostring(result))
-else print("ERR:NO_OUTPUT") end
+for _,cap in ipairs(captures) do real_print("CAP:"..cap.tag..":"..cap.data) end
+if #print_lines > 0 then
+local joined = table.concat(print_lines, "\n")
+real_print("CAP:print_output:" .. b64encode(joined))
+end
+if #captures==0 and #print_lines==0 then
+if not success then real_print("ERR:RUNTIME:"..tostring(result))
+else real_print("ERR:NO_OUTPUT") end
 end
 end
 '''
@@ -1527,6 +1590,11 @@ end
                 except Exception:
                     decoded_data = data
                 if _is_self_capture(decoded_data): continue
+                # print_output captures are plain text — accept them directly
+                if tag == 'print_output':
+                    if decoded_data.strip():
+                        candidates.append({'data': decoded_data, 'tag': tag})
+                    continue
                 if not _is_probably_text(decoded_data):
                     raw_check = decoded_data.encode('latin-1', errors='ignore')
                     if _is_lua_bytecode(raw_check) and self._java_available:
