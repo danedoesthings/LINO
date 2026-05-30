@@ -653,7 +653,7 @@ class Unveiler:
     def _attempt_vm_lift(self, source, decoded_strings):
         self._log("vm_lift_attempt", True, "trying static VM lift")
         if not _is_wearedevs_vm(source):
-            self._log("vm_lift_detect", False, "no VM dispatch pattern — string-obfuscation only")
+            self._log("vm_lift_detect", False, "no VM dispatch pattern")
             return None
         try:
             lifter = WeAreDevsVMLifter(decoded_strings)
@@ -829,7 +829,7 @@ end
 if load then
 _G.load = function(code, ...)
 hook_stats.load = (hook_stats.load or 0) + 1
-if not INSIDE_LOAD then INSIDE_LOAD = true; save("load", code); INSIDE_LOAD = false end
+if not INSIDE_LOAD then INSIDE_LOAD = true; save("load", tostring(code)); INSIDE_LOAD = false end
 return real_load(code, ...)
 end
 end
@@ -899,9 +899,41 @@ local line = "WARN: " .. table.concat(parts, "\t")
 table.insert(print_lines, line)
 end
 end
+if not getfenv then
+getfenv = function(f)
+if f then
+local i = 1
+while true do
+local name, value = debug.getupvalue(f, i)
+if not name then break end
+if name == "_ENV" then return value end
+i = i + 1
+end
+end
+return _G
+end
+end
+if not newproxy then
+newproxy = function(addmeta)
+local p = {}
+if addmeta then
+local mt = {}
+setmetatable(p, mt)
+end
+return p
+end
+end
+if not unpack then
+unpack = table.unpack or function(t, i, j)
+j = j or #t
+i = i or 1
+if i > j then return end
+return t[i], unpack(t, i + 1, j)
+end
+end
 local f, err = loadfile("_SRCFILE_")
 if not f then
-print("ERR:COMPILE:" .. tostring(err))
+real_print("ERR:COMPILE:" .. tostring(err))
 else
 local bit32 = bit32 or nil
 if not bit32 then
