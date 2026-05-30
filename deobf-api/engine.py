@@ -1,4 +1,26 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, asyncio, struct, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import base64
+import urllib.request
+import asyncio
+import struct
+import hashlib
+import json
+import sys
+import io
+import math
+import time
+import uuid
+import threading
+import contextlib
+import resource
+import signal
+import traceback
+import zlib
+import binascii
 from collections import OrderedDict, defaultdict, deque, namedtuple, Counter
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
@@ -14,6 +36,7 @@ except ImportError:
 from env_logger import JobLogger
 from var_renamer import VarRenamer
 from instruction_decoder import WeAreDevsVMLifter
+from state_machine_devirt import StateMachineLifter
 
 try:
     from lupa_executor import _lupa_decode_wearedevs, _lupa_run, HAS_LUPA
@@ -35,15 +58,6 @@ LUA_KEYWORDS = {
     'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
 }
 
-REJECT_SIGNATURES = [
-    "class DeobfEngine",
-    "_run_lua_harness",
-    "LuaASTWalker",
-    "def _beautify",
-    "import os, re",
-    "UNLUAC_JAR_URL",
-]
-
 @contextlib.contextmanager
 def _suppress_stderr():
     old_stderr = sys.stderr
@@ -62,14 +76,6 @@ def _shannon_entropy(data):
 
 def _is_lua_bytecode(raw):
     return raw[:4] == b'\x1bLua'
-
-def _is_self_capture(text):
-    if not text:
-        return False
-    for sig in REJECT_SIGNATURES:
-        if sig in text:
-            return True
-    return False
 
 def _is_probably_text(data):
     if not data:
@@ -166,7 +172,9 @@ def _extract_wearedevs_alphabet(source):
 
 def _custom_b64_decode(s, alpha):
     reverse = {c: i for i, c in enumerate(alpha)}
-    bits = 0; bit_count = 0; out = bytearray()
+    bits = 0
+    bit_count = 0
+    out = bytearray()
     for c in s.rstrip('='):
         if c not in reverse:
             continue
@@ -206,6 +214,64 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
+def _apply_shuffle_range_reversal(strings, ops):
+    result = list(strings)
+    for lo, hi in ops:
+        lo -= 1
+        hi -= 1
+        while lo < hi:
+            result[lo], result[hi] = result[hi], result[lo]
+            lo += 1
+            hi -= 1
+    return result
+
+def _decode_string_fully(s, alphabet):
+    if not s:
+        return ''
+    if _is_readable_identifier(s):
+        return s
+    if len(s) == 1:
+        return s
+    if _is_probably_text(s) and _shannon_entropy(s.encode('latin-1', errors='ignore')) < 6.5:
+        return s
+    try:
+        raw = _custom_b64_decode(s, alphabet)
+        if raw and len(raw) >= 1:
+            try:
+                text = raw.decode('utf-8')
+                if text and (re.match(r'^[\x20-\x7E]+$', text) or _is_readable_identifier(text) or _is_probably_text(text)):
+                    return text
+            except Exception:
+                pass
+            try:
+                text = raw.decode('latin-1', errors='replace')
+                if _is_probably_text(text):
+                    return text
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if re.match(r'^[A-Za-z0-9+/=]+$', s.strip()):
+        try:
+            padded = s.strip() + '=' * (-len(s.strip()) % 4)
+            raw = base64.b64decode(padded, validate=False)
+            if raw:
+                try:
+                    text = raw.decode('utf-8')
+                    if text and (re.match(r'^[\x20-\x7E]+$', text) or _is_probably_text(text)):
+                        return text
+                except Exception:
+                    pass
+                try:
+                    text = raw.decode('latin-1', errors='replace')
+                    if _is_probably_text(text):
+                        return text
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return s
+
 def _wearedevs_decode(source):
     diag = {}
     alphabet = _extract_wearedevs_alphabet(source)
@@ -219,56 +285,8 @@ def _wearedevs_decode(source):
     diag['string_count'] = len(encoded_strings)
     shuffle_ops = _extract_shuffle_ops(source)
     diag['shuffle_ops'] = len(shuffle_ops)
-    strings = list(encoded_strings)
-    for a, b in shuffle_ops:
-        ai, bi = a - 1, b - 1
-        if 0 <= ai < len(strings) and 0 <= bi < len(strings):
-            strings[ai], strings[bi] = strings[bi], strings[ai]
-    decoded = []
-    for s in strings:
-        if not s:
-            decoded.append('')
-            continue
-        if _is_readable_identifier(s):
-            decoded.append(s)
-            continue
-        if _is_probably_text(s):
-            decoded.append(s)
-            continue
-        try:
-            raw = _custom_b64_decode(s, alphabet)
-            if raw and len(raw) >= 2:
-                try:
-                    final = raw.decode('utf-8')
-                    if _is_probably_text(final):
-                        decoded.append(final)
-                        continue
-                except:
-                    pass
-                try:
-                    final = raw.decode('latin-1', errors='replace')
-                    if _is_probably_text(final):
-                        decoded.append(final)
-                        continue
-                except:
-                    pass
-                decoded.append(s)
-            else:
-                decoded.append(s)
-        except Exception:
-            if re.match(r'^[A-Za-z0-9+/=]+$', s):
-                try:
-                    raw = base64.b64decode(s + '=' * (-len(s) % 4), validate=True)
-                    try:
-                        final = raw.decode('utf-8')
-                        if _is_probably_text(final):
-                            decoded.append(final)
-                            continue
-                    except:
-                        pass
-                except:
-                    pass
-            decoded.append(s)
+    strings = _apply_shuffle_range_reversal(encoded_strings, shuffle_ops)
+    decoded = [_decode_string_fully(s, alphabet) for s in strings]
     diag['decoded_count'] = len(decoded)
     readable = [s for s in decoded if s and _is_probably_text(s)]
     lua_hits = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
@@ -289,80 +307,141 @@ def _wearedevs_decode(source):
     }
 
 def _find_balanced_end(content, open_brace_index):
-    depth = 0; quote = None; in_long_string = False; long_match = None
+    depth = 0
+    quote = None
+    in_long_string = False
+    long_match = None
     idx = open_brace_index
     while idx < len(content):
         char = content[idx]
         if in_long_string:
             if char == ']' and content[idx:idx+len(long_match)] == long_match:
-                in_long_string = False; idx += len(long_match); continue
-            idx += 1; continue
+                in_long_string = False
+                idx += len(long_match)
+                continue
+            idx += 1
+            continue
         if quote:
-            if char == '\\': idx += 2; continue
-            if char == quote: quote = None
-            idx += 1; continue
+            if char == '\\':
+                idx += 2
+                continue
+            if char == quote:
+                quote = None
+            idx += 1
+            continue
         if char == '[':
             m = re.match(r'\[=*\[', content[idx:])
             if m:
-                long_match = ']' + m.group(0)[2:-1] + ']'; in_long_string = True
-                idx += len(m.group(0)); continue
-        if char in ("'", '"'): quote = char
-        elif char == '{': depth += 1
+                long_match = ']' + m.group(0)[2:-1] + ']'
+                in_long_string = True
+                idx += len(m.group(0))
+                continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == '{':
+            depth += 1
         elif char == '}':
             depth -= 1
-            if depth == 0: return idx + 1
+            if depth == 0:
+                return idx + 1
         idx += 1
     return -1
 
 def _find_all_table_bodies(source):
-    bodies = []; idx = 0
+    bodies = []
+    idx = 0
     while idx < len(source):
         brace_pos = source.find('{', idx)
-        if brace_pos == -1: break
+        if brace_pos == -1:
+            break
         end = _find_balanced_end(source, brace_pos)
         if end != -1:
-            bodies.append(source[brace_pos:end]); idx = end
+            bodies.append(source[brace_pos:end])
+            idx = end
         else:
             idx = brace_pos + 1
     return bodies
 
 def _parse_table_entries(body):
-    inner = body[1:-1]; entries = []; depth = 0; current = ""
-    in_str = False; quote = None; in_long_str = False; long_match = None; i = 0
+    inner = body[1:-1]
+    entries = []
+    depth = 0
+    current = ""
+    in_str = False
+    quote = None
+    in_long_str = False
+    long_match = None
+    i = 0
     while i < len(inner):
         c = inner[i]
         if in_long_str:
             current += c
             if c == ']' and i + len(long_match) <= len(inner) and inner[i:i+len(long_match)] == long_match:
-                in_long_str = False; current += long_match[1:]; i += len(long_match); continue
-            i += 1; continue
+                in_long_str = False
+                current += long_match[1:]
+                i += len(long_match)
+                continue
+            i += 1
+            continue
         if in_str:
             current += c
             if c == '\\':
-                if i + 1 < len(inner): current += inner[i+1]; i += 2; continue
-            elif c == quote: in_str = False
-            i += 1; continue
+                if i + 1 < len(inner):
+                    current += inner[i+1]
+                    i += 2
+                continue
+            elif c == quote:
+                in_str = False
+            i += 1
+            continue
         if c == '[':
             m = re.match(r'\[=*\[', inner[i:])
             if m:
-                long_match = ']' + m.group(0)[2:-1] + ']'; in_long_str = True
-                current += m.group(0); i += len(m.group(0)); continue
-        if c in ('"', "'"): in_str = True; quote = c; current += c; i += 1; continue
-        if c == '{': depth += 1; current += c; i += 1; continue
-        if c == '}': depth -= 1; current += c; i += 1; continue
+                long_match = ']' + m.group(0)[2:-1] + ']'
+                in_long_str = True
+                current += m.group(0)
+                i += len(m.group(0))
+                continue
+        if c in ('"', "'"):
+            in_str = True
+            quote = c
+            current += c
+            i += 1
+            continue
+        if c == '{':
+            depth += 1
+            current += c
+            i += 1
+            continue
+        if c == '}':
+            depth -= 1
+            current += c
+            i += 1
+            continue
         if c in (',', ';') and depth == 0:
-            entries.append(current.strip()); current = ""; i += 1; continue
-        current += c; i += 1
-    if current.strip(): entries.append(current.strip())
+            entries.append(current.strip())
+            current = ""
+            i += 1
+            continue
+        current += c
+        i += 1
+    if current.strip():
+        entries.append(current.strip())
     parsed = []
     for e in entries:
-        if not e: continue
+        if not e:
+            continue
         e = e.strip()
-        if e.lstrip('-').isdigit(): parsed.append(int(e))
-        elif e.replace('.', '', 1).lstrip('-').isdigit(): parsed.append(float(e))
-        elif (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")): parsed.append(e[1:-1])
-        elif e.startswith('[[') and e.endswith(']]'): parsed.append(e[2:-2])
-        else: parsed.append(e)
+        if e.lstrip('-').isdigit():
+            parsed.append(int(e))
+        elif e.replace('.', '', 1).lstrip('-').isdigit():
+            parsed.append(float(e))
+        elif (e.startswith('"') and e.endswith('"')) or (e.startswith("'") and e.endswith("'")):
+            parsed.append(e[1:-1])
+        elif e.startswith('[[') and e.endswith(']]'):
+            parsed.append(e[2:-2])
+        else:
+            parsed.append(e)
     return parsed
 
 @dataclass
@@ -458,6 +537,9 @@ def _add_spacing(code):
     return code
 
 def _wearedevs_string_substitution(source, decoded_strings):
+    alphabet = _extract_wearedevs_alphabet(source)
+    if not alphabet:
+        return None
     offset = _get_e_offset(source)
     if offset is None:
         return None
@@ -470,50 +552,6 @@ def _wearedevs_string_substitution(source, decoded_strings):
     if len(result) > 200:
         return result
     return None
-
-def _extract_vm_structure(source):
-    result = {
-        'dispatch_loop': None, 'instruction_table': None, 'register_table': None,
-        'constant_table': None, 'handlers': [], 'handler_map': {},
-        'ip_variable': 'B', 'dispatch_variable': 'l', 'handler_table_var': 'C',
-        'instruction_table_var': 'I', 'register_table_var': 'Q', 'constant_table_var': 'R',
-        'dispatch_map': {},
-    }
-    ip_match = re.search(r'while\s+(\w+)\s+do\s+local\s+(\w+)\s*=\s*\{[^}]*\}\s*\[\s*(\w+)\s*\[\s*(\w+)\s*\]\s*\]', source, re.DOTALL)
-    if ip_match:
-        result['dispatch_variable'] = ip_match.group(1)
-        result['handler_table_var'] = ip_match.group(2)
-        result['instruction_table'] = ip_match.group(3)
-        result['ip_variable'] = ip_match.group(4)
-    while_match = re.search(r'(while\s+(\w+)\s+do\s+.*?end\s*(?:\)\s*\)|$))', source, re.DOTALL)
-    if while_match:
-        result['dispatch_loop'] = while_match.group(1)
-    inst_match = re.search(r'local\s+(\w+)\s*=\s*\{([\d,\s]{50,})\}', source)
-    if inst_match:
-        result['instruction_table_var'] = inst_match.group(1)
-        nums = [int(n.strip()) for n in inst_match.group(2).split(',') if n.strip().lstrip('-').isdigit()]
-        result['instruction_table'] = nums
-    reg_match = re.search(r'local\s+(\w+)\s*=\s*\{(\s*(?:\d+\s*,\s*)*\d+\s*)\}', source)
-    if reg_match:
-        result['register_table_var'] = reg_match.group(1)
-    return result
-
-def _extract_instruction_stream(source, vm_structure):
-    instructions = []
-    inst_data = vm_structure.get('instruction_table', [])
-    if not inst_data or not isinstance(inst_data, list):
-        inst_match = re.search(r'local\s+\w+\s*=\s*\{([\d,\s]+)\}', source)
-        if inst_match:
-            inst_data = [int(n.strip()) for n in inst_match.group(1).split(',') if n.strip().lstrip('-').isdigit()]
-        else:
-            table_bodies = _find_all_table_bodies(source)
-            for body in table_bodies:
-                entries = _parse_table_entries(body)
-                nums = [e for e in entries if isinstance(e, int) and e >= 0]
-                if len(nums) >= 20:
-                    inst_data = nums
-                    break
-    return inst_data
 
 def _is_wearedevs_vm(source):
     score = 0
@@ -531,6 +569,9 @@ def _is_wearedevs_vm(source):
         score += 1
     return score >= 3
 
+def _is_state_machine_vm(source):
+    return bool(re.search(r'while\s+\w+\s+do\s+if\s+\w+\s*<\s*[\d]+\s+then', source)) and not re.search(r'local\s+\w+\s*=\s*\{[\d,\s]{50,}\}', source)
+
 def _looks_like_real_code(text):
     if not text or len(text) < 50:
         return False
@@ -547,23 +588,28 @@ class Unveiler:
         self._run_unluac = run_unluac_fn
         self.trace = []
         self.max_layers = 10
+    
     def _log(self, stage, success, message):
         self.trace.append({'stage': stage, 'success': success, 'message': message, 'timestamp': time.time()})
+    
     def unveil(self, source):
         self.trace = []
         peeled = self._peel_outer_base64(source)
         if peeled != source:
             self._log("outer_b64_peel", True, f"decoded outer base64 ({len(peeled)} chars)")
             source = peeled
+        
         wd = _wearedevs_decode(source)
         if wd['success']:
             decoded_strings = wd['decoded_strings']
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
+            
             self._log("harness", True, "executing Lua harness with artifact capture")
             harness_result = self._run_lua_harness(source)
             if harness_result and _looks_like_real_code(harness_result):
                 self._log("harness_success", True, f"captured {len(harness_result)} chars of real code")
                 return harness_result, 'lua_harness', 'Harness captured original source'
+            
             self._log("print_capture", True, "trying print/warn capture via lua5.1 subprocess")
             lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
             for t in lupa_trace:
@@ -572,6 +618,7 @@ class Unveiler:
                 self._log("print_capture_success", True, f"captured {len(lupa_out)} chars of output")
                 header = "-- [Deobfuscated via print/warn capture]\n"
                 return header + lupa_out, 'print_capture', 'Captured runtime output'
+            
             subst_result = _wearedevs_string_substitution(source, decoded_strings)
             if subst_result:
                 self._log("string_substitution", True, f"produced {len(subst_result)} chars")
@@ -581,32 +628,49 @@ class Unveiler:
                     self._log("vm_lift", True, f"VM lifted: {len(lifted)} chars")
                     header = "-- Deobfuscated via VM lifting\n"
                     return header + lifted, 'wearedevs_vm_lifted', 'VM devirtualized'
+                self._log("vm_lift", False, "VM lift produced no meaningful output, trying state machine lifter")
+                
+                state_lifter = StateMachineLifter(subst_result, decoded_strings)
+                state_lifted = state_lifter.lift()
+                if state_lifted and _looks_like_real_code(state_lifted):
+                    self._log("state_machine_lift", True, f"State machine lifted: {len(state_lifted)} chars")
+                    header = "-- Deobfuscated via state machine devirtualization\n"
+                    return header + state_lifted, 'state_machine_devirt', 'State machine VM devirtualized'
+                
                 self._log("vm_lift", False, "VM lift produced no meaningful output, using substitution result")
                 header = "-- Deobfuscated via string-table substitution\n"
                 return header + subst_result, 'wearedevs_string_substitution', 'String-table substitution complete'
+            
             vm_result = self._attempt_vm_lift(source, decoded_strings)
             if vm_result:
                 return vm_result, 'wearedevs_vm_lifted', 'VM lifted'
+            
             lines = [f"-- [{i}] {s!r}" for i, s in enumerate(decoded_strings) if s]
             return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table (no harness capture)'
+        
         if self._detect_prometheus_vm(source):
             self._log("prometheus_detect", True, "Prometheus VM detected")
             result = self._prometheus_decompile(source)
             if result and len(result) >= 50:
                 return result, 'prometheus_vm', 'Prometheus VM decompiled'
+        
         self._log("print_capture_fallback", True, "trying print/warn capture as fallback")
         lupa_out, _ = _lupa_decode_wearedevs(source)
         if lupa_out and len(lupa_out.strip()) > 0:
             self._log("print_capture_fallback_success", True, f"captured {len(lupa_out)} chars")
             return lupa_out, 'print_capture', 'Captured runtime output (fallback)'
+        
         self._log("harness_fallback", True, "running harness as final attempt")
         harness_result = self._run_lua_harness(source)
         if harness_result:
             return harness_result, 'lua_harness', 'Harness captured output'
+        
         recursive_result = self._recursive_unveil(source)
         if recursive_result and recursive_result != source:
             return recursive_result, 'recursive_unveil', 'Multi-layer unwrapping'
+        
         return '', 'unable', 'All strategies failed'
+    
     def _peel_outer_base64(self, text):
         cleaned = re.sub(r'\s+', '', text.strip())
         if re.match(r'^[A-Za-z0-9+/=]+$', cleaned):
@@ -620,6 +684,7 @@ class Unveiler:
                     except:
                         pass
         return text
+    
     def _attempt_vm_lift(self, source, decoded_strings):
         self._log("vm_lift_attempt", True, "trying static VM lift")
         if not _is_wearedevs_vm(source):
@@ -631,6 +696,7 @@ class Unveiler:
         except Exception:
             pass
         return None
+    
     def _recursive_unveil(self, source, depth=0):
         if depth > self.max_layers:
             return None
@@ -686,16 +752,20 @@ class Unveiler:
         except:
             pass
         return None
+    
     def _detect_prometheus_vm(self, source):
         score = sum(1 for p in [r'pc\s*=', r'opcode', r'instructions?\[', r'while\s+true\s+do', r'bit32', r'band\('] if re.search(p, source))
         return score >= 3
+    
     def _prometheus_decompile(self, source):
         bodies = _find_all_table_bodies(source)
         instructions = []
         for body in bodies:
             entries = _parse_table_entries(body)
             nums = [e for e in entries if isinstance(e, int)]
-            if len(nums) >= 10: instructions = nums; break
+            if len(nums) >= 10:
+                instructions = nums
+                break
         if not instructions:
             m = re.search(r'\{([\d,\s]{50,})\}', source)
             if m:
@@ -704,19 +774,26 @@ class Unveiler:
         cm = re.search(r'local\s+\w+\s*=\s*\{([^}]+)\}', source)
         if cm:
             constants = [e for e in _parse_table_entries('{' + cm.group(1) + '}') if isinstance(e, str)]
-        if not instructions: return None
-        lines = []; ip = 0
+        if not instructions:
+            return None
+        lines = []
+        ip = 0
         while ip < len(instructions):
-            op = instructions[ip]; ip += 1
+            op = instructions[ip]
+            ip += 1
             if op == 0:
-                idx = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                idx = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
                 lines.append(f"loadk {json.dumps(constants[idx-1] if 1 <= idx <= len(constants) else str(idx))}")
             elif op == 1:
-                a = instructions[ip] if ip < len(instructions) else 0; ip += 1
-                b = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                a = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
+                b = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
                 lines.append(f"{constants[a-1] if 1<=a<=len(constants) else f'var{a}'} = {constants[b-1] if 1<=b<=len(constants) else f'var{b}'}")
             elif op == 2:
-                a = instructions[ip] if ip < len(instructions) else 0; ip += 1
+                a = instructions[ip] if ip < len(instructions) else 0
+                ip += 1
                 lines.append(f"call {constants[a-1] if 1<=a<=len(constants) else f'var{a}'}")
             else:
                 lines.append(f"-- op {op}")
@@ -735,23 +812,32 @@ class DeobfEngine:
         )
         self.var_renamer = VarRenamer()
         self._hook_stats = defaultdict(int)
+    
     def get_capabilities(self):
         return {
-            'lua_harness': True, 'prometheus_vm': True, 'wearedevs_decode': True,
+            'lua_harness': True,
+            'prometheus_vm': True,
+            'wearedevs_decode': True,
             'wearedevs_vm_lift': True,
+            'state_machine_devirt': True,
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
-            'luaparser': HAS_LUAPARSER, 'var_renamer': True, 'hooking': True,
+            'luaparser': HAS_LUAPARSER,
+            'var_renamer': True,
+            'hooking': True,
         }
+    
     def _trace(self, stage, success, message):
         self.trace.append(DiagnosticEvent(stage=stage, success=success, message=message))
+    
     def _set_process_limits(self):
         try:
-            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-            resource.setrlimit(resource.RLIMIT_CPU, (40, 45))
+            resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (120, 125))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         except Exception:
             pass
+    
     def _run_lua_harness(self, source):
         harness = r'''
 local captures = {}
@@ -869,6 +955,7 @@ local line = "WARN: " .. table.concat(parts, "\t")
 table.insert(print_lines, line)
 end
 end
+local state_log = {}
 if not getfenv then
 getfenv = function(f)
 if f then
@@ -913,7 +1000,8 @@ local function bor(a,b) local r,m=0,1; while a>0 or b>0 do if a%2+b%2>0 then r=r
 bit32={bxor=bxor,band=band,bor=bor,lshift=function(v,n) return math.floor(v*(2^n))%4294967296 end,rshift=function(v,n) return math.floor(v/(2^n)) end}
 bit32.arshift=bit32.rshift
 end
-_G.bit32=bit32; _G.bit=bit32
+_G.bit32=bit32
+_G.bit=bit32
 local success, result = pcall(f)
 collectgarbage("collect")
 pcall(function()
@@ -928,6 +1016,10 @@ if bc and #bc > 50 then save("function_return", bc) end
 end
 end
 for _,cap in ipairs(captures) do real_print("CAP:"..cap.tag..":"..cap.data) end
+if #state_log > 0 then
+local joined = table.concat(state_log, ",")
+real_print("CAP:state_trace:" .. b64encode(joined))
+end
 if #print_lines > 0 then
 local joined = table.concat(print_lines, "\n")
 real_print("CAP:print_output:" .. b64encode(joined))
@@ -939,10 +1031,12 @@ end
 end
 '''
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as src_tmp:
-            src_tmp.write(source); src_path = src_tmp.name
+            src_tmp.write(source)
+            src_path = src_tmp.name
         harness = harness.replace('_SRCFILE_', src_path)
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as tmp:
-            tmp.write(harness); tmp_path = tmp.name
+            tmp.write(harness)
+            tmp_path = tmp.name
         captures = []
         try:
             for lua_bin in ['lua5.1', 'lua']:
@@ -954,19 +1048,24 @@ end
                         stdout, _ = proc.communicate(timeout=120)
                         stdout = stdout.decode('latin-1', errors='replace')
                     except subprocess.TimeoutExpired:
-                        try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                        except: pass
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except:
+                            pass
                     proc.wait()
                     for line in stdout.splitlines():
                         if line.startswith('CAP:'):
                             captures.append(line[4:])
-                    if captures: break
+                    if captures:
+                        break
                 except FileNotFoundError:
                     continue
         finally:
             for p in (tmp_path, src_path):
-                try: os.unlink(p)
-                except OSError: pass
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
         if captures:
             candidates = []
             for cap in captures:
@@ -975,57 +1074,75 @@ end
                     decoded_data = base64.b64decode(data).decode('latin-1', errors='replace')
                 except Exception:
                     decoded_data = data
-                if _is_self_capture(decoded_data): continue
                 if tag == 'print_output':
                     if decoded_data.strip():
                         candidates.append({'data': decoded_data, 'tag': tag})
+                    continue
+                if tag in ('state_trace',):
                     continue
                 if not _is_probably_text(decoded_data):
                     raw_check = decoded_data.encode('latin-1', errors='ignore')
                     if _is_lua_bytecode(raw_check) and self._java_available:
                         try:
                             dec, _ = self._run_unluac(raw_check)
-                            if dec: decoded_data = dec
-                        except: pass
+                            if dec:
+                                decoded_data = dec
+                        except:
+                            pass
                     else:
-                        if sum(1 for kw in LUA_KEYWORDS if kw in decoded_data) < 3: continue
+                        if sum(1 for kw in LUA_KEYWORDS if kw in decoded_data) < 3:
+                            continue
                 candidates.append({'data': decoded_data, 'tag': tag})
             if candidates:
                 return max(candidates, key=lambda x: len(x['data']))['data']
         return None
+    
     def _run_unluac(self, bytecode):
-        if not self._java_available: return None, "no java"
-        if not os.path.isfile(self.unluac_path): self._ensure_unluac_jar()
-        if not os.path.isfile(self.unluac_path): return None, "no unluac.jar"
-        if bytecode[:4] != b'\x1bLua': return None, "not lua bytecode"
+        if not self._java_available:
+            return None, "no java"
+        if not os.path.isfile(self.unluac_path):
+            self._ensure_unluac_jar()
+        if not os.path.isfile(self.unluac_path):
+            return None, "no unluac.jar"
+        if bytecode[:4] != b'\x1bLua':
+            return None, "not lua bytecode"
         with tempfile.NamedTemporaryFile(suffix='.luac', delete=False) as tmp:
-            tmp.write(bytecode); tmp_path = tmp.name
+            tmp.write(bytecode)
+            tmp_path = tmp.name
         try:
             r = subprocess.run(['java', '-jar', self.unluac_path, '--rawstring', tmp_path], capture_output=True, timeout=10)
             stdout = r.stdout.decode('latin-1', errors='replace')
             return (stdout, None) if r.returncode == 0 and stdout.strip() else (None, "unluac failed")
-        except subprocess.TimeoutExpired: return None, "timeout"
-        except Exception as e: return None, str(e)
+        except subprocess.TimeoutExpired:
+            return None, "timeout"
+        except Exception as e:
+            return None, str(e)
         finally:
-            try: os.unlink(tmp_path)
-            except: pass
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+    
     def _ensure_unluac_jar(self):
         try:
             os.makedirs(os.path.dirname(self.unluac_path), exist_ok=True)
             urllib.request.urlretrieve(UNLUAC_JAR_URL, self.unluac_path)
-        except: pass
+        except:
+            pass
+    
     def _apply_var_renamer(self, code):
         try:
             return self.var_renamer.rename(code)
         except:
             return code
+    
     def process(self, source, logger=None):
         self.trace = []
         self._hook_stats.clear()
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('lua_harness', 'wearedevs_vm_lifted', 'recursive_unveil', 'wearedevs_string_substitution', 'print_capture'):
+        if result and method in ('lua_harness', 'wearedevs_vm_lifted', 'state_machine_devirt', 'recursive_unveil', 'wearedevs_string_substitution', 'print_capture'):
             self._trace("var_rename", True, "applying variable renamer")
             result = self._apply_var_renamer(result)
             self._hook_stats['var_rename_applied'] = 1
@@ -1047,8 +1164,11 @@ def _run_job(job_id, source):
         result, method, diagnostic, trace = engine.process(source, logger)
         with job_lock:
             job_store[job_id] = {
-                'status': 'complete', 'result': result, 'detected': method,
-                'diagnostic': diagnostic, 'trace': trace,
+                'status': 'complete',
+                'result': result,
+                'detected': method,
+                'diagnostic': diagnostic,
+                'trace': trace,
                 'result_length': len(result) if result else 0,
                 'log_json': logger.to_json()
             }
@@ -1057,7 +1177,8 @@ def _run_job(job_id, source):
         logger.finish()
         with job_lock:
             job_store[job_id] = {
-                'status': 'error', 'error': str(e),
+                'status': 'error',
+                'error': str(e),
                 'traceback': traceback.format_exc()[:4000],
                 'log_json': logger.to_json()
             }
