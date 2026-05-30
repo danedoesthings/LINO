@@ -1159,23 +1159,15 @@ class Unveiler:
         if wd['success']:
             self._log("wearedevs_decode", True, f"decoded {wd['diagnostics'].get('decoded_count',0)} strings")
 
-            # ── NEW: try lupa in-process execution first ──────────────────────
-            # The Lua Land Hub / wearedevs VM outputs its payload via print()
-            # rather than loadstring(), so the file-based harness misses it.
-            # lupa lets us hook print/warn directly and capture anything the
-            # deobfuscated VM produces at runtime.
-            if HAS_LUPA:
-                self._log("lupa_exec", True, "trying in-process lupa execution")
-                lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
-                for t in lupa_trace:
-                    self._log("lupa_trace", True, t)
-                if lupa_out and len(lupa_out.strip()) > 0:
-                    self._log("lupa_success", True,
-                              f"lupa captured {len(lupa_out)} chars of output")
-                    # Wrap in a nice comment header so it's clearly labelled
-                    header = "-- [Deobfuscated via lupa in-process execution]\n"
-                    return header + lupa_out, 'lupa_exec', 'lupa captured runtime output'
-            # ─────────────────────────────────────────────────────────────────
+            self._log("print_capture", True, "trying print/warn capture via lua5.1 subprocess")
+            lupa_out, lupa_trace = _lupa_decode_wearedevs(source)
+            for t in lupa_trace:
+                self._log("print_capture_trace", True, t)
+            if lupa_out and len(lupa_out.strip()) > 0:
+                self._log("print_capture_success", True,
+                          f"captured {len(lupa_out)} chars of output")
+                header = "-- [Deobfuscated via print/warn capture]\n"
+                return header + lupa_out, 'print_capture', 'Captured runtime output'
 
             self._log("harness", True, "executing Lua harness for VM")
             harness_result = self._run_lua_harness(source)
@@ -1203,15 +1195,12 @@ class Unveiler:
             if result and len(result) >= 50:
                 return result, 'prometheus_vm', 'Prometheus VM decompiled'
 
-        # ── NEW: lupa fallback for non-wearedevs scripts too ─────────────────
-        if HAS_LUPA:
-            self._log("lupa_fallback", True, "trying lupa as fallback executor")
-            lupa_out, _ = _lupa_decode_wearedevs(source)
-            if lupa_out and len(lupa_out.strip()) > 0:
-                self._log("lupa_fallback_success", True,
-                          f"lupa fallback captured {len(lupa_out)} chars")
-                return lupa_out, 'lupa_exec', 'lupa captured runtime output (fallback)'
-        # ─────────────────────────────────────────────────────────────────────
+        self._log("print_capture_fallback", True, "trying print/warn capture as fallback")
+        lupa_out, _ = _lupa_decode_wearedevs(source)
+        if lupa_out and len(lupa_out.strip()) > 0:
+            self._log("print_capture_fallback_success", True,
+                      f"captured {len(lupa_out)} chars")
+            return lupa_out, 'print_capture', 'Captured runtime output (fallback)'
 
         self._log("harness_fallback", True, "running harness as final attempt")
         harness_result = self._run_lua_harness(source)
@@ -1590,7 +1579,6 @@ end
                 except Exception:
                     decoded_data = data
                 if _is_self_capture(decoded_data): continue
-                # print_output captures are plain text — accept them directly
                 if tag == 'print_output':
                     if decoded_data.strip():
                         candidates.append({'data': decoded_data, 'tag': tag})
