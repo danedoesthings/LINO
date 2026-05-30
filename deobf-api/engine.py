@@ -844,7 +844,7 @@ local real_concat = table.concat
 table.concat = function(t, sep, i, j)
 hook_stats.concat = (hook_stats.concat or 0) + 1
 local out = real_concat(t, sep, i, j)
-if type(out) == "string" and #out > 80 then save("concat", out) end
+if type(out) == "string" and #out > 20 then save("concat", out) end
 return out
 end
 local real_insert_hook = table.insert
@@ -898,6 +898,16 @@ end
 local line = "WARN: " .. table.concat(parts, "\t")
 table.insert(print_lines, line)
 end
+end
+local state_log = {}
+if debug and debug.sethook then
+local last_line = nil
+debug.sethook(function(event, line)
+if event == "line" and line ~= last_line then
+last_line = line
+table.insert(state_log, line)
+end
+end, "l")
 end
 if not getfenv then
 getfenv = function(f)
@@ -960,6 +970,10 @@ if bc and #bc > 50 then save("function_return", bc) end
 end
 end
 for _,cap in ipairs(captures) do real_print("CAP:"..cap.tag..":"..cap.data) end
+if #state_log > 0 then
+local joined = table.concat(state_log, ",")
+real_print("CAP:state_trace:" .. b64encode(joined))
+end
 if #print_lines > 0 then
 local joined = table.concat(print_lines, "\n")
 real_print("CAP:print_output:" .. b64encode(joined))
@@ -1011,6 +1025,8 @@ end
                 if tag == 'print_output':
                     if decoded_data.strip():
                         candidates.append({'data': decoded_data, 'tag': tag})
+                    continue
+                if tag in ('state_trace',):
                     continue
                 if not _is_probably_text(decoded_data):
                     raw_check = decoded_data.encode('latin-1', errors='ignore')
