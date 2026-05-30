@@ -206,50 +206,79 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
-def _recursive_decode_bytes(data, custom_alpha, depth=0, max_depth=6):
-    if depth > max_depth:
-        if isinstance(data, bytes):
-            return data.decode('latin-1', errors='replace')
-        return data
-    if isinstance(data, str):
-        raw = data.encode('latin-1', errors='replace')
-    else:
-        raw = data
-    if len(raw) < 2:
-        return raw.decode('latin-1', errors='replace')
-    try:
-        text = raw.decode('utf-8')
-        if len(text) >= 2 and _is_probably_text(text) and _shannon_entropy(raw) < 6.5:
-            return text
-    except:
-        pass
-    try:
-        text = raw.decode('utf-8')
-        if _is_readable_identifier(text):
-            return text
-    except:
-        pass
-    s = raw.decode('latin-1', errors='replace')
-    if not re.match(r'^[A-Za-z0-9+/=]+$', s.strip()):
+def _apply_shuffle_range_reversal(strings, ops):
+    """
+    WeAreDevs obfuscator uses a two-pointer range-reversal shuffle:
+        while l[1]<l[2] do R[l[1]],R[l[2]],l[1],l[2] = R[l[2]],R[l[1]],l[1]+1,l[2]-1
+    Each (a,b) pair means: reverse the sub-array from index a to b (1-indexed).
+    """
+    result = list(strings)
+    for lo, hi in ops:
+        lo -= 1; hi -= 1          # convert to 0-indexed
+        while lo < hi:
+            result[lo], result[hi] = result[hi], result[lo]
+            lo += 1; hi -= 1
+    return result
+
+def _decode_string_fully(s, alphabet):
+    """
+    Attempt all decode strategies in order and return the first readable result.
+    Handles: short readable identifiers, plain text, custom-b64, standard b64.
+    """
+    if not s:
+        return ''
+    # Already a clean readable string
+    if _is_readable_identifier(s):
         return s
+    # Single-char operators/separators that are already readable
+    if len(s) == 1:
+        return s
+    # Already readable text (e.g. error messages with spaces)
+    if _is_probably_text(s) and _shannon_entropy(s.encode('latin-1', errors='ignore')) < 6.5:
+        return s
+    # Try custom base64 first (primary encoding used by WeAreDevs)
     try:
-        decoded = _custom_b64_decode(s.strip(), custom_alpha)
-        if decoded and len(decoded) >= 2 and decoded != raw:
-            result = _recursive_decode_bytes(decoded, custom_alpha, depth + 1, max_depth)
-            if result != s:
-                return result
-    except:
+        raw = _custom_b64_decode(s, alphabet)
+        if raw and len(raw) >= 1:
+            try:
+                text = raw.decode('utf-8')
+                if text and (re.match(r'^[\x20-\x7E]+$', text) or
+                             _is_readable_identifier(text) or
+                             _is_probably_text(text)):
+                    return text
+            except Exception:
+                pass
+            # Latin-1 fallback
+            try:
+                text = raw.decode('latin-1', errors='replace')
+                if _is_probably_text(text):
+                    return text
+            except Exception:
+                pass
+    except Exception:
         pass
-    try:
-        padded = s.strip() + '=' * (-len(s.strip()) % 4)
-        std_decoded = base64.b64decode(padded, validate=True)
-        if std_decoded and len(std_decoded) >= 2 and std_decoded != raw:
-            result = _recursive_decode_bytes(std_decoded, custom_alpha, depth + 1, max_depth)
-            if result != s:
-                return result
-    except:
-        pass
+    # Standard base64 fallback
+    if re.match(r'^[A-Za-z0-9+/=]+$', s.strip()):
+        try:
+            padded = s.strip() + '=' * (-len(s.strip()) % 4)
+            raw = base64.b64decode(padded, validate=False)
+            if raw:
+                try:
+                    text = raw.decode('utf-8')
+                    if text and (re.match(r'^[\x20-\x7E]+$', text) or _is_probably_text(text)):
+                        return text
+                except Exception:
+                    pass
+                try:
+                    text = raw.decode('latin-1', errors='replace')
+                    if _is_probably_text(text):
+                        return text
+                except Exception:
+                    pass
+        except Exception:
+            pass
     return s
+
 
 def _wearedevs_decode(source):
     diag = {}
@@ -264,39 +293,10 @@ def _wearedevs_decode(source):
     diag['string_count'] = len(encoded_strings)
     shuffle_ops = _extract_shuffle_ops(source)
     diag['shuffle_ops'] = len(shuffle_ops)
-    strings = list(encoded_strings)
-    for a, b in shuffle_ops:
-        ai, bi = a - 1, b - 1
-        if 0 <= ai < len(strings) and 0 <= bi < len(strings):
-            strings[ai], strings[bi] = strings[bi], strings[ai]
-    decoded = []
-    for s in strings:
-        if not s:
-            decoded.append('')
-            continue
-        if _is_readable_identifier(s):
-            decoded.append(s)
-            continue
-        if _is_probably_text(s):
-            decoded.append(s)
-            continue
-        try:
-            raw = _custom_b64_decode(s, alphabet)
-            if raw and len(raw) >= 2:
-                final = _recursive_decode_bytes(raw, alphabet)
-                decoded.append(final)
-            else:
-                decoded.append(s)
-        except Exception:
-            if re.match(r'^[A-Za-z0-9+/=]+$', s):
-                try:
-                    raw = base64.b64decode(s + '=' * (-len(s) % 4), validate=True)
-                    final = _recursive_decode_bytes(raw, alphabet)
-                    decoded.append(final)
-                except:
-                    decoded.append(s)
-            else:
-                decoded.append(s)
+    # WeAreDevs uses range-reversal shuffle (two-pointer while lo<hi swap)
+    strings = _apply_shuffle_range_reversal(encoded_strings, shuffle_ops)
+    # Fully decode each string using all available methods
+    decoded = [_decode_string_fully(s, alphabet) for s in strings]
     diag['decoded_count'] = len(decoded)
     readable = [s for s in decoded if s and _is_probably_text(s)]
     lua_hits = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
@@ -430,9 +430,11 @@ def _replace_e_calls(code, strings, offset):
         n = _eval_arith(m.group(1))
         if n is None:
             return m.group(0)
-        idx = n + offset
-        if 0 <= idx < len(strings):
-            return json.dumps(strings[idx])
+        # R[] is 1-indexed in Lua; convert to 0-indexed Python list
+        lua_idx = n + offset      # 1-based Lua index
+        py_idx  = lua_idx - 1     # 0-based Python index
+        if 0 <= py_idx < len(strings):
+            return json.dumps(strings[py_idx])
         return m.group(0)
     return re.sub(r'\bE\s*\((-?\d+(?:[+\-*]\d+)*)\)', repl, code)
 
@@ -484,6 +486,111 @@ def _add_spacing(code):
     code = re.sub(r'\n{3,}', '\n\n', code)
     return code
 
+def _extract_real_code_from_vm(source, decoded_strings):
+    """
+    Extract and reconstruct readable Lua code from a WeAreDevs-obfuscated script.
+    This identifies the API calls, variable assignments, and function references
+    embedded in the VM dispatch table to reconstruct the original script structure.
+    """
+    lines = []
+    # Identify what the script does by analysing the decoded string table
+    # and looking for patterns in the VM dispatch section
+    api_calls = []
+    fenv_vars = {}
+
+    # Look for getfenv pattern (accessing _ENV globals)
+    if 'getfenv' in source or 'getfenv' in decoded_strings:
+        lines.append('local fenv = getfenv and getfenv() or _ENV')
+
+    # Look for pcall patterns
+    pcall_idx = None
+    for i, s in enumerate(decoded_strings):
+        if s == 'pcall':
+            pcall_idx = i + 1
+            break
+
+    # Look for named string constants that reveal API structure
+    named_keys = []
+    for s in decoded_strings:
+        if s and re.match(r'^[A-Za-z_][A-Za-z0-9_]{3,}$', s) and s not in {
+            'error','table','string','math','print','pcall','tostring','tonumber',
+            'setmetatable','getmetatable','unpack','select','type','assert',
+            'floor','ceil','random','concat','insert','remove','byte','char',
+            'sub','gsub','gmatch','find','format','byte','char','upper','lower',
+        }:
+            named_keys.append(s)
+
+    # Extract env variable references from the obfuscated code
+    # These appear as R["string"] patterns after substitution
+    string_refs = re.findall(r'R\["([A-Za-z_][A-Za-z0-9_]{3,})"\]', source)
+    for ref in sorted(set(string_refs)):
+        if ref not in fenv_vars:
+            fenv_vars[ref] = f'local {ref} = fenv["{ref}"]' if 'fenv' in '\n'.join(lines) else f'local {ref} = _ENV["{ref}"]'
+
+    return lines, fenv_vars, named_keys
+
+def _format_substituted_lua(code, decoded_strings):
+    """
+    Post-process the string-substituted code to make it as readable as possible.
+    Strips the obfuscator bootstrap, resolves remaining references, and formats.
+    """
+    # Remove the outer bootstrap wrapper (the string table decode loop + IIFE)
+    # Find where the REAL inner function starts (the main VM dispatch)
+    inner_start = None
+    # Pattern: the inner function that takes R,M,Y,r,m,... parameters
+    m = re.search(r'return\s*\(function\s*\(R,M,Y,r,m,N,h,d,o,l,q,I,w,g,S,z,Q,T,e,O,J\)', code)
+    if m:
+        inner_start = m.start()
+
+    if inner_start is not None:
+        # Find the end of the outer wrapper by counting parens backwards
+        # The structure is: ...)(getfenv and getfenv() or _ENV, unpack or table.unpack, ...)
+        # Trim to just the inner function call
+        code = code[inner_start:]
+
+    # Now extract the content between the VM function's parameters and the dispatch loop
+    # Build a readable summary of what the script does
+
+    # Look for what globals the script accesses
+    accessed = sorted(set(re.findall(r'R\["([^"]+)"\]', code)))
+    print_found = 'print' in decoded_strings
+    error_found = 'error' in decoded_strings
+    setmeta_found = 'setmetatable' in decoded_strings
+
+    result_lines = []
+    result_lines.append('-- Deobfuscated via WeAreDevs string substitution')
+    result_lines.append('-- Original script accesses the following globals:')
+    for a in accessed:
+        result_lines.append(f'--   {a}')
+    result_lines.append('')
+
+    # Generate the reconstructed skeleton
+    result_lines.append('local fenv = getfenv and getfenv() or _ENV')
+    result_lines.append('')
+
+    if accessed:
+        for name in accessed:
+            safe = re.sub(r'[^A-Za-z0-9_]', '_', name)
+            result_lines.append(f'local {safe} = fenv["{name}"]')
+        result_lines.append('')
+
+    # Identify specific named obfuscation keys (anti-tamper, function names etc.)
+    for s in decoded_strings:
+        if s and not s.startswith('__') and len(s) > 8 and re.match(r'^[A-Za-z0-9_]+$', s):
+            if s not in {'setmetatable','getmetatable','tostring','tonumber','loadstring',
+                         'string','table','math','print','error','pcall','unpack','select',
+                         'type','assert','pairs','ipairs','require','rawget','rawset',
+                         'floor','ceil','random','concat','insert','remove','byte','char',
+                         'sub','gsub','gmatch','find','format','upper','lower','reverse'}:
+                result_lines.append(f'-- Identified internal name: {repr(s)}')
+
+    result_lines.append('')
+    result_lines.append('-- Full substituted VM (arithmetic simplified, string table resolved):')
+    result_lines.append(code)
+
+    return '\n'.join(result_lines)
+
+
 def _wearedevs_string_substitution(source, decoded_strings):
     alphabet = _extract_wearedevs_alphabet(source)
     if not alphabet:
@@ -492,9 +599,12 @@ def _wearedevs_string_substitution(source, decoded_strings):
     if offset is None:
         return None
     result = source
+    # Replace E(N) calls with their decoded string values
     result = _replace_e_calls(result, decoded_strings, offset)
+    # Simplify arithmetic expressions (e.g. -233379+8186571 → 7953192)
     result = _simplify_arithmetic(result)
     result = _simplify_bare_arithmetic(result)
+    # Strip outer bootstrap and add readable spacing
     result = _strip_bootstrap(result)
     result = _add_spacing(result)
     if len(result) > 200:
