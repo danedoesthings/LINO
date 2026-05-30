@@ -1119,7 +1119,7 @@ def _is_wearedevs_vm(source):
         score += 3
     if re.search(r'for\s+E,l\s+in\s+ipairs', source):
         score += 1
-    return score >= 5
+    return score >= 3
 
 def _looks_like_real_code(text):
     if not text or len(text) < 200:
@@ -1161,6 +1161,13 @@ class Unveiler:
             if vm_result:
                 return vm_result, 'wearedevs_vm_lifted', 'VM lifted'
 
+            self._log("string_subst", True, "applying string substitution fallback")
+            substituted = self._apply_string_substitution(source, wd['decoded_strings'])
+            if substituted and substituted != source:
+                self._log("string_subst_ok", True,
+                          f"substitution produced {len(substituted)} chars")
+                return substituted, 'wearedevs_string_subst', 'String substitution (no VM)'
+
             lines = [f"-- [{i}] {s!r}" for i, s in enumerate(wd['decoded_strings']) if s]
             return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table (no harness capture)'
 
@@ -1198,11 +1205,17 @@ class Unveiler:
     def _attempt_vm_lift(self, source, decoded_strings):
         self._log("vm_lift_attempt", True, "trying static VM lift")
         if not _is_wearedevs_vm(source):
+            self._log("vm_lift_detect", False,
+                      "no VM dispatch pattern — string-obfuscation only, skipping VM lift")
             return None
         try:
             vm = _extract_vm_structure(source)
             insts = _extract_instruction_stream(source, vm)
-            if len(insts) < 10:
+            if len(insts) < 5:
+                self._log("vm_lift_abort", False,
+                          f"only {len(insts)} instructions extracted — "
+                          "script uses string-table obfuscation without a "
+                          "numeric bytecode VM; VM lift not applicable")
                 return None
             op_handlers, _ = _build_handler_table(source, vm)
             if not op_handlers:
@@ -1219,6 +1232,33 @@ class Unveiler:
         except Exception:
             pass
         return None
+
+    def _apply_string_substitution(self, source, decoded_strings):
+        if not decoded_strings:
+            return source
+
+        def _lua_str(s):
+            if not isinstance(s, str):
+                s = str(s)
+            s2 = s.replace('\\', '\\\\').replace('"', '\\"')
+            s2 = s2.replace('\n', '\\n').replace('\r', '\\r')
+            return f'"{s2}"'
+
+        const_map = {i: _lua_str(v) for i, v in enumerate(decoded_strings) if v}
+
+        def repl(m):
+            idx = int(m.group(1))
+            return const_map.get(idx, m.group(0))
+
+        result = re.sub(r'\bR\s*\[\s*(\d+)\s*\]', repl, source)
+
+        for varname in ('l', 'N', 'S', 'T'):
+            def repl_v(m, _v=varname):
+                idx = int(m.group(1))
+                return const_map.get(idx, m.group(0))
+            result = re.sub(rf'\b{varname}\s*\[\s*(\d+)\s*\]', repl_v, result)
+
+        return result
 
     def _recursive_unveil(self, source, depth=0):
         if depth > self.max_layers:
@@ -1574,8 +1614,11 @@ end
             vm_structure = _extract_vm_structure(source)
             instructions = _extract_instruction_stream(source, vm_structure)
             self._trace("vm_lift_instructions", True, f"extracted {len(instructions)} instructions")
-            if len(instructions) < 10:
-                self._trace("vm_lift_abort", False, "too few instructions for a meaningful VM")
+            if len(instructions) < 5:
+                self._trace("vm_lift_abort", False,
+                            f"only {len(instructions)} instructions — "
+                            "script is string-table obfuscation only, "
+                            "not a numeric bytecode VM; VM lift skipped")
                 return None
             opcode_to_handler, all_handlers = _build_handler_table(source, vm_structure)
             self._trace("vm_lift_handlers", True, f"identified {len(opcode_to_handler)} opcode handlers")
