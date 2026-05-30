@@ -11,6 +11,10 @@ try:
 except ImportError:
     HAS_LUAPARSER = False
 
+from unveilr import Unveiler
+from env_logger import JobLogger
+from var_renamer import VarRenamer
+
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
@@ -703,10 +707,6 @@ def _build_cfg(instructions, opcode_to_handler):
                     if isinstance(target_pc, int):
                         jump_targets.add(target_pc)
 
-    for instr in instructions:
-        if instr.pc in jump_targets and instr.pc not in block_map:
-            pass
-
     current_block_id = 0
     current_block = VMBasicBlock(id=current_block_id, start_pc=0, end_pc=0)
     block_starts = {0}
@@ -983,7 +983,6 @@ def _symbolic_execute(state, instructions, opcode_to_handler, blocks, block_map,
             elif 'cjump' in features:
                 if ops:
                     cond_reg = ops[0]
-                    cond_val = get_register(cond_reg)
                     output_lines.append('  ' * indent + f'if reg_{cond_reg} then')
 
             elif 'eq' in features:
@@ -1136,6 +1135,14 @@ class DeobfEngine:
         self.unluac_path = UNLUAC_LOCAL_PATH
         self._java_available = shutil.which('java') is not None
         self.trace = []
+        self.unveiler = Unveiler(
+            java_available=self._java_available,
+            unluac_path=self.unluac_path,
+            lua_harness_fn=self._run_lua_harness,
+            run_unluac_fn=self._run_unluac
+        )
+        self.var_renamer = VarRenamer()
+        self._hook_stats = defaultdict(int)
 
     def get_capabilities(self):
         return {
@@ -1145,6 +1152,8 @@ class DeobfEngine:
             'wearedevs_vm_lift': True,
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'luaparser': HAS_LUAPARSER,
+            'var_renamer': True,
+            'hooking': True,
         }
 
     def _trace(self, stage, success, message):
@@ -1275,6 +1284,12 @@ for k,v in pairs(_G) do
 if type(v)=="string" and #v>20 then hook_stats.env_string=(hook_stats.env_string or 0)+1; save("env_"..k, v) end
 end
 end)
+if success and type(result) == "function" then
+if string.dump then
+local bc = string.dump(result)
+if bc and #bc > 50 then save("function_return", bc) end
+end
+end
 for _,cap in ipairs(captures) do print("CAP:"..cap.tag..":"..cap.data) end
 if #captures==0 then
 if not success then print("ERR:RUNTIME:"..tostring(result))
@@ -1435,85 +1450,57 @@ end
             self._trace("vm_lift_error", False, str(e))
         return None
 
-    def process(self, source):
+    def _apply_var_renamer(self, code):
+        try:
+            return self.var_renamer.rename(code)
+        except:
+            return code
+
+    def process(self, source, logger=None):
         self.trace = []
-        cleaned = re.sub(r'\s+', '', source.strip())
-        if re.match(r'^[A-Za-z0-9+/=]+$', cleaned):
-            decoded = _try_base64_decode(cleaned)
-            if decoded:
-                for enc in ('utf-8', 'latin-1'):
-                    try:
-                        text = decoded.decode(enc, errors='replace')
-                        if len(text) > 50:
-                            source = text
-                            break
-                    except: pass
-                self._trace("base64_peel", True, f"outer base64 decoded ({len(text)} chars)")
+        self._hook_stats.clear()
 
-        self._trace("wearedevs_detect", True, "checking for WeAreDevs obfuscation")
-        wd = _wearedevs_decode(source)
-        if wd['success']:
-            decoded_strings = wd['decoded_strings']
-            diag = wd['diagnostics']
-            self._trace("wearedevs_decode", True,
-                        f"decoded {diag.get('decoded_count',0)} strings, "
-                        f"{diag.get('lua_keyword_hits',0)} with Lua keywords")
+        result, method, diagnostic = self.unveiler.unveil(source)
+        for entry in self.unveiler.trace:
+            self._trace(entry['stage'], entry['success'], entry['message'])
 
-            self._trace("lua_harness", True, "running Lua execution harness (primary for WeAreDevs VM)")
-            harness_result = self._run_lua_harness(source)
-            if harness_result and _looks_like_real_code(harness_result):
-                self._trace("lua_harness", True, f"captured {len(harness_result)} chars of real Lua")
-                return harness_result, 'lua_harness', 'Lua harness captured original source', [vars(t) for t in self.trace]
+        if result and method in ('lua_harness', 'wearedevs_vm_lifted', 'recursive_unveil'):
+            self._trace("var_rename", True, "applying variable renamer")
+            result = self._apply_var_renamer(result)
+            self._hook_stats['var_rename_applied'] = 1
 
-            vm_result = self._wearedevs_lift_vm(source, decoded_strings)
-            if vm_result:
-                return vm_result, 'wearedevs_vm_lifted', 'VM lifted successfully', [vars(t) for t in self.trace]
+        if logger:
+            for entry in self.unveiler.trace:
+                logger.add_trace(entry['stage'], entry['success'], entry['message'])
+            logger.finish(result, method, diagnostic)
+            logger.to_dict()['hook_stats'] = dict(self._hook_stats)
 
-            output_lines = []
-            for i, s in enumerate(decoded_strings):
-                if s:
-                    output_lines.append(f"-- [{i}] {s!r}")
-            result = '\n'.join(output_lines)
-            return result, 'wearedevs_decode', wd['reason'], [vars(t) for t in self.trace]
-        else:
-            self._trace("wearedevs_decode", False,
-                        f"{wd['reason']} | diag: {json.dumps(wd.get('diagnostics', {}))}")
-
-        if self._detect_prometheus_vm(source):
-            self._trace("prometheus_detect", True, "Prometheus VM detected")
-            result = self._prometheus_decompile(source)
-            if result and len(result) >= 50 and _is_probably_text(result):
-                self._trace("prometheus_decompile", True, f"{len(result)} chars")
-                return result, 'prometheus_vm', 'Prometheus VM decompiled', [vars(t) for t in self.trace]
-
-        self._trace("lua_harness", True, "running Lua execution harness (fallback)")
-        harness_result = self._run_lua_harness(source)
-        if harness_result:
-            self._trace("lua_harness", True, f"captured {len(harness_result)} chars")
-            return harness_result, 'lua_harness', 'Lua harness capture', [vars(t) for t in self.trace]
-        self._trace("lua_harness", False, "harness produced no output")
-
-        diag_msg = json.dumps(wd.get('diagnostics', {}), indent=2)
-        return '', 'unable', f'no strategies produced output\n{diag_msg}', [vars(t) for t in self.trace]
+        return result, method, diagnostic, [vars(t) for t in self.trace]
 
 job_store = {}
 job_lock = threading.Lock()
 
 def _run_job(job_id, source):
     engine = DeobfEngine()
+    logger = JobLogger()
+    logger.start_job(job_id, engine.get_capabilities())
     try:
-        result, method, diagnostic, trace = engine.process(source)
+        result, method, diagnostic, trace = engine.process(source, logger)
         with job_lock:
             job_store[job_id] = {
                 'status': 'complete', 'result': result, 'detected': method,
                 'diagnostic': diagnostic, 'trace': trace,
-                'result_length': len(result) if result else 0
+                'result_length': len(result) if result else 0,
+                'log_json': logger.to_json()
             }
     except Exception as e:
+        logger.add_error(str(e), e)
+        logger.finish()
         with job_lock:
             job_store[job_id] = {
                 'status': 'error', 'error': str(e),
-                'traceback': traceback.format_exc()[:4000]
+                'traceback': traceback.format_exc()[:4000],
+                'log_json': logger.to_json()
             }
 
 def submit_job(source):
