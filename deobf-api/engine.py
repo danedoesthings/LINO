@@ -1,10 +1,11 @@
 import os, re, shutil, subprocess, tempfile, base64, urllib.request, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 
 try:
     from luaparser import ast as lua_ast
+    from luaparser.astnodes import *
     HAS_LUAPARSER = True
 except ImportError:
     HAS_LUAPARSER = False
@@ -25,7 +26,6 @@ LUA_KEYWORDS = {
     'unpack', 'select', 'type', 'assert', 'error', 'next', 'rawequal',
 }
 
-MAX_HARNESS_SIZE = 10 * 1024
 JOB_STORAGE_DIR = '/data'
 JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
 os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
@@ -169,25 +169,21 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
-def _wearedevs_decode(source):
-    diag = {}
+def _decode_full_r_table(source):
     alphabet = _extract_wearedevs_alphabet(source)
-    diag['custom_alphabet'] = alphabet is not None
     if not alphabet:
-        return {'success': False, 'reason': 'could not extract custom alphabet', 'diagnostics': diag}
-    encoded_strings = _extract_r_table_strings(source)
-    if not encoded_strings:
-        return {'success': False, 'reason': 'could not extract R string table', 'diagnostics': diag}
-    diag['string_count'] = len(encoded_strings)
+        return None
+    raw = _extract_r_table_strings(source)
+    if not raw:
+        return None
     shuffle_ops = _extract_shuffle_ops(source)
-    diag['shuffle_ops'] = len(shuffle_ops)
-    raw_strings = list(encoded_strings)
+    strings = list(raw)
     for a, b in shuffle_ops:
         ai, bi = a - 1, b - 1
-        if 0 <= ai < len(raw_strings) and 0 <= bi < len(raw_strings):
-            raw_strings[ai], raw_strings[bi] = raw_strings[bi], raw_strings[ai]
+        if 0 <= ai < len(strings) and 0 <= bi < len(strings):
+            strings[ai], strings[bi] = strings[bi], strings[ai]
     decoded = []
-    for s in raw_strings:
+    for s in strings:
         if not s:
             decoded.append('')
             continue
@@ -214,22 +210,20 @@ def _wearedevs_decode(source):
         except:
             pass
         decoded.append(s)
-    diag['decoded_count'] = len(decoded)
-    readable = [s for s in decoded if s and _is_probably_text(s)]
-    lua_hits = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
-    diag['readable_strings'] = len(readable)
+    return decoded
+
+def _wearedevs_decode(source):
+    diag = {}
+    strings = _decode_full_r_table(source)
+    if not strings:
+        return {'success': False, 'reason': 'could not decode R table', 'diagnostics': diag}
+    diag['decoded_count'] = len(strings)
+    lua_hits = sum(1 for s in strings if any(kw in str(s) for kw in LUA_KEYWORDS))
     diag['lua_keyword_hits'] = lua_hits
-    if lua_hits < 2 and len(readable) < 3:
-        return {
-            'success': False,
-            'reason': f'decoded {len(decoded)} strings but only {lua_hits} contain Lua keywords',
-            'diagnostics': diag,
-            'decoded_strings': decoded,
-        }
     return {
         'success': True,
-        'decoded_strings': decoded,
-        'reason': f'decoded {len(decoded)} strings ({lua_hits} with Lua keywords)',
+        'decoded_strings': strings,
+        'reason': f'decoded {len(strings)} strings',
         'diagnostics': diag,
     }
 
@@ -255,17 +249,40 @@ def _get_e_offset(source):
 
 def _eval_arith(expr):
     expr = re.sub(r'\s+', '', str(expr))
-    if not re.match(r'^[\-\d+*()\s]+$', expr):
+    if not re.match(r'^[\-\d+*()/%^]+$', expr):
         return None
     try:
         result = eval(expr)
         if isinstance(result, (int, float)):
             return int(result)
-    except Exception:
-        pass
-    return None
+    except:
+        return None
 
-def _replace_e_calls(code, full_strings, offset):
+def _simplify_arithmetic(code):
+    pattern = r'\([-]?\d+(?:\s*[+\-*/%^]\s*[-]?\d+)+\)'
+    prev = None
+    while prev != code:
+        prev = code
+        def repl(m):
+            val = _eval_arith(m.group(0))
+            if val is not None:
+                return str(val)
+            return m.group(0)
+        code = re.sub(pattern, repl, code)
+    bare_pattern = r'(?<![a-zA-Z0-9_])[-]?\d+(?:\s*[+\-*/%^]\s*[-]?\d+)+(?![a-zA-Z0-9_])'
+    def bare_repl(m):
+        val = _eval_arith(m.group(0))
+        if val is not None:
+            return str(val)
+        return m.group(0)
+    code = re.sub(bare_pattern, bare_repl, code)
+    return code
+
+def _substitute_e_calls(source, full_strings):
+    source = _simplify_arithmetic(source)
+    offset = _get_e_offset(source)
+    if offset is None:
+        return source
     def repl(m):
         n = _eval_arith(m.group(1))
         if n is None:
@@ -276,36 +293,9 @@ def _replace_e_calls(code, full_strings, offset):
             val = full_strings[py_idx]
             if not val:
                 return 'nil'
-            if isinstance(val, str) and _is_readable_identifier(val):
-                return json.dumps(val)
             return json.dumps(str(val))
         return m.group(0)
-    return re.sub(r'\bE\s*\((-?\d+(?:[+\-*]\d+)*)\)', repl, code)
-
-def _simplify_arithmetic(code):
-    def repl(m):
-        inner = m.group(1)
-        if re.match(r'^[\-\d +*()\t]+$', inner):
-            val = _eval_arith(inner)
-            if val is not None:
-                return str(val)
-        return m.group(0)
-    prev = None
-    while prev != code:
-        prev = code
-        code = re.sub(r'\(([^\(\)]+)\)', repl, code)
-    return code
-
-def _simplify_bare_arithmetic(code):
-    def repl(m):
-        try:
-            val = int(eval(m.group(0)))
-            return str(val)
-        except Exception:
-            return m.group(0)
-    code = re.sub(r'-?\d+\s*\+\s*-\d+', repl, code)
-    code = re.sub(r'-?\d+\s*-\s*-\d+', repl, code)
-    return code
+    return re.sub(r'\bE\s*\(\s*(-?\d+)\s*\)', repl, source)
 
 def _strip_bootstrap(source):
     markers = [
@@ -319,143 +309,284 @@ def _strip_bootstrap(source):
             return source[pos:]
     return source
 
-def _add_spacing(code):
-    code = re.sub(r'(?<!\n)(end\b)', r'\n\1', code)
-    code = re.sub(r'(?<!\n)(local\s)', r'\n\1', code)
-    code = re.sub(r'(?<!\n)(return\b)', r'\n\1', code)
-    code = re.sub(r'(?<!\n)(if\s)', r'\n\1', code)
-    code = re.sub(r'(?<!\n)(else\b)', r'\n\1', code)
-    code = re.sub(r'(?<!\n)(while\s)', r'\n\1', code)
-    code = re.sub(r'(?<!\n)(for\s)', r'\n\1', code)
-    code = re.sub(r'\n{3,}', '\n\n', code)
-    return code
-
-def _wearedevs_string_substitution(source, decoded_strings):
-    raw_strings = _extract_r_table_strings(source)
-    if not raw_strings:
-        return None
-    shuffle_ops = _extract_shuffle_ops(source)
-    full_strings = list(raw_strings)
-    for a, b in shuffle_ops:
-        ai, bi = a - 1, b - 1
-        if 0 <= ai < len(full_strings) and 0 <= bi < len(full_strings):
-            full_strings[ai], full_strings[bi] = full_strings[bi], full_strings[ai]
-    alphabet = _extract_wearedevs_alphabet(source)
-    for i, s in enumerate(full_strings):
-        if s and not _is_readable_identifier(s):
-            try:
-                raw = _custom_b64_decode(s, alphabet)
-                if raw and len(raw) >= 1:
-                    try:
-                        text = raw.decode('utf-8')
-                        if text and _is_probably_text(text):
-                            full_strings[i] = text
-                            continue
-                    except:
-                        pass
-                    try:
-                        text = raw.decode('latin-1', errors='replace')
-                        if text and _is_probably_text(text):
-                            full_strings[i] = text
-                            continue
-                    except:
-                        pass
-            except:
-                pass
-    offset = _get_e_offset(source)
-    if offset is None:
-        return None
-    result = source
-    result = _replace_e_calls(result, full_strings, offset)
-    result = _simplify_arithmetic(result)
-    result = _simplify_bare_arithmetic(result)
-    result = _strip_bootstrap(result)
-    result = _add_spacing(result)
-    if len(result) > 200:
-        return result
-    return None
-
 def _looks_like_real_code(text):
-    if not text or len(text) < 50:
+    if not text or len(text) < 20:
         return False
     lines = text.splitlines()
-    structural_kw = {'function', 'while', 'for', 'if', 'repeat', 'print', 'local'}
-    count = sum(1 for line in lines if any(kw in line for kw in structural_kw))
-    return count >= 2
+    keywords = {'function', 'while', 'for', 'if', 'repeat', 'print', 'local', 'return'}
+    count = sum(1 for line in lines if any(kw in line for kw in keywords))
+    return count >= 1
 
-class StateMachineDevirtualizer:
-    def __init__(self, source, decoded_strings):
-        self.source = source
-        self.strings = decoded_strings
-        self.state_handlers = {}
+def _escape_lua_string(s):
+    return json.dumps(s)
+
+def _prepare_source_for_ast(source, full_strings):
+    source = _substitute_e_calls(source, full_strings)
+    source = _simplify_arithmetic(source)
+    source = _strip_bootstrap(source)
+    return source
+
+class ASTConstantFolder:
+    def __init__(self, strings):
+        self.strings = strings
+    def fold(self, tree):
+        if not HAS_LUAPARSER:
+            return tree
+        class Folder(lua_ast.ASTVisitor):
+            def visit_BinaryOp(self, node):
+                node.left = self.visit(node.left)
+                node.right = self.visit(node.right)
+                if isinstance(node.left, Number) and isinstance(node.right, Number):
+                    try:
+                        left_val = node.left.n
+                        right_val = node.right.n
+                        op = node.op
+                        if op == '+': result = left_val + right_val
+                        elif op == '-': result = left_val - right_val
+                        elif op == '*': result = left_val * right_val
+                        elif op == '/': result = left_val / right_val if right_val != 0 else left_val
+                        elif op == '^': result = left_val ** right_val
+                        elif op == '%': result = left_val % right_val if right_val != 0 else 0
+                        else: return node
+                        return Number(int(result)) if result == int(result) else Number(result)
+                    except:
+                        pass
+                return node
+            def visit_UnaryOp(self, node):
+                node.operand = self.visit(node.operand)
+                if isinstance(node.operand, Number):
+                    if node.op == '-':
+                        return Number(-node.operand.n)
+                return node
+            def visit(self, node):
+                if node is None:
+                    return None
+                method = getattr(self, 'visit_' + type(node).__name__, None)
+                if method:
+                    return method(node)
+                for child_name, child in node.children():
+                    if isinstance(child, list):
+                        for i, item in enumerate(child):
+                            child[i] = self.visit(item)
+                    elif child is not None:
+                        setattr(node, child_name, self.visit(child))
+                return node
+        folder = Folder()
+        return folder.visit(tree)
+
+class ASTTableResolver:
+    def __init__(self, strings):
+        self.strings = strings
+    def resolve(self, tree):
+        if not HAS_LUAPARSER:
+            return tree
+        class Resolver(lua_ast.ASTVisitor):
+            def __init__(self, strings):
+                self.strings = strings
+            def visit_Index(self, node):
+                node.value = self.visit(node.value)
+                node.idx = self.visit(node.idx)
+                if isinstance(node.value, Name) and node.value.id == 'R':
+                    if isinstance(node.idx, Number):
+                        idx = int(node.idx.n)
+                        if 1 <= idx <= len(self.strings):
+                            val = self.strings[idx - 1]
+                            if isinstance(val, str) and _is_readable_identifier(val):
+                                return String(f'"{val}"', val)
+                            elif val:
+                                safe = _escape_lua_string(str(val))
+                                return String(safe, str(val))
+                return node
+            def visit(self, node):
+                if node is None:
+                    return None
+                method = getattr(self, 'visit_' + type(node).__name__, None)
+                if method:
+                    return method(node)
+                for child_name, child in node.children():
+                    if isinstance(child, list):
+                        for i, item in enumerate(child):
+                            child[i] = self.visit(item)
+                    elif child is not None:
+                        setattr(node, child_name, self.visit(child))
+                return node
+        resolver = Resolver(self.strings)
+        return resolver.visit(tree)
+
+class ControlFlowUnflattener:
+    def __init__(self, tree):
+        self.tree = tree
+        self.state_var = None
+        self.state_blocks = {}
         self.entry_state = None
-        self.output_lines = []
-    def devirtualize(self):
-        if not self._extract_state_machine():
-            return None
-        if not self._find_entry_state():
-            return None
-        self._extract_api_calls()
-        if not self.output_lines:
-            return self._fallback_output()
-        return self._format_output()
-    def _extract_state_machine(self):
-        while_match = re.search(r'while\s+(\w+)\s+do\s+(.*?)end\s*(?:\)\s*\)|$)', self.source, re.DOTALL)
-        if not while_match:
-            return False
-        state_var = while_match.group(1)
-        body = while_match.group(2)
-        handler_blocks = re.split(r'elseif\s+' + state_var + r'\s*<\s*\d+\s+then', body)
-        for i, block in enumerate(handler_blocks):
-            self.state_handlers[i * 1000] = block.strip()
-        return len(self.state_handlers) > 0
+        self.ordered_states = []
+    def unflatten(self):
+        if not HAS_LUAPARSER:
+            return self.tree
+        self._find_state_machine()
+        if not self.state_var or not self.state_blocks:
+            return self.tree
+        self._find_entry_state()
+        self._trace_execution_order()
+        if len(self.ordered_states) < 2:
+            return self.tree
+        return self._rebuild_sequential()
+    def _find_state_machine(self):
+        class StateFinder(lua_ast.ASTVisitor):
+            def __init__(self):
+                self.state_var = None
+                self.state_blocks = {}
+                self.while_node = None
+            def visit_While(self, node):
+                if isinstance(node.condition, Name):
+                    self.state_var = node.condition.id
+                    self.while_node = node
+                    self._extract_blocks(node.body)
+            def _extract_blocks(self, body):
+                for stmt in body.block if hasattr(body, 'block') else []:
+                    if isinstance(stmt, If):
+                        self._process_if_chain(stmt)
+            def _process_if_chain(self, if_node):
+                current = if_node
+                while current:
+                    if isinstance(current.test, BinOp) and isinstance(current.test.left, Name):
+                        if current.test.left.id == self.state_var and current.test.op == '==':
+                            if isinstance(current.test.right, Number):
+                                state_id = int(current.test.right.n)
+                                self.state_blocks[state_id] = current.body
+                    if current.else_body:
+                        if len(current.else_body.block) == 1 and isinstance(current.else_body.block[0], If):
+                            current = current.else_body.block[0]
+                        else:
+                            self.state_blocks[-1] = current.else_body
+                            break
+                    else:
+                        break
+            def visit(self, node):
+                if node is None:
+                    return
+                method = getattr(self, 'visit_' + type(node).__name__, None)
+                if method:
+                    return method(node)
+                for _, child in node.children():
+                    if isinstance(child, list):
+                        for item in child:
+                            self.visit(item)
+                    elif child is not None:
+                        self.visit(child)
+        finder = StateFinder()
+        finder.visit(self.tree)
+        self.state_var = finder.state_var
+        self.state_blocks = finder.state_blocks
     def _find_entry_state(self):
-        init_match = re.search(r'(\w+)\s*=\s*(\d+)', self.source[:3000])
-        if init_match:
-            init_val = int(init_match.group(2))
-            for state_num in self.state_handlers.keys():
-                if abs(state_num - init_val) < 10:
-                    self.entry_state = state_num
-                    return True
-        self.entry_state = min(self.state_handlers.keys())
-        return True
-    def _extract_api_calls(self):
-        for state_num, body in self.state_handlers.items():
-            print_match = re.search(r'print\s*\(\s*([^)]+)\s*\)', body)
-            if print_match:
-                args = print_match.group(1)
-                resolved = self._resolve_strings(args)
-                if resolved:
-                    self.output_lines.append(f"print({resolved})")
-            error_match = re.search(r'error\s*\(\s*([^)]+)\s*\)', body)
-            if error_match:
-                args = error_match.group(1)
-                resolved = self._resolve_strings(args)
-                if resolved:
-                    self.output_lines.append(f"error({resolved})")
-    def _resolve_strings(self, expr):
-        for match in re.finditer(r'R\[(\d+)\]', expr):
-            idx = int(match.group(1))
-            if 1 <= idx <= len(self.strings):
-                const_value = self.strings[idx - 1]
-                if const_value and isinstance(const_value, str):
-                    expr = expr.replace(match.group(0), json.dumps(const_value))
-        return expr
-    def _format_output(self):
-        header = "-- State Machine Devirtualization Complete\n\n"
-        seen = set()
-        unique_lines = []
-        for line in self.output_lines:
-            if line not in seen:
-                unique_lines.append(line)
-                seen.add(line)
-        return header + '\n'.join(unique_lines)
-    def _fallback_output(self):
-        output = ["-- Decoded Constants from R table:"]
-        for i, s in enumerate(self.strings):
-            if s and len(str(s)) < 200:
-                output.append(f"--   [{i}] = {json.dumps(str(s))}")
-        return '\n'.join(output)
+        if self.state_blocks:
+            valid_keys = [k for k in self.state_blocks.keys() if k != -1]
+            if valid_keys:
+                self.entry_state = min(valid_keys)
+    def _trace_execution_order(self):
+        visited = set()
+        order = []
+        def trace(state):
+            if state in visited or state not in self.state_blocks:
+                return
+            visited.add(state)
+            order.append(state)
+            body = self.state_blocks[state]
+            next_state = self._find_next_state(body)
+            if next_state is not None:
+                trace(next_state)
+        if self.entry_state is not None:
+            trace(self.entry_state)
+        self.ordered_states = order
+    def _find_next_state(self, body):
+        class NextStateFinder(lua_ast.ASTVisitor):
+            def __init__(self, state_var):
+                self.state_var = state_var
+                self.next_state = None
+            def visit_Assign(self, node):
+                for target in node.targets:
+                    if isinstance(target, Name) and target.id == self.state_var:
+                        if len(node.values) > 0 and isinstance(node.values[0], Number):
+                            self.next_state = int(node.values[0].n)
+            def visit(self, node):
+                if node is None:
+                    return
+                method = getattr(self, 'visit_' + type(node).__name__, None)
+                if method:
+                    return method(node)
+                for _, child in node.children():
+                    if isinstance(child, list):
+                        for item in child:
+                            self.visit(item)
+                    elif child is not None:
+                        self.visit(child)
+        finder = NextStateFinder(self.state_var)
+        finder.visit(body)
+        return finder.next_state
+    def _rebuild_sequential(self):
+        new_body = Block([])
+        for state in self.ordered_states:
+            block = self.state_blocks[state]
+            for stmt in block.block if hasattr(block, 'block') else []:
+                is_state_assign = False
+                if isinstance(stmt, Assign):
+                    for target in stmt.targets:
+                        if isinstance(target, Name) and target.id == self.state_var:
+                            is_state_assign = True
+                            break
+                if not is_state_assign:
+                    new_body.block.append(stmt)
+        return Chunk(new_body)
+
+class ASTDecompiler:
+    def __init__(self, source, full_strings):
+        self.source = source
+        self.strings = full_strings
+        self.tree = None
+    def _is_virtual_machine(self, source):
+        vm_indicators = [
+            r'return\s*\(?\s*function\s*\([a-zA-Z0-9_,\s]+\)',
+            r'while\s+[a-zA-Z0-9_]+\s*do\s+if\s+[a-zA-Z0-9_]+\s*<\s*\d+\s*then',
+            r'[a-zA-Z0-9_]+\[[a-zA-Z0-9_]+\]\s*=\s*[a-zA-Z0-9_]+\[[a-zA-Z0-9_]+\]\s*[+\-]\s*\d+'
+        ]
+        hits = sum(1 for ind in vm_indicators if re.search(ind, source))
+        return hits >= 2
+    def decompile(self):
+        prepared = _prepare_source_for_ast(self.source, self.strings)
+        prepared = _simplify_arithmetic(prepared)
+        is_vm = self._is_virtual_machine(prepared)
+        if not HAS_LUAPARSER:
+            return self._format_clean_vm(prepared)
+        try:
+            self.tree = lua_ast.parse(prepared)
+        except Exception:
+            return self._format_clean_vm(prepared)
+        folder = ASTConstantFolder(self.strings)
+        self.tree = folder.fold(self.tree)
+        resolver = ASTTableResolver(self.strings)
+        self.tree = resolver.resolve(self.tree)
+        if not is_vm:
+            unflattener = ControlFlowUnflattener(self.tree)
+            self.tree = unflattener.unflatten()
+        try:
+            final_code = lua_ast.to_lua_source(self.tree)
+            if is_vm:
+                return "-- [VM DETECTED] Math & Strings Devirtualized\n" + self._format_clean_vm(final_code)
+            return final_code
+        except:
+            return self._format_clean_vm(prepared)
+    def _format_clean_vm(self, code):
+        code = re.sub(r'(?<!\n)\b(end)\b', r'\n\1\n', code)
+        code = re.sub(r'(?<!\n)\b(local\s)', r'\n\1', code)
+        code = re.sub(r'(?<!\n)\b(return\b)', r'\n\1', code)
+        code = re.sub(r'(?<!\n)\b(if\s)', r'\n\1', code)
+        code = re.sub(r'(?<!\n)\b(else\b)', r'\n\1\n', code)
+        code = re.sub(r'(?<!\n)\b(elseif\b)', r'\n\1', code)
+        code = re.sub(r'(?<!\n)\b(while\s)', r'\n\1', code)
+        code = re.sub(r'(?<!\n)\b(for\s)', r'\n\1', code)
+        code = re.sub(r'\}\s*\{', '}, {', code)
+        code = '\n'.join([line.strip() for line in code.split('\n') if line.strip()])
+        return code
 
 class Unveiler:
     def __init__(self, java_available, unluac_path, run_unluac_fn, run_lua_harness_fn):
@@ -464,32 +595,32 @@ class Unveiler:
         self._run_unluac = run_unluac_fn
         self._run_lua_harness = run_lua_harness_fn
         self.trace = []
-        self.max_layers = 5
     def _log(self, stage, success, message):
         self.trace.append({'stage': stage, 'success': success, 'message': message, 'timestamp': time.time()})
     def unveil(self, source):
         self.trace = []
-        wd = _wearedevs_decode(source)
-        if not wd['success']:
-            self._log("wearedevs_decode", False, wd.get('reason', 'string decode failed'))
+        full_strings = _decode_full_r_table(source)
+        if not full_strings:
+            self._log("decode", False, "could not decode R table")
             return '', 'unable', 'String decode failed'
-        decoded_strings = wd['decoded_strings']
-        self._log("wearedevs_decode", True, f"decoded {len(decoded_strings)} strings")
+        self._log("decode", True, f"decoded {len(full_strings)} strings")
         self._log("harness", True, "executing harness with Roblox stubs")
         harness_result = self._run_lua_harness(source)
         if harness_result and _looks_like_real_code(harness_result):
             self._log("harness_success", True, f"captured {len(harness_result)} chars")
             return harness_result, 'lua_harness', 'Harness captured original source'
-        devirt = StateMachineDevirtualizer(source, decoded_strings)
-        result = devirt.devirtualize()
-        if result and len(result) > 100:
-            self._log("state_machine_devirt", True, f"devirtualized {len(result)} chars")
-            return result, 'state_machine_devirt', 'State machine devirtualized'
-        subst_result = _wearedevs_string_substitution(source, decoded_strings)
-        if subst_result and len(subst_result) > 100:
-            self._log("string_substitution", True, f"substituted {len(subst_result)} chars")
-            return subst_result, 'wearedevs_string_substitution', 'String substitution completed'
-        lines = [f"-- [{i}] {s!r}" for i, s in enumerate(decoded_strings) if s]
+        self._log("ast_decompile", True, "attempting AST-based decompilation")
+        decompiler = ASTDecompiler(source, full_strings)
+        result = decompiler.decompile()
+        if result and _looks_like_real_code(result):
+            self._log("ast_decompile_success", True, f"decompiled {len(result)} chars")
+            header = "-- Deobfuscated via AST decompilation\n\n"
+            return header + result, 'ast_decompile', 'AST decompilation complete'
+        self._log("ast_decompile", False, "AST decompilation produced no meaningful output")
+        fallback = decompiler._format_clean_vm(_prepare_source_for_ast(source, full_strings))
+        if fallback and _looks_like_real_code(fallback):
+            return fallback, 'regex_fallback', 'Regex-based string substitution'
+        lines = [f"-- [{i}] {json.dumps(str(s))}" for i, s in enumerate(full_strings) if s]
         return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
 
 class DeobfEngine:
@@ -507,11 +638,9 @@ class DeobfEngine:
     def get_capabilities(self):
         return {
             'wearedevs_decode': True,
-            'state_machine_devirt': True,
-            'wearedevs_string_substitution': True,
+            'ast_decompile': HAS_LUAPARSER,
             'lua_harness': True,
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
-            'luaparser': HAS_LUAPARSER,
             'var_renamer': True,
         }
     def _trace(self, stage, success, message):
@@ -522,7 +651,7 @@ class DeobfEngine:
             resource.setrlimit(resource.RLIMIT_CPU, (40, 45))
             resource.setrlimit(resource.RLIMIT_NPROC, (30, 30))
             resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
-        except Exception:
+        except:
             pass
     def _run_lua_harness(self, source):
         harness = r'''
@@ -673,6 +802,11 @@ if i > j then return end
 return t[i], unpack(t, i + 1, j)
 end
 end
+if not getreg then getreg = function() return {} end end
+if not getupvalues then getupvalues = function() return {} end end
+if not hookfunction then hookfunction = function(f, h) return h end end
+if not checkcaller then checkcaller = function() return false end end
+if not bit then _G.bit = _G.bit32 end
 if not game then
 game = {
 GetService = function(self, svc)
@@ -842,7 +976,7 @@ end
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('lua_harness', 'state_machine_devirt', 'wearedevs_string_substitution'):
+        if result and method in ('ast_decompile', 'lua_harness', 'regex_fallback'):
             result = self._apply_var_renamer(result)
         if logger:
             for entry in self.unveiler.trace:
@@ -858,7 +992,7 @@ def _save_jobs():
         completed_jobs = {k: v for k, v in job_store.items() if v.get('status') != 'processing'}
         with open(JOB_STORAGE_FILE, 'w') as f:
             json.dump(completed_jobs, f)
-    except Exception:
+    except:
         pass
 
 def _load_jobs():
@@ -867,7 +1001,7 @@ def _load_jobs():
             with open(JOB_STORAGE_FILE, 'r') as f:
                 loaded = json.load(f)
                 job_store.update(loaded)
-    except Exception:
+    except:
         pass
 
 def _cleanup_old_jobs():
@@ -880,7 +1014,7 @@ def _cleanup_old_jobs():
                 for job_id in to_delete:
                     del job_store[job_id]
             _save_jobs()
-        except Exception:
+        except:
             pass
 
 _load_jobs()
