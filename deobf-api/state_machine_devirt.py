@@ -5,23 +5,24 @@ from typing import Optional, Dict, List, Tuple, Any
 class ExpressionFolder:
     @staticmethod
     def fold_math_expressions(text: str) -> str:
-        pattern = r'\b([-+]?\d+(?:\s*[-+*/%^]\s*[-+]?\d+|\s*\)\s*|\s*\(\s*)+)\b'
-
         def evaluate_match(match):
             expr_str = match.group(0).strip()
             try:
                 node = ast.parse(expr_str, mode='eval')
                 if ExpressionFolder._is_safe_node(node.body):
                     val = eval(compile(node, filename='', mode='eval'))
-                    return str(int(val))
+                    if isinstance(val, (int, float)):
+                        return str(int(val))
             except Exception:
                 pass
             return expr_str
 
-        old_text = ""
-        while old_text != text:
-            old_text = text
-            text = re.sub(pattern, evaluate_match, text)
+        for _ in range(5):
+            prev = text
+            text = re.sub(r'\(([-+]?\d+(?:\s*[-+*/%^]\s*[-+]?\d+)+)\)', evaluate_match, text)
+            text = re.sub(r'\b([-+]?\d+(?:\s*[-+*/%^]\s*[-+]?\d+)+)\b', evaluate_match, text)
+            if text == prev:
+                break
         return text
 
     @staticmethod
