@@ -48,7 +48,10 @@ class HighLevelDevirtualizer:
             if not trimmed:
                 continue
 
-            if "instrTbl" in trimmed or re.match(r'^\bvmState\b\s*=', trimmed):
+            if "instrTbl" in trimmed or "nil" in trimmed:
+                continue
+
+            if "vmStack[vmState]" in trimmed and "=" in trimmed and not trimmed.startswith('if'):
                 continue
 
             if '=' in trimmed and not (trimmed.startswith('if') or trimmed.startswith('while')):
@@ -71,6 +74,7 @@ class HighLevelDevirtualizer:
                     else:
                         for stored_reg, stored_val in list(symbolic_stack.items()):
                             target = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, target)
+
                         if target not in ("GetStr", "") and "vmState" not in target:
                             high_level_lines.append(f"{target} = {expr_val}")
                 continue
@@ -99,7 +103,7 @@ class HighLevelDevirtualizer:
             for stored_reg, stored_val in list(symbolic_stack.items()):
                 trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
 
-            if trimmed and not trimmed.startswith("if vmState") and "instrTbl" not in trimmed:
+            if trimmed and not (trimmed.startswith("if vmState") or "vmStack[vmState]" in trimmed or "GetStr" in trimmed):
                 high_level_lines.append(trimmed)
 
         return '\n'.join(high_level_lines)
