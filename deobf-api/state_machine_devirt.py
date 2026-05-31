@@ -48,12 +48,31 @@ class HighLevelDevirtualizer:
             if not trimmed:
                 continue
 
-            load_match = re.match(r'^vmStack\[(\w+)\]\s*=\s*(.+)$', trimmed)
-            if load_match:
-                reg, val = load_match.group(1), load_match.group(2).strip()
-                for stored_reg, stored_val in list(symbolic_stack.items()):
-                    val = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, val)
-                symbolic_stack[reg] = val
+            if "instrTbl" in trimmed or "vmState" in trimmed:
+                continue
+
+            if '=' in trimmed and not (trimmed.startswith('if') or trimmed.startswith('while')):
+                parts = trimmed.split('=', 1)
+                targets = [t.strip() for t in parts[0].split(',')]
+                exprs = [e.strip() for e in parts[1].split(',')]
+
+                for i, target in enumerate(targets):
+                    if i >= len(exprs):
+                        break
+                    expr_val = exprs[i]
+
+                    for stored_reg, stored_val in list(symbolic_stack.items()):
+                        expr_val = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, expr_val)
+
+                    stack_target_match = re.match(r'^vmStack\[(\w+)\]$', target)
+                    if stack_target_match:
+                        reg_id = stack_target_match.group(1)
+                        symbolic_stack[reg_id] = expr_val
+                    else:
+                        for stored_reg, stored_val in list(symbolic_stack.items()):
+                            target = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, target)
+                        if target not in ("GetStr", ""):
+                            high_level_lines.append(f"{target} = {expr_val}")
                 continue
 
             call_match = re.match(r'^vmStack\[(\w+)\]\s*\((.*)\)$', trimmed)
@@ -70,20 +89,16 @@ class HighLevelDevirtualizer:
                         if reg_lookup and reg_lookup.group(1) in symbolic_stack:
                             resolved_args.append(symbolic_stack[reg_lookup.group(1)])
                         else:
+                            for stored_reg, stored_val in list(symbolic_stack.items()):
+                                arg = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, arg)
                             resolved_args.append(arg)
 
                 high_level_lines.append(f"{func_name}({', '.join(resolved_args)})")
                 continue
 
-            if trimmed.startswith('if') or trimmed.startswith('else') or trimmed.startswith('end'):
-                for stored_reg, stored_val in list(symbolic_stack.items()):
-                    trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
-                high_level_lines.append(trimmed)
-            else:
-                for stored_reg, stored_val in list(symbolic_stack.items()):
-                    trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
-                if "instrTbl" not in trimmed and "GetStr" not in trimmed:
-                    high_level_lines.append(trimmed)
+            for stored_reg, stored_val in list(symbolic_stack.items()):
+                trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
+            high_level_lines.append(trimmed)
 
         return '\n'.join(high_level_lines)
 
