@@ -545,13 +545,9 @@ class ASTDecompiler:
 # UPGRADED INSTRUMENTER with comment safety, smart splitting, and beautifier
 # =============================================================================
 class Instrumenter:
-    """Post-processes deobfuscated Lua code to add environment logging, opcode hooks,
-    meaningful variable renaming, fixing broken comments, and a multi-pass layout beautifier."""
-    
     def instrument(self, code):
         code = global_fold_math_regex(code)
         
-        # ---- Fix accidental comment triggers (e.g., "--" from double negatives) ----
         processed_lines = []
         for line in code.split('\n'):
             if "--" in line and not any(safe_header in line for safe_header in [
@@ -561,11 +557,9 @@ class Instrumenter:
             processed_lines.append(line)
         code = '\n'.join(processed_lines)
 
-        # ---- Separate keywords crushed next to numbers ----
         code = re.sub(r'([0-9a-zA-Z_])\s*(and|or|not|then|do|end|else|elseif)\b', r'\1 \2', code)
         code = re.sub(r'\b(and|or|not|then|do|end|else|elseif)\s*([0-9a-zA-Z_])', r'\1 \2', code)
 
-        # ---- Inject environment logger and opcode hooks ----
         lines = code.split('\n')
         output = []
         inserted_env = False
@@ -617,7 +611,6 @@ class Instrumenter:
             i += 1
         code = '\n'.join(output)
 
-        # ---- Global Variable Role Mapping ----
         renames = {
             r'\bR\b': 'EncryptedStrings',
             r'\bE\b': 'GetString',
@@ -640,19 +633,24 @@ class Instrumenter:
         code = re.sub(r';', '\n', code)
         code = re.sub(r'\n\s*\n', '\n', code)
 
-        # ---- Multi-Statement Line Splitter ----
         control_keywords = {'then','do','and','or','not','else','elseif','return',
                            'local','function','in','for','while','repeat','until','if'}
-        splitter_pattern = r'([a-zA-Z0-9_]+|\)|\]|\})\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([=\(\[{])'
+        
+        # Pass 1: split after closing delimiters
+        pattern_delimiters = r'(\)|\]|\})\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([=\(\[{])'
+        code = re.sub(pattern_delimiters, r'\1\n\2\3', code)
+
+        # Pass 2: split word statements only when separated by whitespace
+        pattern_words = r'\b([a-zA-Z0-9_]+)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*([=\(\[{])'
         def statement_replacer(m):
             preceding_token = m.group(1)
             if preceding_token in control_keywords:
                 return m.group(0)
             return f"{preceding_token}\n{m.group(2)}{m.group(3)}"
+            
         for _ in range(3):
-            code = re.sub(splitter_pattern, statement_replacer, code)
+            code = re.sub(pattern_words, statement_replacer, code)
 
-        # ---- Indentation Pass ----
         lines = code.split('\n')
         indent_level = 0
         beautified = []
