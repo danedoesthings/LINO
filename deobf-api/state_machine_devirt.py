@@ -36,11 +36,64 @@ class ExpressionFolder:
         return False
 
 
+class HighLevelDevirtualizer:
+    @staticmethod
+    def devirtualize(flat_code: str) -> str:
+        lines = flat_code.split('\n')
+        high_level_lines = []
+        symbolic_stack: Dict[str, str] = {}
+
+        for line in lines:
+            trimmed = line.strip()
+            if not trimmed:
+                continue
+
+            load_match = re.match(r'^vmStack\[(\w+)\]\s*=\s*(.+)$', trimmed)
+            if load_match:
+                reg, val = load_match.group(1), load_match.group(2).strip()
+                for stored_reg, stored_val in list(symbolic_stack.items()):
+                    val = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, val)
+                symbolic_stack[reg] = val
+                continue
+
+            call_match = re.match(r'^vmStack\[(\w+)\]\s*\((.*)\)$', trimmed)
+            if call_match:
+                func_reg = call_match.group(1)
+                args_raw = call_match.group(2)
+
+                func_name = symbolic_stack.get(func_reg, f"vmStack[{func_reg}]")
+
+                resolved_args = []
+                if args_raw:
+                    for arg in [a.strip() for a in args_raw.split(',')]:
+                        reg_lookup = re.match(r'^vmStack\[(\w+)\]$', arg)
+                        if reg_lookup and reg_lookup.group(1) in symbolic_stack:
+                            resolved_args.append(symbolic_stack[reg_lookup.group(1)])
+                        else:
+                            resolved_args.append(arg)
+
+                high_level_lines.append(f"{func_name}({', '.join(resolved_args)})")
+                continue
+
+            if trimmed.startswith('if') or trimmed.startswith('else') or trimmed.startswith('end'):
+                for stored_reg, stored_val in list(symbolic_stack.items()):
+                    trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
+                high_level_lines.append(trimmed)
+            else:
+                for stored_reg, stored_val in list(symbolic_stack.items()):
+                    trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
+                if "instrTbl" not in trimmed and "GetStr" not in trimmed:
+                    high_level_lines.append(trimmed)
+
+        return '\n'.join(high_level_lines)
+
+
 class LuaBeautifier:
     @staticmethod
     def beautify(code: str) -> str:
         code = re.sub(r'(\w+)\s*\[\s*(\w+)\s*\]', r'\1[\2]', code)
-        code = re.sub(r'\s*([=+\-*/%^,])\s*', r' \1 ', code)
+        code = re.sub(r'\s*(==|<=|>=|~=)\s*', r' \1 ', code)
+        code = re.sub(r'(?<![=<>~])\s*([=+\-*/%^,])\s*(?![=<>~])', r' \1 ', code)
         code = re.sub(r'\bif\s+', 'if ', code)
         code = re.sub(r'\s+then\b', ' then', code)
         code = re.sub(r' +', ' ', code)
@@ -198,18 +251,12 @@ class StateMachineLifter:
 
         def satisfies(sid: int, constraints: List[Tuple[str, int, bool]]) -> bool:
             for op, val, inverted in constraints:
-                if op == '<':
-                    result = sid < val
-                elif op == '<=':
-                    result = sid <= val
-                elif op == '>':
-                    result = sid > val
-                elif op == '>=':
-                    result = sid >= val
-                elif op == '==':
-                    result = sid == val
-                else:
-                    result = True
+                if op == '<': result = sid < val
+                elif op == '<=': result = sid <= val
+                elif op == '>': result = sid > val
+                elif op == '>=': result = sid >= val
+                elif op == '==': result = sid == val
+                else: result = True
 
                 if inverted:
                     result = not result
@@ -307,7 +354,8 @@ class StateMachineLifter:
         raw_output = '\n'.join(output_lines)
         resolved_strings = self._resolve_string_refs(raw_output)
         folded_math = ExpressionFolder.fold_math_expressions(resolved_strings)
-        return LuaBeautifier.beautify(folded_math)
+        high_level_lua = HighLevelDevirtualizer.devirtualize(folded_math)
+        return LuaBeautifier.beautify(high_level_lua)
 
     def _resolve_string_refs(self, code: str) -> str:
         def repl(m):
