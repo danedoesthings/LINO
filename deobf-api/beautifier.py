@@ -6,81 +6,74 @@ _CLOSERS = frozenset(['end', 'else', 'elseif', 'until'])
 _FUNC_PAT = re.compile(r'\bfunction\b')
 _KW_OPEN = re.compile(r'\b(?:then|do|repeat)\b')
 _KW_CLOSE = re.compile(r'\bend\b')
-_ELSE_PAT = re.compile(r'\b(else|elseif)\b')
 
-def _remove_noise_comments(code: str) -> str:
-    clean_code = re.sub(r'[ \t]*--\s*-?\d{4,}', ' ', code)
-    return re.sub(r'[ \t]+', ' ', clean_code)
+def beautify(code: str) -> str:
+    code = re.sub(r'[ \t]*--\s*-?\d{4,}', ' ', code)
+    code = re.sub(r'[ \t]+', ' ', code)
+    code = code.replace(';', '\n')
 
-def _semicolons_to_newlines(code: str) -> str:
-    return code
+    literal_pattern = r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|\[\[.*?\]\]|--\[\[.*?\]\]|--[^\n]*)'
+    literals = []
 
-def _expand_compact_blocks(code: str) -> str:
-    for kw in ('end', 'local ', 'return ', 'if ', 'else ', 'elseif ',
-               'while ', 'for ', 'repeat', 'until ', 'function '):
-        escaped = re.escape(kw.rstrip())
-        if kw.endswith(' '):
-            pattern = r'(?<!\n)\b(' + escaped + r')\s+'
+    def shield(match):
+        placeholder = f"___LINO_LITERAL_{len(literals)}___"
+        literals.append(match.group(0))
+        return placeholder
+
+    shielded_code = re.sub(literal_pattern, shield, code, flags=re.DOTALL)
+
+    for kw in ('end', 'local', 'return', 'if', 'else', 'elseif', 'while', 'for', 'repeat', 'until', 'function'):
+        escaped = re.escape(kw)
+        if kw == 'function':
+            pattern = r'(?<!\n)(?<!\blocal\s)\b(' + escaped + r')\b'
         else:
             pattern = r'(?<!\n)\b(' + escaped + r')\b'
-        code = re.sub(pattern, r'\n\1 ', code)
-    return code
+        shielded_code = re.sub(pattern, r'\n\1 ', shielded_code)
 
-def _normalise_spaces(code: str) -> str:
-    code = re.sub(r'[ \t]{2,}', ' ', code)
-    code = re.sub(r'(?<![=~<>!])=(?!=)', ' = ', code)
-    code = re.sub(r'(?<![<>])([<>])(?!=)', r' \1 ', code)
-    code = re.sub(r'(?<![.])\.\.(?!\.)', ' .. ', code)
-    code = re.sub(r'[ \t]{2,}', ' ', code)
-    return code
+    shielded_code = re.sub(r'[ \t]{2,}', ' ', shielded_code)
+    shielded_code = re.sub(r'(?<![=~<>!])=(?!=)', ' = ', shielded_code)
+    shielded_code = re.sub(r'(?<![<>])([<>])(?!=)', r' \1 ', shielded_code)
+    shielded_code = re.sub(r'(?<![.])\.\.(?!\.)', ' .. ', shielded_code)
+    shielded_code = re.sub(r'[ \t]{2,}', ' ', shielded_code)
 
-def _strip_string_content(line: str) -> str:
-    line = re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
-    line = re.sub(r"'(?:[^'\\]|\\.)*'", "''", line)
-    line = re.sub(r'--.*', '', line)
-    return line
-
-def _indent(lines: list[str]) -> list[str]:
+    lines = [l.strip() for l in shielded_code.split('\n')]
     depth = 0
-    out: list[str] = []
-    for raw in lines:
-        line = raw.strip()
+    indented_lines = []
+
+    for line in lines:
         if not line:
-            out.append('')
+            indented_lines.append('')
             continue
-        safe = _strip_string_content(line)
-        first = (safe.split() or [''])[0].rstrip('(')
+
+        first = (line.split() or [''])[0].rstrip('(')
         if first in _CLOSERS:
             depth = max(0, depth - 1)
-        out.append('    ' * depth + line)
-        func_opens = len(_FUNC_PAT.findall(safe))
-        kw_opens = len(_KW_OPEN.findall(safe))
-        kw_closes = len(_KW_CLOSE.findall(safe))
-        opens = func_opens + kw_opens
-        closes = kw_closes
+
+        indented_lines.append('    ' * depth + line)
+
+        opens = len(_FUNC_PAT.findall(line)) + len(_KW_OPEN.findall(line))
+        closes = len(_KW_CLOSE.findall(line))
+
         if first in ('else', 'elseif'):
             depth += 1
         else:
             delta = opens - closes
             if delta > 0:
                 depth += delta
-    return out
 
-def beautify(code: str) -> str:
-    code = _remove_noise_comments(code)
-    code = _semicolons_to_newlines(code)
-    code = _expand_compact_blocks(code)
-    code = _normalise_spaces(code)
-    lines = [l.rstrip() for l in code.split('\n')]
-    lines = _indent(lines)
-    result_lines: list[str] = []
+    final_code = '\n'.join(indented_lines)
+    
+    final_code = re.sub(r'___LINO_LITERAL_(\d+)___', lambda m: literals[int(m.group(1))], final_code)
+
+    result_lines = []
     blank_run = 0
-    for ln in lines:
-        if ln == '':
+    for ln in final_code.split('\n'):
+        if ln.strip() == '':
             blank_run += 1
             if blank_run <= 1:
                 result_lines.append('')
         else:
             blank_run = 0
             result_lines.append(ln)
+
     return '\n'.join(result_lines).strip()
