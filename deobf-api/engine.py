@@ -1,4 +1,4 @@
-Import os, re, shutil, subprocess, tempfile, base64, urllib.request, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
+import os, re, shutil, subprocess, tempfile, base64, urllib.request, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
 from collections import defaultdict, Counter, deque
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any, Set
@@ -542,59 +542,58 @@ class ASTDecompiler:
             return _format_clean_vm(prepared)
 
 class Instrumenter:
-    """Post-processes deobfuscated Lua code to add environment logging, opcode hooks, and meaningful variable renaming."""
     def instrument(self, code):
+        code = global_fold_math_regex(code)
         lines = code.split('\n')
         output = []
         inserted_env = False
         inserted_hook = False
-        state_var = 'l'   # default, will be overwritten if found
-
-        # Detect the state variable from while loop
+        state_var = 'l'
         for line in lines:
             m = re.search(r'while\s+(\w+)\s+do', line)
             if m:
                 state_var = m.group(1)
                 break
-
         i = 0
         while i < len(lines):
             line = lines[i].rstrip()
-            
-            # Insert environment logger after the first line that looks like a function body start
             if not inserted_env and re.match(r'^(local\s+)?function\b|^return\s*\(?\s*function', line):
                 output.append(line)
-                output.append('')
+                output.append('    -- Advanced Semantic Environment Logger Proxy')
+                output.append('    local originalEnv = getfenv and getfenv() or _ENV')
                 output.append('    local loggedEnv = setmetatable({}, {')
-                output.append('        __index = function(t, k)')
-                output.append('            local v = _G[k]')
-                output.append('            print(string.format("[ENV READ] %s = %s", k, tostring(v)))')
-                output.append('            return v')
+                output.append('        __index = function(t, key)')
+                output.append('            local value = originalEnv[key]')
+                output.append('            print(string.format("[ENV READ] Global Access: \'%s\' -> Value: %s", tostring(key), tostring(value)))')
+                output.append('            if key == "HttpService" or key == "request" then')
+                output.append('                print("   ↳ [RENAME HINT] This block handles web traffic -> targets: httpResponse")')
+                output.append('            elseif key == "LocalPlayer" or key == "Character" then')
+                output.append('                print("   ↳ [RENAME HINT] This block manipulates entities -> targets: character")')
+                output.append('            elseif type(value) == "function" then')
+                output.append('                print("   ↳ [RENAME HINT] This block invokes outside executors -> targets: loadedFunc")')
+                output.append('            end')
+                output.append('            return value')
                 output.append('        end,')
-                output.append('        __newindex = function(t, k, v)')
-                output.append('            print(string.format("[ENV WRITE] %s = %s", k, tostring(v)))')
-                output.append('            rawset(_G, k, v)')
+                output.append('        __newindex = function(t, key, value)')
+                output.append('            print(string.format("[ENV WRITE] Global Modified: \'%s\' = %s", tostring(key), tostring(value)))')
+                output.append('            originalEnv[key] = value')
                 output.append('        end')
                 output.append('    })')
-                output.append('    _ENV = loggedEnv')
+                output.append('    if getfenv then setfenv(1, loggedEnv) else _ENV = loggedEnv end')
+                output.append('')
                 inserted_env = True
                 i += 1
                 continue
-
-            # Insert opcode hook inside the main while loop just before the if chain
             if not inserted_hook and f'while {state_var} do' in line:
                 output.append(line)
+                output.append('        -- [HOOK OP] Dispatching Execution Block State Path')
                 output.append(f'        print(string.format("[HOOK OP] State ID: %d", {state_var}))')
                 inserted_hook = True
                 i += 1
                 continue
-
             output.append(line)
             i += 1
-
         code = '\n'.join(output)
-
-        # Rename common obfuscated variables to their architectural roles
         renames = {
             r'\bR\b': 'EncryptedStrings',
             r'\bE\b': 'GetString',
@@ -610,8 +609,26 @@ class Instrumenter:
         }
         for pat, repl in renames.items():
             code = re.sub(pat, repl, code)
+        return self.beautify_formatting(code)
 
-        return _format_clean_vm(code)
+    def beautify_formatting(self, code):
+        code = re.sub(r'\n\s*\n', '\n', code)
+        lines = code.split('\n')
+        indent_level = 0
+        beautified = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('end') or line.startswith('else') or line.startswith('elseif') or line.startswith('}'):
+                indent_level = max(0, indent_level - 1)
+            beautified.append('    ' * indent_level + line)
+            if (line.endswith('then') or line.endswith('do') or line.endswith('{') or
+                (line.startswith('local function') or line.startswith('function')) and not line.endswith('end')) and not line.startswith('end'):
+                indent_level += 1
+            elif line.startswith('else') or line.startswith('elseif'):
+                indent_level += 1
+        return '\n'.join(beautified)
 
 class Unveiler:
     def __init__(self, java_available, unluac_path, run_unluac_fn, run_lua_harness_fn):
@@ -639,7 +656,6 @@ class Unveiler:
         result = decompiler.decompile()
         if result and _looks_like_real_code(result):
             self._log("ast_decompile_success", True, f"decompiled {len(result)} chars")
-            # Instrument the deobfuscated code
             instrumenter = Instrumenter()
             result = instrumenter.instrument(result)
             header = "-- Deobfuscated & Instrumented via AST pipeline\n\n"
