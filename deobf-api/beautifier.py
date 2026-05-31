@@ -12,7 +12,7 @@ def _remove_noise_comments(code: str) -> str:
     return re.sub(r'\s*--\s*-?\d{4,}\b', '', code)
 
 def _semicolons_to_newlines(code: str) -> str:
-    return re.sub(r';', '\n', code)
+    return code
 
 def _expand_compact_blocks(code: str) -> str:
     for kw in ('end', 'local ', 'return ', 'if ', 'else ', 'elseif ',
