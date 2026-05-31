@@ -1,9 +1,16 @@
 FROM python:3.10-slim
 
 RUN apt-get update && apt-get install -y \
-    default-jre-headless curl unzip git lua5.1 \
-    build-essential pkg-config liblua5.1-0-dev liblua5.1-dev && \
-    rm -rf /var/lib/apt/lists/*
+    default-jre-headless \
+    curl \
+    unzip \
+    git \
+    lua5.1 \
+    build-essential \
+    pkg-config \
+    liblua5.1-0-dev \
+    liblua5.1-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L https://github.com/lune-org/lune/releases/download/v0.8.0/lune-0.8.0-linux-x86_64.zip \
     -o /tmp/lune.zip && \
@@ -13,8 +20,12 @@ RUN curl -L https://github.com/lune-org/lune/releases/download/v0.8.0/lune-0.8.0
 
 WORKDIR /app
 COPY . /app/
-RUN pip install -r requirements.txt
+
+RUN pip install --no-cache-dir -r requirements.txt
+
 RUN git clone https://github.com/Renbex0/Virtual-Machine.git /app/renbex0
+
 ADD https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar /opt/unluac.jar
 ENV UNLUAC_PATH=/opt/unluac.jar
+
 CMD ["sh", "-c", "gunicorn -w 1 --threads 8 -b 0.0.0.0:${PORT} --timeout 150 --graceful-timeout 15 api:app"]
