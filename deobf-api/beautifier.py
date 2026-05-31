@@ -22,6 +22,9 @@ def beautify(code: str) -> str:
 
     shielded_code = re.sub(literal_pattern, shield, code, flags=re.DOTALL)
 
+    shielded_code = re.sub(r'([,{}\[\]\(\)])', r' \1 ', shielded_code)
+    shielded_code = re.sub(r'\b(end)\b\s*(?!then|else|elseif|\buntil\b|\)|,)', r'\1\n', shielded_code)
+
     for kw in ('end', 'local', 'return', 'if', 'else', 'elseif', 'while', 'for', 'repeat', 'until', 'function'):
         escaped = re.escape(kw)
         if kw == 'function':
@@ -34,6 +37,12 @@ def beautify(code: str) -> str:
     shielded_code = re.sub(r'(?<![=~<>!])=(?!=)', ' = ', shielded_code)
     shielded_code = re.sub(r'(?<![<>])([<>])(?!=)', r' \1 ', shielded_code)
     shielded_code = re.sub(r'(?<![.])\.\.(?!\.)', ' .. ', shielded_code)
+
+    shielded_code = re.sub(r'\s*,\s*', ', ', shielded_code)
+    shielded_code = re.sub(r'\(\s+', '(', shielded_code)
+    shielded_code = re.sub(r'\s+\)', ')', shielded_code)
+    shielded_code = re.sub(r'\{\s+', '{', shielded_code)
+    shielded_code = re.sub(r'\s+\}', '}', shielded_code)
     shielded_code = re.sub(r'[ \t]{2,}', ' ', shielded_code)
 
     lines = [l.strip() for l in shielded_code.split('\n')]
@@ -45,21 +54,28 @@ def beautify(code: str) -> str:
             indented_lines.append('')
             continue
 
-        first = (line.split() or [''])[0].rstrip('(')
-        if first in _CLOSERS:
+        opens_inline = len(_FUNC_PAT.findall(line)) + len(_KW_OPEN.findall(line))
+        closes_inline = len(_KW_CLOSE.findall(line))
+
+        first = (line.split() or [''])[0].rstrip('(').rstrip('{')
+
+        if first in _CLOSERS and not (first in _OPENERS and closes_inline == opens_inline):
             depth = max(0, depth - 1)
 
         indented_lines.append('    ' * depth + line)
 
-        opens = len(_FUNC_PAT.findall(line)) + len(_KW_OPEN.findall(line))
-        closes = len(_KW_CLOSE.findall(line))
-
         if first in ('else', 'elseif'):
-            depth += 1
+            delta = opens_inline - closes_inline
+            if delta > 0:
+                depth += (delta - 1)
+            elif delta < 0:
+                depth = max(0, depth + delta)
         else:
-            delta = opens - closes
+            delta = opens_inline - closes_inline
             if delta > 0:
                 depth += delta
+            elif delta < 0:
+                depth = max(0, depth + delta)
 
     final_code = '\n'.join(indented_lines)
     final_code = re.sub(r'___LINO_LITERAL_(\d+)___', lambda m: literals[int(m.group(1))], final_code)
