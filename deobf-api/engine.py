@@ -4,6 +4,7 @@ from typing import List, Dict, Tuple, Optional, Any
 
 from string_decoder import StringTableDecoder
 from devirtualiser import Devirtualiser, strip_bootstrap
+from state_machine_devirt import StateMachineLifter
 from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
@@ -51,7 +52,18 @@ class Unveiler:
             self._log('harness_success', True, f'captured {len(harness_result)} chars')
             return harness_result, 'lua_harness', 'Harness captured original source'
 
-        self._log('devirtualise', True, 'running static devirtualisation')
+        self._log('devirtualise', True, 'attempting state machine unflattening')
+        sm_lifter = StateMachineLifter(source, decoder.strings)
+        lifted_result = sm_lifter.lift()
+
+        if lifted_result:
+            renamer = VarRenamer()
+            final_code = renamer.rename(lifted_result)
+            final_code = beautify(final_code)
+            self._log('devirtualise_success', True, 'state machine unflattened')
+            return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
+
+        self._log('devirtualise', True, 'falling back to static devirtualisation')
         devirt = Devirtualiser(decoder)
         result = devirt.process(source)
 
@@ -59,16 +71,10 @@ class Unveiler:
             renamer = VarRenamer()
             result = renamer.rename(result)
             result = beautify(result)
-
-            if devirt.vm_detected:
-                header = '-- [VM DETECTED] Devirtualised via control-flow unflattening\n\n'
-            else:
-                header = '-- Deobfuscated via static analysis\n\n'
-            self._log('devirtualise_success', True, f'output {len(result)} chars')
+            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete'
 
         self._log('devirtualise', False, 'static analysis produced no meaningful output')
-
         lines = [f'-- [{i}] {json.dumps(str(s))}' for i, s in enumerate(decoder.strings) if s]
         return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
 
@@ -88,6 +94,7 @@ class DeobfEngine:
             'lua_harness': self.harness.available,
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'var_renamer': True,
+            'state_machine_lifter': True,
         }
 
     def _trace(self, stage: str, success: bool, message: str) -> None:
@@ -98,7 +105,7 @@ class DeobfEngine:
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('static_analysis', 'lua_harness'):
+        if result and method in ('state_machine_lifted', 'static_analysis', 'lua_harness'):
             result = self.var_renamer.rename(result)
         if logger:
             for entry in self.unveiler.trace:
