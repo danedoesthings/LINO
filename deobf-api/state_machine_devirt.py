@@ -53,6 +53,8 @@ class HighLevelDevirtualizer:
 
             if "vmStack[" in trimmed and "vmState" in trimmed:
                 continue
+            if "Q[" in trimmed and "l" in trimmed and "=" in trimmed and not trimmed.startswith('if'):
+                continue
 
             if '=' in trimmed and not (trimmed.startswith('if') or trimmed.startswith('while')):
                 parts = trimmed.split('=', 1)
@@ -66,42 +68,43 @@ class HighLevelDevirtualizer:
 
                     for stored_reg, stored_val in list(symbolic_stack.items()):
                         expr_val = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, expr_val)
+                        expr_val = re.sub(rf'\bQ\[{re.escape(stored_reg)}\]', stored_val, expr_val)
 
-                    stack_target_match = re.match(r'^vmStack\[(\w+)\]$', target)
+                    stack_target_match = re.match(r'^(?:vmStack|Q)\[(\w+)\]$', target)
                     if stack_target_match:
                         reg_id = stack_target_match.group(1)
                         symbolic_stack[reg_id] = expr_val
                     else:
                         for stored_reg, stored_val in list(symbolic_stack.items()):
-                            target = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, target)
-                        if target not in ("GetStr", "") and "vmState" not in target:
+                            target = re.sub(rf'\b(?:vmStack|Q)\[{re.escape(stored_reg)}\]', stored_val, target)
+                        if target not in ("GetStr", "E", "") and "vmState" not in target and not re.match(r'^[l]\s*$', target):
                             high_level_lines.append(f"{target} = {expr_val}")
                 continue
 
-            call_match = re.match(r'^vmStack\[(\w+)\]\s*\((.*)\)$', trimmed)
+            call_match = re.match(r'^(?:vmStack|Q)\[(\w+)\]\s*\((.*)\)$', trimmed)
             if call_match:
                 func_reg = call_match.group(1)
                 args_raw = call_match.group(2)
-                func_name = symbolic_stack.get(func_reg, f"vmStack[{func_reg}]")
+                func_name = symbolic_stack.get(func_reg, f"Q[{func_reg}]")
 
                 resolved_args = []
                 if args_raw:
                     for arg in [a.strip() for a in args_raw.split(',')]:
-                        reg_lookup = re.match(r'^vmStack\[(\w+)\]$', arg)
+                        reg_lookup = re.match(r'^(?:vmStack|Q)\[(\w+)\]$', arg)
                         if reg_lookup and reg_lookup.group(1) in symbolic_stack:
                             resolved_args.append(symbolic_stack[reg_lookup.group(1)])
                         else:
                             for stored_reg, stored_val in list(symbolic_stack.items()):
-                                arg = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, arg)
+                                arg = re.sub(rf'\b(?:vmStack|Q)\[{re.escape(stored_reg)}\]', stored_val, arg)
                             resolved_args.append(arg)
 
                 high_level_lines.append(f"{func_name}({', '.join(resolved_args)})")
                 continue
 
             for stored_reg, stored_val in list(symbolic_stack.items()):
-                trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
+                trimmed = re.sub(rf'\b(?:vmStack|Q)\[{re.escape(stored_reg)}\]', stored_val, trimmed)
 
-            if trimmed and not (trimmed.startswith("if vmState") or "vmStack[" in trimmed or "GetStr" in trimmed or "instrTbl" in trimmed):
+            if trimmed and not (trimmed.startswith("if l") or trimmed.startswith("if vmState") or "Q[" in trimmed or "GetStr" in trimmed or "instrTbl" in trimmed):
                 high_level_lines.append(trimmed)
 
         return '\n'.join(high_level_lines)
@@ -142,7 +145,7 @@ class StateMachineLifter:
     def __init__(self, source: str, decoded_strings: list = None):
         self.source = source
         self.strings = decoded_strings if decoded_strings else []
-        self.state_var = "vmState"
+        self.state_var = "l"
         self.state_to_block: Dict[int, str] = {}
         self.transitions: Dict[int, Any] = {}
         self.entry_state: Optional[int] = None
@@ -232,8 +235,10 @@ class StateMachineLifter:
             if not trimmed:
                 continue
 
-            if_match = re.match(rf'^if\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
-            elseif_match = re.match(rf'^elseif\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
+            if_match = re.match(rf'if\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
+            elseif_match = re.match(rf'elseif\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
+            else_match = re.match(r'else\s*$', trimmed)
+            end_match = re.match(r'end\s*$', trimmed)
 
             if if_match and internal_if_depth == 0:
                 if current_lines:
@@ -252,18 +257,15 @@ class StateMachineLifter:
                     stack.append((prev_op, prev_val, True))
                 stack.append((op, val, False))
 
-            elif trimmed == 'else':
-                if internal_if_depth == 0:
-                    if current_lines:
-                        blocks.append((list(stack), '\n'.join(current_lines)))
-                        current_lines = []
-                    if stack:
-                        op, val, _ = stack.pop()
-                        stack.append((op, val, True))
-                else:
-                    current_lines.append(line)
+            elif else_match and internal_if_depth == 0:
+                if current_lines:
+                    blocks.append((list(stack), '\n'.join(current_lines)))
+                    current_lines = []
+                if stack:
+                    op, val, _ = stack.pop()
+                    stack.append((op, val, True))
 
-            elif trimmed == 'end':
+            elif end_match:
                 if internal_if_depth > 0:
                     internal_if_depth -= 1
                     current_lines.append(line)
@@ -274,7 +276,7 @@ class StateMachineLifter:
                     if stack:
                         stack.pop()
             else:
-                if re.match(r'^if\s', trimmed) and not if_match:
+                if re.match(r'if\s', trimmed) and not if_match:
                     internal_if_depth += 1
                 current_lines.append(line)
 
@@ -405,4 +407,6 @@ class StateMachineLifter:
             return m.group(0)
 
         code = re.sub(r'\bGetStr\s*\(\s*(\d+)\s*\)', repl, code)
-        return re.sub(r'\bGetStr\s*\[\s*(\d+)\s*\]', repl, code)
+        code = re.sub(r'\bGetStr\s*\[\s*(\d+)\s*\]', repl, code)
+        code = re.sub(r'\bE\s*\(\s*(-?\d+(?:[+\-]\d+)*)\)', repl, code)
+        return code
