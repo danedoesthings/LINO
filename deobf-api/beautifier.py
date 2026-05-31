@@ -9,7 +9,8 @@ _KW_CLOSE = re.compile(r'\bend\b')
 _ELSE_PAT = re.compile(r'\b(else|elseif)\b')
 
 def _remove_noise_comments(code: str) -> str:
-    return re.sub(r'\s*--\s*-?\d{4,}\b', '', code)
+    clean_code = re.sub(r'[ \t]*--\s*-?\d{4,}', ' ', code)
+    return re.sub(r'[ \t]+', ' ', clean_code)
 
 def _semicolons_to_newlines(code: str) -> str:
     return code
