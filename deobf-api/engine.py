@@ -243,48 +243,55 @@ def _get_e_offset(source):
     if m:
         try:
             return int(eval(re.sub(r'\s+', '', m.group(1))))
-        except Exception:
+        except:
             pass
     return None
 
-def _eval_arith(expr):
+def safe_eval_int(expr):
+    """Evaluate integer arithmetic safely. Supports + - * / % ( ) and negative numbers."""
     expr = re.sub(r'\s+', '', str(expr))
-    if not re.match(r'^[\-\d+*()/%^]+$', expr):
-        return None
+    def clean_doubles(s):
+        old = ''
+        while old != s:
+            old = s
+            s = s.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
+        return s
+    expr = clean_doubles(expr)
+    while '(' in expr:
+        m = re.search(r'\(([^()]+)\)', expr)
+        if not m:
+            break
+        inner = safe_eval_int(m.group(1))
+        expr = expr[:m.start()] + str(inner) + expr[m.end():]
+        expr = clean_doubles(expr)
+    while True:
+        m = re.search(r'(-?\d+)([\*/%])(-?\d+)', expr)
+        if not m:
+            break
+        a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+        if op == '*':
+            res = a * b
+        elif op == '/':
+            res = a // b if b != 0 else 0
+        elif op == '%':
+            res = a % b if b != 0 else 0
+        expr = expr[:m.start()] + str(res) + expr[m.end():]
+        expr = clean_doubles(expr)
+    tokens = re.findall(r'([+-]?\d+)', expr)
+    if tokens:
+        return sum(int(t) for t in tokens)
     try:
-        result = eval(expr)
-        if isinstance(result, (int, float)):
-            return int(result)
+        return int(expr)
     except:
         return None
 
-def _simplify_arithmetic(code):
-    pattern = r'\([-]?\d+(?:\s*[+\-*/%^]\s*[-]?\d+)+\)'
-    prev = None
-    while prev != code:
-        prev = code
-        def repl(m):
-            val = _eval_arith(m.group(0))
-            if val is not None:
-                return str(val)
-            return m.group(0)
-        code = re.sub(pattern, repl, code)
-    bare_pattern = r'(?<![a-zA-Z0-9_])[-]?\d+(?:\s*[+\-*/%^]\s*[-]?\d+)+(?![a-zA-Z0-9_])'
-    def bare_repl(m):
-        val = _eval_arith(m.group(0))
-        if val is not None:
-            return str(val)
-        return m.group(0)
-    code = re.sub(bare_pattern, bare_repl, code)
-    return code
-
 def _substitute_e_calls(source, full_strings):
-    source = _simplify_arithmetic(source)
     offset = _get_e_offset(source)
     if offset is None:
         return source
     def repl(m):
-        n = _eval_arith(m.group(1))
+        inner = m.group(1)
+        n = safe_eval_int(inner)
         if n is None:
             return m.group(0)
         lua_idx = n + offset
@@ -295,7 +302,17 @@ def _substitute_e_calls(source, full_strings):
                 return 'nil'
             return json.dumps(str(val))
         return m.group(0)
-    return re.sub(r'\bE\s*\(\s*(-?\d+)\s*\)', repl, source)
+    return re.sub(r'\bE\s*\(\s*([^)]+)\s*\)', repl, source)
+
+def _global_simplify_arithmetic(code):
+    """Fold all remaining numeric expressions into single numbers."""
+    while True:
+        prev = code
+        code = re.sub(r'\((\d+)\)', r'\1', code)  # remove single-num parens
+        code = re.sub(r'\b(\d+)\s*([+\-*/%])\s*(\d+)\b', lambda m: str(safe_eval_int(m.group(0))), code)
+        if code == prev:
+            break
+    return code
 
 def _strip_bootstrap(source):
     markers = [
@@ -322,7 +339,7 @@ def _escape_lua_string(s):
 
 def _prepare_source_for_ast(source, full_strings):
     source = _substitute_e_calls(source, full_strings)
-    source = _simplify_arithmetic(source)
+    source = _global_simplify_arithmetic(source)
     source = _strip_bootstrap(source)
     return source
 
@@ -553,7 +570,6 @@ class ASTDecompiler:
         return hits >= 2
     def decompile(self):
         prepared = _prepare_source_for_ast(self.source, self.strings)
-        prepared = _simplify_arithmetic(prepared)
         is_vm = self._is_virtual_machine(prepared)
         if not HAS_LUAPARSER:
             return self._format_clean_vm(prepared)
