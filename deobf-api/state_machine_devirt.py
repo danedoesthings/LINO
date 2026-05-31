@@ -74,7 +74,6 @@ class HighLevelDevirtualizer:
                     else:
                         for stored_reg, stored_val in list(symbolic_stack.items()):
                             target = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, target)
-
                         if target not in ("GetStr", "") and "vmState" not in target:
                             high_level_lines.append(f"{target} = {expr_val}")
                 continue
