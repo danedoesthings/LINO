@@ -172,10 +172,52 @@ class StateMachineLifter:
             self.state_var = m.group(1)
 
     def _get_loop_body(self) -> Optional[str]:
-        pattern = rf'while\s+{re.escape(self.state_var)}\s+do\s*(.*?)\s*end\s*(?:$|\n)'
-        m = re.search(pattern, self.source, re.DOTALL)
-        if m:
-            return m.group(1)
+        start = self.source.find(f'while {self.state_var} do')
+        if start == -1:
+            start = self.source.find(f'while{self.state_var}do')
+        if start == -1:
+            return None
+
+        body_start = self.source.find('do', start)
+        if body_start == -1:
+            return None
+        body_start += 2
+
+        depth = 1
+        i = body_start
+        while i < len(self.source):
+            if self.source[i:i+5] == 'while':
+                depth += 1
+                i += 5
+                continue
+            if self.source[i:i+3] == 'end':
+                depth -= 1
+                if depth == 0:
+                    return self.source[body_start:i].strip()
+                i += 3
+                continue
+            if self.source[i] in ('"', "'"):
+                quote = self.source[i]
+                i += 1
+                while i < len(self.source) and self.source[i] != quote:
+                    if self.source[i] == '\\':
+                        i += 1
+                    i += 1
+                i += 1
+                continue
+            if self.source[i:i+2] == '--':
+                newline = self.source.find('\n', i)
+                if newline == -1:
+                    break
+                i = newline + 1
+                continue
+            if self.source[i:i+2] == '[[':
+                end_long = self.source.find(']]', i)
+                if end_long == -1:
+                    break
+                i = end_long + 2
+                continue
+            i += 1
         return None
 
     def _parse_nested_tree(self, loop_body: str) -> List[Tuple[List[Tuple[str, int, bool]], str]]:
