@@ -107,20 +107,22 @@ class StringTableDecoder:
         self._decode()
 
     def _decode(self) -> None:
-        src = fold_constants(self.source)
-        alpha = _extract_alphabet_from_numeric_table(src)
+        alpha = _extract_alphabet_from_numeric_table(self.source)
         if not alpha:
             self.diagnostics['error'] = 'alphabet not found'
             return
         self.alphabet = alpha
         self.diagnostics['alphabet'] = alpha[:10] + '...'
-        raw = _extract_raw_strings(src)
+
+        raw = _extract_raw_strings(self.source)
         if raw is None:
             self.diagnostics['error'] = 'R table not found'
             return
         self.diagnostics['raw_count'] = len(raw)
-        ops = _extract_shuffle_ops(src)
+
+        ops = _extract_shuffle_ops(self.source)
         self.diagnostics['shuffle_ops'] = len(ops)
+
         shuffled = _apply_shuffle(raw, ops)
         decoded: list[str] = []
         for s in shuffled:
@@ -128,7 +130,8 @@ class StringTableDecoder:
         self.strings = decoded
         self.ok = True
         self.diagnostics['decoded_count'] = len(decoded)
-        self.offset = get_string_table_offset(src)
+
+        self.offset = get_string_table_offset(self.source)
         self.diagnostics['offset'] = self.offset
 
     def _decode_entry(self, s: str) -> str:
