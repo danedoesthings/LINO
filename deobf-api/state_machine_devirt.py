@@ -65,22 +65,27 @@ class StateMachineLifter:
         stack: List[Tuple[str, int, bool]] = []
         blocks: List[Tuple[List[Tuple[str, int, bool]], str]] = []
         current_lines: List[str] = []
+        
+        # FIXED: Explicitly ignore internal scopes by tracking non-dispatcher if statement depths
+        internal_if_depth = 0 
 
         for line in lines:
             trimmed = line.strip()
             if not trimmed:
                 continue
 
-            if_match = re.match(rf'if\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
-            elseif_match = re.match(rf'elseif\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
+            # Strict matches checking only the dispatcher value context mutations
+            if_match = re.match(rf'^if\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
+            elseif_match = re.match(rf'^elseif\s+{re.escape(self.state_var)}\s*(<|<=|>|>=|==)\s*(-?\d+)\s*then', trimmed)
 
-            if if_match:
+            if if_match and internal_if_depth == 0:
                 if current_lines:
                     blocks.append((list(stack), '\n'.join(current_lines)))
                     current_lines = []
                 op, val = if_match.group(1), int(if_match.group(2))
                 stack.append((op, val, False))
-            elif elseif_match:
+                
+            elif elseif_match and internal_if_depth == 0:
                 if current_lines:
                     blocks.append((list(stack), '\n'.join(current_lines)))
                     current_lines = []
@@ -89,22 +94,34 @@ class StateMachineLifter:
                     prev_op, prev_val, _ = stack.pop()
                     stack.append((prev_op, prev_val, True))
                 stack.append((op, val, False))
+                
             elif trimmed == 'else':
-                if current_lines:
-                    blocks.append((list(stack), '\n'.join(current_lines)))
-                    current_lines = []
-                if stack:
-                    op, val, _ = stack.pop()
-                    stack.append((op, val, True))
+                if internal_if_depth == 0:
+                    if current_lines:
+                        blocks.append((list(stack), '\n'.join(current_lines)))
+                        current_lines = []
+                    if stack:
+                        op, val, _ = stack.pop()
+                        stack.append((op, val, True))
+                else:
+                    current_lines.append(line)
+                    
             elif trimmed == 'end':
-                if current_lines:
-                    blocks.append((list(stack), '\n'.join(current_lines)))
-                    current_lines = []
-                depth_count = 1
-                while stack and depth_count > 0:
-                    stack.pop()
-                    depth_count -= 1
+                if internal_if_depth > 0:
+                    # Closing an internal standard statement block, keep line
+                    internal_if_depth -= 1
+                    current_lines.append(line)
+                else:
+                    # Closing an outer dispatcher binary tree node structure path context
+                    if current_lines:
+                        blocks.append((list(stack), '\n'.join(current_lines)))
+                        current_lines = []
+                    if stack:
+                        stack.pop()
             else:
+                # Catch regular inline conditional flows that do NOT belong to the main state driver map
+                if re.match(r'^if\s', trimmed) and not if_match:
+                    internal_if_depth += 1
                 current_lines.append(line)
 
         if current_lines:
@@ -114,6 +131,7 @@ class StateMachineLifter:
 
     def _map_states_to_blocks(self, blocks: list, loop_body: str):
         all_ids = set()
+        # Ensure we catch numbers used in arithmetic expansions cleanly
         for num_str in re.findall(r'-?\d+', loop_body):
             try:
                 all_ids.add(int(num_str))
@@ -122,18 +140,13 @@ class StateMachineLifter:
 
         def satisfies(sid: int, constraints: List[Tuple[str, int, bool]]) -> bool:
             for op, val, inverted in constraints:
-                if op == '<':
-                    result = sid < val
-                elif op == '<=':
-                    result = sid <= val
-                elif op == '>':
-                    result = sid > val
-                elif op == '>=':
-                    result = sid >= val
-                elif op == '==':
-                    result = sid == val
-                else:
-                    result = True
+                if op == '<': result = sid < val
+                elif op == '<=': result = sid <= val
+                elif op == '>': result = sid > val
+                elif op == '>=': result = sid >= val
+                elif op == '==': result = sid == val
+                else: result = True
+                
                 if inverted:
                     result = not result
                 if not result:
@@ -147,6 +160,7 @@ class StateMachineLifter:
             for sid in all_ids:
                 if satisfies(sid, constraints):
                     existing = self.state_to_block.get(sid, '')
+                    # Map code precisely to avoid duplicating segments across matched conditions
                     if len(clean_code) > len(existing):
                         self.state_to_block[sid] = clean_code
 
@@ -164,8 +178,6 @@ class StateMachineLifter:
             assigns = list(re.finditer(rf'{re.escape(self.state_var)}\s*=\s*(-?\d+)', block))
             if assigns:
                 self.transitions[sid] = ('simple', int(assigns[-1].group(1)))
-            elif re.search(rf'return\s+packArgs', block):
-                self.transitions[sid] = ('terminal', None)
             else:
                 self.transitions[sid] = ('terminal', None)
 
@@ -186,10 +198,6 @@ class StateMachineLifter:
                 if 'allocSlot' in self.state_to_block.get(pe, ''):
                     self.entry_state = pe
                     return
-            for pe in potential_entries:
-                if any(kw in self.state_to_block.get(pe, '') for kw in ('EncStr', 'instrTbl', 'vmStack')):
-                    self.entry_state = pe
-                    return
             self.entry_state = list(potential_entries)[0]
         else:
             self.entry_state = min(self.state_to_block.keys()) if self.state_to_block else None
@@ -206,8 +214,7 @@ class StateMachineLifter:
             block = self.state_to_block[sid]
             clean_block = re.sub(
                 rf'[ \t]*{re.escape(self.state_var)}\s*=\s*[^;\n]+[;\n]?', '', block
-            )
-            clean_block = clean_block.strip()
+            ).strip()
 
             if clean_block:
                 for line in clean_block.split('\n'):
@@ -230,25 +237,9 @@ class StateMachineLifter:
                 output_lines.append('    ' * indent + 'else')
                 trace(right_sid, indent + 1)
                 output_lines.append('    ' * indent + 'end')
-            elif t_type == 'terminal':
-                pass
 
         if self.entry_state is not None:
             trace(self.entry_state)
-
-        for sid in sorted(self.state_to_block.keys()):
-            if sid not in visited:
-                block = self.state_to_block[sid]
-                clean_block = re.sub(
-                    rf'[ \t]*{re.escape(self.state_var)}\s*=\s*[^;\n]+[;\n]?', '', block
-                ).strip()
-                if clean_block and len(clean_block) > 10:
-                    output_lines.append('')
-                    for line in clean_block.split('\n'):
-                        stripped = line.strip()
-                        if stripped:
-                            output_lines.append(stripped)
-                    break
 
         return self._resolve_string_refs('\n'.join(output_lines))
 
