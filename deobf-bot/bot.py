@@ -9,6 +9,7 @@ import datetime
 import asyncio
 import json
 from discord.ext import commands
+from discord import app_commands
 
 logging.basicConfig(
     level=logging.INFO,
@@ -311,6 +312,54 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
         diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
         await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file)
+
+@tree.command(name='debug', description='Debug the Lua harness with a file')
+async def slash_debug(interaction: discord.Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
+        return await interaction.response.send_message(
+            'Please attach a `.lua`, `.luau`, or `.txt` file.',
+            ephemeral=True
+        )
+
+    if file.size > MAX_BYTES:
+        return await interaction.response.send_message(
+            f'File too large ({file.size} bytes, max {MAX_BYTES})',
+            ephemeral=True
+        )
+
+    await interaction.response.defer(thinking=True)
+
+    raw = await file.read()
+    source_b64 = base64.b64encode(raw).decode('ascii')
+
+    try:
+        async with httpx.AsyncClient(timeout=180) as c:
+            r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return await interaction.followup.send(f'Debug request failed: {str(e)[:1000]}')
+
+    em = discord.Embed(
+        title='Harness Debug Result',
+        color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
+    )
+    em.add_field(name='Lua Found', value=str(data.get('lua_found', 'unknown')), inline=True)
+    em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
+    em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
+    em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
+
+    stdout = data.get('stdout', '')
+    stderr = data.get('stderr', '')
+
+    if stdout:
+        em.add_field(name='stdout', value=f'```\n{stdout[:900]}\n```', inline=False)
+    if stderr:
+        em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
+    if not stdout and not stderr:
+        em.add_field(name='Output', value='(empty)', inline=False)
+
+    await interaction.followup.send(embed=em)
 
 @bot.event
 async def on_ready():
