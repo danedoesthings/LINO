@@ -36,6 +36,36 @@ class ExpressionFolder:
         return False
 
 
+class LuaBeautifier:
+    @staticmethod
+    def beautify(code: str) -> str:
+        code = re.sub(r'(\w+)\s*\[\s*(\w+)\s*\]', r'\1[\2]', code)
+        code = re.sub(r'\s*([=+\-*/%^,])\s*', r' \1 ', code)
+        code = re.sub(r'\bif\s+', 'if ', code)
+        code = re.sub(r'\s+then\b', ' then', code)
+        code = re.sub(r' +', ' ', code)
+        code = re.sub(r' , ', ', ', code)
+
+        lines = code.split('\n')
+        indent_level = 0
+        formatted_lines = []
+
+        for line in lines:
+            trimmed = line.strip()
+            if not trimmed:
+                continue
+
+            if trimmed.startswith('end') or trimmed.startswith('else') or trimmed.startswith('elseif'):
+                indent_level = max(0, indent_level - 1)
+
+            formatted_lines.append('    ' * indent_level + trimmed)
+
+            if trimmed.endswith('then') or trimmed.endswith('do') or trimmed.startswith('else') or trimmed.startswith('elseif'):
+                indent_level += 1
+
+        return '\n'.join(formatted_lines)
+
+
 class StateMachineLifter:
     def __init__(self, source: str, decoded_strings: list):
         self.source = source
@@ -253,7 +283,7 @@ class StateMachineLifter:
                 for line in clean_block.split('\n'):
                     stripped = line.strip()
                     if stripped:
-                        output_lines.append('    ' * indent + stripped)
+                        output_lines.append(stripped)
 
             t_info = self.transitions.get(sid)
             if not t_info:
@@ -265,18 +295,19 @@ class StateMachineLifter:
             elif t_type == 'cond':
                 cond, left_sid, right_sid = t_info[1], t_info[2], t_info[3]
                 clean_cond = self._resolve_string_refs(cond)
-                output_lines.append('    ' * indent + f'if {clean_cond} then')
+                output_lines.append(f'if {clean_cond} then')
                 trace(left_sid, indent + 1)
-                output_lines.append('    ' * indent + 'else')
+                output_lines.append('else')
                 trace(right_sid, indent + 1)
-                output_lines.append('    ' * indent + 'end')
+                output_lines.append('end')
 
         if self.entry_state is not None:
             trace(self.entry_state)
 
         raw_output = '\n'.join(output_lines)
         resolved_strings = self._resolve_string_refs(raw_output)
-        return ExpressionFolder.fold_math_expressions(resolved_strings)
+        folded_math = ExpressionFolder.fold_math_expressions(resolved_strings)
+        return LuaBeautifier.beautify(folded_math)
 
     def _resolve_string_refs(self, code: str) -> str:
         def repl(m):
@@ -286,4 +317,6 @@ class StateMachineLifter:
                 if s:
                     return repr(s)
             return m.group(0)
-        return re.sub(r'\bGetStr\s*\(\s*(\d+)\s*\)', repl, code)
+
+        code = re.sub(r'\bGetStr\s*\(\s*(\d+)\s*\)', repl, code)
+        return re.sub(r'\bGetStr\s*\[\s*(\d+)\s*\]', repl, code)
