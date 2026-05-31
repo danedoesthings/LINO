@@ -17,7 +17,7 @@ class ExpressionFolder:
                 pass
             return expr_str
 
-        for _ in range(5):
+        for _ in range(8):
             prev = text
             text = re.sub(r'\(([-+]?\d+(?:\s*[-+*/%^]\s*[-+]?\d+)+)\)', evaluate_match, text)
             text = re.sub(r'\b([-+]?\d+(?:\s*[-+*/%^]\s*[-+]?\d+)+)\b', evaluate_match, text)
@@ -48,10 +48,10 @@ class HighLevelDevirtualizer:
             if not trimmed:
                 continue
 
-            if "instrTbl" in trimmed or "nil" in trimmed:
+            if any(k in trimmed for k in ["instrTbl", "shuffleTbl", "allocSlot", "tokenMap", "cleanRef", "funcWrap", "helperG"]):
                 continue
 
-            if "vmStack[vmState]" in trimmed and "=" in trimmed and not trimmed.startswith('if'):
+            if "vmStack[" in trimmed and "vmState" in trimmed:
                 continue
 
             if '=' in trimmed and not (trimmed.startswith('if') or trimmed.startswith('while')):
@@ -82,7 +82,6 @@ class HighLevelDevirtualizer:
             if call_match:
                 func_reg = call_match.group(1)
                 args_raw = call_match.group(2)
-
                 func_name = symbolic_stack.get(func_reg, f"vmStack[{func_reg}]")
 
                 resolved_args = []
@@ -102,7 +101,7 @@ class HighLevelDevirtualizer:
             for stored_reg, stored_val in list(symbolic_stack.items()):
                 trimmed = re.sub(rf'\bvmStack\[{re.escape(stored_reg)}\]', stored_val, trimmed)
 
-            if trimmed and not (trimmed.startswith("if vmState") or "vmStack[vmState]" in trimmed or "GetStr" in trimmed):
+            if trimmed and not (trimmed.startswith("if vmState") or "vmStack[" in trimmed or "GetStr" in trimmed or "instrTbl" in trimmed):
                 high_level_lines.append(trimmed)
 
         return '\n'.join(high_level_lines)
@@ -140,9 +139,9 @@ class LuaBeautifier:
 
 
 class StateMachineLifter:
-    def __init__(self, source: str, decoded_strings: list):
+    def __init__(self, source: str, decoded_strings: list = None):
         self.source = source
-        self.strings = decoded_strings
+        self.strings = decoded_strings if decoded_strings else []
         self.state_var = "vmState"
         self.state_to_block: Dict[int, str] = {}
         self.transitions: Dict[int, Any] = {}
@@ -177,25 +176,6 @@ class StateMachineLifter:
         m = re.search(pattern, self.source, re.DOTALL)
         if m:
             return m.group(1)
-
-        start = self.source.find(f'while {self.state_var} do')
-        if start == -1:
-            return None
-
-        depth = 0
-        i = start
-        while i < len(self.source):
-            if self.source[i:i+5] == 'while':
-                depth += 1
-                i += 5
-            elif self.source[i:i+3] == 'end':
-                depth -= 1
-                if depth == 0:
-                    body_start = self.source.find('do', start) + 2
-                    return self.source[body_start:i]
-                i += 3
-            else:
-                i += 1
         return None
 
     def _parse_nested_tree(self, loop_body: str) -> List[Tuple[List[Tuple[str, int, bool]], str]]:
@@ -324,10 +304,6 @@ class StateMachineLifter:
         potential_entries = sources - all_targets
 
         if potential_entries:
-            for pe in potential_entries:
-                if 'allocSlot' in self.state_to_block.get(pe, ''):
-                    self.entry_state = pe
-                    return
             self.entry_state = list(potential_entries)[0]
         else:
             self.entry_state = min(self.state_to_block.keys()) if self.state_to_block else None
