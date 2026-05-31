@@ -21,7 +21,8 @@ class VarRenamer:
 
     def _fresh_reg(self) -> str:
         self._counter += 1
-        return f'r{self._counter:02d}'
+        prefix = 'v' if self._counter % 2 == 0 else 'r'
+        return f'{prefix}{self._counter}'
 
     @staticmethod
     def _replace_word(code: str, old: str, new: str) -> str:
