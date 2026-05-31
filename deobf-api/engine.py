@@ -1,7 +1,7 @@
 import os, re, shutil, subprocess, tempfile, base64, urllib.request, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
 from collections import defaultdict, Counter, deque
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 
 try:
     from luaparser import ast as lua_ast
@@ -281,7 +281,17 @@ def safe_eval_int(expr):
     except:
         return None
 
+def global_fold_math_regex(code):
+    def repl(m):
+        res = safe_eval_int(m.group(0))
+        return str(res) if res is not None else m.group(0)
+    for _ in range(5):
+        code = re.sub(r'\(([^()a-zA-Z_]+)\)', repl, code)
+        code = re.sub(r'\b(-\d+|\d+)\s*([+\-*/%])\s*(-\d+|\d+)\b', repl, code)
+    return code
+
 def _substitute_e_calls(source, full_strings):
+    source = global_fold_math_regex(source)
     offset = _get_e_offset(source)
     if offset is None:
         return source
@@ -299,15 +309,6 @@ def _substitute_e_calls(source, full_strings):
             return json.dumps(str(val))
         return m.group(0)
     return re.sub(r'\bE\s*\(\s*([^)]+)\s*\)', repl, source)
-
-def global_fold_math_regex(code):
-    def repl(m):
-        res = safe_eval_int(m.group(0))
-        return str(res) if res is not None else m.group(0)
-    for _ in range(5):
-        code = re.sub(r'\(([^()a-zA-Z_]+)\)', repl, code)
-        code = re.sub(r'\b(-\d+|\d+)\s*([+\-*/%])\s*(-\d+|\d+)\b', repl, code)
-    return code
 
 def _strip_bootstrap(source):
     markers = [
@@ -331,6 +332,19 @@ def _looks_like_real_code(text):
 
 def _escape_lua_string(s):
     return json.dumps(s)
+
+def _format_clean_vm(code):
+    code = re.sub(r'(?<!\n)\b(end)\b', r'\n\1\n', code)
+    code = re.sub(r'(?<!\n)\b(local\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(return\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(if\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(else\b)', r'\n\1\n', code)
+    code = re.sub(r'(?<!\n)\b(elseif\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(while\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(for\s)', r'\n\1', code)
+    code = re.sub(r'\}\s*\{', '}, {', code)
+    code = '\n'.join([line.strip() for line in code.split('\n') if line.strip()])
+    return code
 
 class RobustASTConstantFolder(lua_ast.ASTVisitor):
     def visit_BinaryOp(self, node):
@@ -526,45 +540,50 @@ class ASTDecompiler:
             return final_code
         except:
             return _format_clean_vm(prepared)
-    def _format_clean_vm(self, code):
-        code = re.sub(r'(?<!\n)\b(end)\b', r'\n\1\n', code)
-        code = re.sub(r'(?<!\n)\b(local\s)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(return\b)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(if\s)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(else\b)', r'\n\1\n', code)
-        code = re.sub(r'(?<!\n)\b(elseif\b)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(while\s)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(for\s)', r'\n\1', code)
-        code = re.sub(r'\}\s*\{', '}, {', code)
-        code = '\n'.join([line.strip() for line in code.split('\n') if line.strip()])
-        return code
 
+# =============================================================================
+# UPGRADED INSTRUMENTER with comment safety, smart splitting, and beautifier
+# =============================================================================
 class Instrumenter:
+    """Post-processes deobfuscated Lua code to add environment logging, opcode hooks,
+    meaningful variable renaming, fixing broken comments, and a multi-pass layout beautifier."""
+    
     def instrument(self, code):
         code = global_fold_math_regex(code)
+        
+        # ---- Fix accidental comment triggers (e.g., "--" from double negatives) ----
         processed_lines = []
         for line in code.split('\n'):
-            if "--" in line and not any(safe in line for safe in ["[HOOK OP]", "[VM DETECTED]", "Advanced Semantic", "Deobfuscated & Instrumented"]):
+            if "--" in line and not any(safe_header in line for safe_header in [
+                "[HOOK OP]", "[VM DETECTED]", "Advanced Semantic", "Deobfuscated & Instrumented"
+            ]):
                 line = line.replace("--", " - - ")
             processed_lines.append(line)
         code = '\n'.join(processed_lines)
+
+        # ---- Separate keywords crushed next to numbers ----
         code = re.sub(r'([0-9a-zA-Z_])\s*(and|or|not|then|do|end|else|elseif)\b', r'\1 \2', code)
         code = re.sub(r'\b(and|or|not|then|do|end|else|elseif)\s*([0-9a-zA-Z_])', r'\1 \2', code)
+
+        # ---- Inject environment logger and opcode hooks ----
         lines = code.split('\n')
         output = []
         inserted_env = False
         inserted_hook = False
         state_var = 'l'
+
         for line in lines:
             m = re.search(r'while\s+(\w+)\s+do', line)
             if m:
                 state_var = m.group(1)
                 break
+
         i = 0
         while i < len(lines):
             line = lines[i].rstrip()
             if not inserted_env and re.match(r'^(local\s+)?function\b|^return\s*\(?\s*function', line):
                 output.append(line)
+                output.append('    -- Advanced Semantic Environment Logger Proxy')
                 output.append('    local originalEnv = getfenv and getfenv() or _ENV')
                 output.append('    local loggedEnv = setmetatable({}, {')
                 output.append('        __index = function(t, k)')
@@ -597,6 +616,8 @@ class Instrumenter:
             output.append(line)
             i += 1
         code = '\n'.join(output)
+
+        # ---- Global Variable Role Mapping ----
         renames = {
             r'\bR\b': 'EncryptedStrings',
             r'\bE\b': 'GetString',
@@ -612,40 +633,48 @@ class Instrumenter:
         }
         for pat, repl in renames.items():
             code = re.sub(pat, repl, code)
+
         return self.beautify_formatting(code)
 
     def beautify_formatting(self, code):
         code = re.sub(r';', '\n', code)
         code = re.sub(r'\n\s*\n', '\n', code)
+
+        # ---- Multi-Statement Line Splitter ----
+        control_keywords = {'then','do','and','or','not','else','elseif','return',
+                           'local','function','in','for','while','repeat','until','if'}
         splitter_pattern = r'([a-zA-Z0-9_]+|\)|\]|\})\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([=\(\[{])'
-        control_keywords = {'then', 'do', 'and', 'or', 'not', 'else', 'elseif', 'return', 'local', 'function', 'in', 'for', 'while', 'repeat', 'until', 'if'}
         def statement_replacer(m):
             preceding_token = m.group(1)
-            next_statement_var = m.group(2)
-            opening_delimiter = m.group(3)
             if preceding_token in control_keywords:
                 return m.group(0)
-            return f"{preceding_token}\n{next_statement_var}{opening_delimiter}"
+            return f"{preceding_token}\n{m.group(2)}{m.group(3)}"
         for _ in range(3):
             code = re.sub(splitter_pattern, statement_replacer, code)
+
+        # ---- Indentation Pass ----
         lines = code.split('\n')
         indent_level = 0
-        beautified_output = []
+        beautified = []
         for line in lines:
             line = line.strip()
             if not line:
                 continue
             first_word = line.split()[0] if line.split() else ""
-            clean_first_word = re.sub(r'[^a-zA-Z0-9_]', '', first_word)
-            if clean_first_word in ['end', 'else', 'elseif'] or line.startswith('}') or line.startswith(')'):
+            clean_first = re.sub(r'[^a-zA-Z0-9_]', '', first_word)
+            if clean_first in ('end','else','elseif') or line.startswith('}') or line.startswith(')'):
                 indent_level = max(0, indent_level - 1)
-            beautified_output.append('    ' * indent_level + line)
+            beautified.append('    ' * indent_level + line)
             if not (line.startswith('end') or line.endswith('end')):
                 if any(line.endswith(tok) or (tok + ' ') in line for tok in ['then', 'do']) or line.endswith('{') or 'function(' in line:
                     indent_level += 1
-            if clean_first_word in ['else', 'elseif']:
+            if clean_first in ('else', 'elseif'):
                 indent_level += 1
-        return '\n'.join(beautified_output)
+        return '\n'.join(beautified)
+
+# =============================================================================
+# UNVEILER & ENGINE
+# =============================================================================
 
 class Unveiler:
     def __init__(self, java_available, unluac_path, run_unluac_fn, run_lua_harness_fn):
@@ -678,11 +707,7 @@ class Unveiler:
             header = "-- Deobfuscated & Instrumented via AST pipeline\n\n"
             return header + result, 'ast_decompile_instrumented', 'AST decompilation with instrumentation'
         self._log("ast_decompile", False, "AST decompilation produced no meaningful output")
-        fallback = _substitute_e_calls(source, full_strings)
-        fallback = global_fold_math_regex(fallback)
-        fallback = _strip_bootstrap(fallback)
-        fallback = re.sub(r'(?<!\n)\b(end)\b', r'\n\1\n', fallback)
-        fallback = re.sub(r'(?<!\n)\b(local\s)', r'\n\1', fallback)
+        fallback = _format_clean_vm(_substitute_e_calls(source, full_strings))
         if fallback and _looks_like_real_code(fallback):
             return fallback, 'regex_fallback', 'Regex-based string substitution'
         lines = [f"-- [{i}] {json.dumps(str(s))}" for i, s in enumerate(full_strings) if s]
