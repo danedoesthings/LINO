@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, tempfile, base64, urllib.request, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
+Import os, re, shutil, subprocess, tempfile, base64, urllib.request, hashlib, json, sys, io, math, time, uuid, threading, contextlib, resource, signal, traceback, zlib, binascii
 from collections import defaultdict, Counter, deque
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any, Set
@@ -248,7 +248,6 @@ def _get_e_offset(source):
     return None
 
 def safe_eval_int(expr):
-    """Evaluate integer arithmetic safely. Supports + - * / % ( ) and negative numbers."""
     expr = re.sub(r'\s+', '', str(expr))
     def clean_doubles(s):
         old = ''
@@ -269,12 +268,9 @@ def safe_eval_int(expr):
         if not m:
             break
         a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
-        if op == '*':
-            res = a * b
-        elif op == '/':
-            res = a // b if b != 0 else 0
-        elif op == '%':
-            res = a % b if b != 0 else 0
+        if op == '*': res = a * b
+        elif op == '/': res = a // b if b != 0 else 0
+        elif op == '%': res = a % b if b != 0 else 0
         expr = expr[:m.start()] + str(res) + expr[m.end():]
         expr = clean_doubles(expr)
     tokens = re.findall(r'([+-]?\d+)', expr)
@@ -285,7 +281,17 @@ def safe_eval_int(expr):
     except:
         return None
 
+def global_fold_math_regex(code):
+    def repl(m):
+        res = safe_eval_int(m.group(0))
+        return str(res) if res is not None else m.group(0)
+    for _ in range(5):
+        code = re.sub(r'\(([^()a-zA-Z_]+)\)', repl, code)
+        code = re.sub(r'\b(-\d+|\d+)\s*([+\-*/%])\s*(-\d+|\d+)\b', repl, code)
+    return code
+
 def _substitute_e_calls(source, full_strings):
+    source = global_fold_math_regex(source)
     offset = _get_e_offset(source)
     if offset is None:
         return source
@@ -303,16 +309,6 @@ def _substitute_e_calls(source, full_strings):
             return json.dumps(str(val))
         return m.group(0)
     return re.sub(r'\bE\s*\(\s*([^)]+)\s*\)', repl, source)
-
-def _global_simplify_arithmetic(code):
-    """Fold all remaining numeric expressions into single numbers."""
-    while True:
-        prev = code
-        code = re.sub(r'\((\d+)\)', r'\1', code)  # remove single-num parens
-        code = re.sub(r'\b(\d+)\s*([+\-*/%])\s*(\d+)\b', lambda m: str(safe_eval_int(m.group(0))), code)
-        if code == prev:
-            break
-    return code
 
 def _strip_bootstrap(source):
     markers = [
@@ -337,214 +333,151 @@ def _looks_like_real_code(text):
 def _escape_lua_string(s):
     return json.dumps(s)
 
-def _prepare_source_for_ast(source, full_strings):
-    source = _substitute_e_calls(source, full_strings)
-    source = _global_simplify_arithmetic(source)
-    source = _strip_bootstrap(source)
-    return source
+def _format_clean_vm(code):
+    code = re.sub(r'(?<!\n)\b(end)\b', r'\n\1\n', code)
+    code = re.sub(r'(?<!\n)\b(local\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(return\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(if\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(else\b)', r'\n\1\n', code)
+    code = re.sub(r'(?<!\n)\b(elseif\b)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(while\s)', r'\n\1', code)
+    code = re.sub(r'(?<!\n)\b(for\s)', r'\n\1', code)
+    code = re.sub(r'\}\s*\{', '}, {', code)
+    code = '\n'.join([line.strip() for line in code.split('\n') if line.strip()])
+    return code
 
-class ASTConstantFolder:
+class RobustASTConstantFolder(lua_ast.ASTVisitor):
+    def visit_BinaryOp(self, node):
+        node.left = self.visit(node.left)
+        node.right = self.visit(node.right)
+        if isinstance(node.left, Number) and isinstance(node.right, Number):
+            try:
+                left_val = float(node.left.n)
+                right_val = float(node.right.n)
+                op = node.op
+                if op == '+': result = left_val + right_val
+                elif op == '-': result = left_val - right_val
+                elif op == '*': result = left_val * right_val
+                elif op == '/': result = left_val / right_val if right_val != 0 else 0
+                elif op == '%': result = left_val % right_val if right_val != 0 else 0
+                else: return node
+                str_res = str(int(result)) if result == int(result) else str(result)
+                return Number(str_res)
+            except:
+                pass
+        return node
+    def visit_UnaryOp(self, node):
+        node.operand = self.visit(node.operand)
+        if isinstance(node.operand, Number) and node.op == '-':
+            try:
+                val = -float(node.operand.n)
+                str_res = str(int(val)) if val == int(val) else str(val)
+                return Number(str_res)
+            except:
+                pass
+        return node
+    def visit(self, node):
+        if node is None: return None
+        method = getattr(self, 'visit_' + type(node).__name__, None)
+        if method: return method(node)
+        for child_name, child in node.children():
+            if isinstance(child, list):
+                for i, item in enumerate(child):
+                    child[i] = self.visit(item)
+            elif child is not None:
+                setattr(node, child_name, self.visit(child))
+        return node
+
+class ASTTableResolver(lua_ast.ASTVisitor):
     def __init__(self, strings):
         self.strings = strings
-    def fold(self, tree):
-        if not HAS_LUAPARSER:
-            return tree
-        class Folder(lua_ast.ASTVisitor):
-            def visit_BinaryOp(self, node):
-                node.left = self.visit(node.left)
-                node.right = self.visit(node.right)
-                if isinstance(node.left, Number) and isinstance(node.right, Number):
-                    try:
-                        left_val = node.left.n
-                        right_val = node.right.n
-                        op = node.op
-                        if op == '+': result = left_val + right_val
-                        elif op == '-': result = left_val - right_val
-                        elif op == '*': result = left_val * right_val
-                        elif op == '/': result = left_val / right_val if right_val != 0 else left_val
-                        elif op == '^': result = left_val ** right_val
-                        elif op == '%': result = left_val % right_val if right_val != 0 else 0
-                        else: return node
-                        return Number(int(result)) if result == int(result) else Number(result)
-                    except:
-                        pass
-                return node
-            def visit_UnaryOp(self, node):
-                node.operand = self.visit(node.operand)
-                if isinstance(node.operand, Number):
-                    if node.op == '-':
-                        return Number(-node.operand.n)
-                return node
-            def visit(self, node):
-                if node is None:
-                    return None
-                method = getattr(self, 'visit_' + type(node).__name__, None)
-                if method:
-                    return method(node)
-                for child_name, child in node.children():
-                    if isinstance(child, list):
-                        for i, item in enumerate(child):
-                            child[i] = self.visit(item)
-                    elif child is not None:
-                        setattr(node, child_name, self.visit(child))
-                return node
-        folder = Folder()
-        return folder.visit(tree)
+    def visit_Index(self, node):
+        node.value = self.visit(node.value)
+        node.idx = self.visit(node.idx)
+        if isinstance(node.value, Name) and node.value.id == 'R':
+            if isinstance(node.idx, Number):
+                idx = int(node.idx.n)
+                if 1 <= idx <= len(self.strings):
+                    val = self.strings[idx - 1]
+                    if isinstance(val, str) and _is_readable_identifier(val):
+                        return String(f'"{val}"', val)
+                    elif val:
+                        safe = _escape_lua_string(str(val))
+                        return String(safe, str(val))
+        return node
+    def visit(self, node):
+        if node is None: return None
+        method = getattr(self, 'visit_' + type(node).__name__, None)
+        if method: return method(node)
+        for child_name, child in node.children():
+            if isinstance(child, list):
+                for i, item in enumerate(child):
+                    child[i] = self.visit(item)
+            elif child is not None:
+                setattr(node, child_name, self.visit(child))
+        return node
 
-class ASTTableResolver:
-    def __init__(self, strings):
-        self.strings = strings
-    def resolve(self, tree):
-        if not HAS_LUAPARSER:
-            return tree
-        class Resolver(lua_ast.ASTVisitor):
-            def __init__(self, strings):
-                self.strings = strings
-            def visit_Index(self, node):
-                node.value = self.visit(node.value)
-                node.idx = self.visit(node.idx)
-                if isinstance(node.value, Name) and node.value.id == 'R':
-                    if isinstance(node.idx, Number):
-                        idx = int(node.idx.n)
-                        if 1 <= idx <= len(self.strings):
-                            val = self.strings[idx - 1]
-                            if isinstance(val, str) and _is_readable_identifier(val):
-                                return String(f'"{val}"', val)
-                            elif val:
-                                safe = _escape_lua_string(str(val))
-                                return String(safe, str(val))
-                return node
-            def visit(self, node):
-                if node is None:
-                    return None
-                method = getattr(self, 'visit_' + type(node).__name__, None)
-                if method:
-                    return method(node)
-                for child_name, child in node.children():
-                    if isinstance(child, list):
-                        for i, item in enumerate(child):
-                            child[i] = self.visit(item)
-                    elif child is not None:
-                        setattr(node, child_name, self.visit(child))
-                return node
-        resolver = Resolver(self.strings)
-        return resolver.visit(tree)
-
-class ControlFlowUnflattener:
-    def __init__(self, tree):
-        self.tree = tree
-        self.state_var = None
-        self.state_blocks = {}
-        self.entry_state = None
-        self.ordered_states = []
-    def unflatten(self):
-        if not HAS_LUAPARSER:
-            return self.tree
-        self._find_state_machine()
-        if not self.state_var or not self.state_blocks:
-            return self.tree
-        self._find_entry_state()
-        self._trace_execution_order()
-        if len(self.ordered_states) < 2:
-            return self.tree
-        return self._rebuild_sequential()
-    def _find_state_machine(self):
-        class StateFinder(lua_ast.ASTVisitor):
-            def __init__(self):
-                self.state_var = None
-                self.state_blocks = {}
-                self.while_node = None
-            def visit_While(self, node):
-                if isinstance(node.condition, Name):
-                    self.state_var = node.condition.id
-                    self.while_node = node
-                    self._extract_blocks(node.body)
-            def _extract_blocks(self, body):
-                for stmt in body.block if hasattr(body, 'block') else []:
-                    if isinstance(stmt, If):
-                        self._process_if_chain(stmt)
-            def _process_if_chain(self, if_node):
-                current = if_node
-                while current:
-                    if isinstance(current.test, BinOp) and isinstance(current.test.left, Name):
-                        if current.test.left.id == self.state_var and current.test.op == '==':
-                            if isinstance(current.test.right, Number):
-                                state_id = int(current.test.right.n)
-                                self.state_blocks[state_id] = current.body
-                    if current.else_body:
-                        if len(current.else_body.block) == 1 and isinstance(current.else_body.block[0], If):
-                            current = current.else_body.block[0]
-                        else:
-                            self.state_blocks[-1] = current.else_body
-                            break
+class BinaryTreeUnflattener:
+    def __init__(self, while_node, state_var_name):
+        self.while_node = while_node
+        self.state_var = state_var_name
+        self.state_map = {}
+    def extract_all_candidate_states(self, source_code):
+        return set(int(n) for n in re.findall(r'-?\d+', source_code))
+    def evaluate_path(self, node, state_value):
+        if node is None: return None
+        if isinstance(node, Block):
+            for stmt in node.block:
+                if isinstance(stmt, If):
+                    res = self.evaluate_path(stmt, state_value)
+                    if res is not None: return res
+            return node
+        if isinstance(node, If):
+            if isinstance(node.test, BinOp) and isinstance(node.test.left, Name) and node.test.left.id == self.state_var:
+                if isinstance(node.test.right, Number):
+                    right_val = int(node.test.right.n)
+                    op = node.test.op
+                    condition_met = False
+                    if op == '<': condition_met = state_value < right_val
+                    elif op == '<=': condition_met = state_value <= right_val
+                    elif op == '>': condition_met = state_value > right_val
+                    elif op == '>=': condition_met = state_value >= right_val
+                    elif op == '==': condition_met = state_value == right_val
+                    elif op == '~=': condition_met = state_value != right_val
+                    if condition_met:
+                        return self.evaluate_path(node.body, state_value)
                     else:
-                        break
-            def visit(self, node):
-                if node is None:
-                    return
-                method = getattr(self, 'visit_' + type(node).__name__, None)
-                if method:
-                    return method(node)
-                for _, child in node.children():
-                    if isinstance(child, list):
-                        for item in child:
-                            self.visit(item)
-                    elif child is not None:
-                        self.visit(child)
-        finder = StateFinder()
-        finder.visit(self.tree)
-        self.state_var = finder.state_var
-        self.state_blocks = finder.state_blocks
-    def _find_entry_state(self):
-        if self.state_blocks:
-            valid_keys = [k for k in self.state_blocks.keys() if k != -1]
-            if valid_keys:
-                self.entry_state = min(valid_keys)
-    def _trace_execution_order(self):
-        visited = set()
-        order = []
-        def trace(state):
-            if state in visited or state not in self.state_blocks:
-                return
-            visited.add(state)
-            order.append(state)
-            body = self.state_blocks[state]
-            next_state = self._find_next_state(body)
-            if next_state is not None:
-                trace(next_state)
-        if self.entry_state is not None:
-            trace(self.entry_state)
-        self.ordered_states = order
-    def _find_next_state(self, body):
-        class NextStateFinder(lua_ast.ASTVisitor):
-            def __init__(self, state_var):
-                self.state_var = state_var
+                        return self.evaluate_path(node.else_body, state_value)
+            return node
+        return None
+    def find_next_state(self, leaf_block):
+        class Finder(lua_ast.ASTVisitor):
+            def __init__(self, var):
+                self.var = var
                 self.next_state = None
             def visit_Assign(self, node):
                 for target in node.targets:
-                    if isinstance(target, Name) and target.id == self.state_var:
-                        if len(node.values) > 0 and isinstance(node.values[0], Number):
+                    if isinstance(target, Name) and target.id == self.var:
+                        if node.values and isinstance(node.values[0], Number):
                             self.next_state = int(node.values[0].n)
-            def visit(self, node):
-                if node is None:
-                    return
-                method = getattr(self, 'visit_' + type(node).__name__, None)
-                if method:
-                    return method(node)
-                for _, child in node.children():
-                    if isinstance(child, list):
-                        for item in child:
-                            self.visit(item)
-                    elif child is not None:
-                        self.visit(child)
-        finder = NextStateFinder(self.state_var)
-        finder.visit(body)
-        return finder.next_state
-    def _rebuild_sequential(self):
-        new_body = Block([])
-        for state in self.ordered_states:
-            block = self.state_blocks[state]
-            for stmt in block.block if hasattr(block, 'block') else []:
+        f = Finder(self.state_var)
+        f.visit(leaf_block)
+        return f.next_state
+    def reconstruct(self, initial_state, raw_body_source):
+        candidates = self.extract_all_candidate_states(raw_body_source)
+        for state in candidates:
+            leaf = self.evaluate_path(self.while_node.body, state)
+            if leaf and hasattr(leaf, 'block') and len(leaf.block) > 0:
+                self.state_map[state] = leaf
+        sequential_body = Block([])
+        current_state = initial_state
+        visited = set()
+        while current_state is not None and current_state not in visited:
+            visited.add(current_state)
+            if current_state not in self.state_map:
+                break
+            leaf_block = self.state_map[current_state]
+            for stmt in leaf_block.block:
                 is_state_assign = False
                 if isinstance(stmt, Assign):
                     for target in stmt.targets:
@@ -552,14 +485,14 @@ class ControlFlowUnflattener:
                             is_state_assign = True
                             break
                 if not is_state_assign:
-                    new_body.block.append(stmt)
-        return Chunk(new_body)
+                    sequential_body.block.append(stmt)
+            current_state = self.find_next_state(leaf_block)
+        return Chunk(sequential_body)
 
 class ASTDecompiler:
     def __init__(self, source, full_strings):
         self.source = source
         self.strings = full_strings
-        self.tree = None
     def _is_virtual_machine(self, source):
         vm_indicators = [
             r'return\s*\(?\s*function\s*\([a-zA-Z0-9_,\s]+\)',
@@ -569,40 +502,116 @@ class ASTDecompiler:
         hits = sum(1 for ind in vm_indicators if re.search(ind, source))
         return hits >= 2
     def decompile(self):
-        prepared = _prepare_source_for_ast(self.source, self.strings)
+        prepared = _substitute_e_calls(self.source, self.strings)
+        prepared = global_fold_math_regex(prepared)
+        prepared = _strip_bootstrap(prepared)
         is_vm = self._is_virtual_machine(prepared)
         if not HAS_LUAPARSER:
-            return self._format_clean_vm(prepared)
+            return _format_clean_vm(prepared)
         try:
-            self.tree = lua_ast.parse(prepared)
-        except Exception:
-            return self._format_clean_vm(prepared)
-        folder = ASTConstantFolder(self.strings)
-        self.tree = folder.fold(self.tree)
+            tree = lua_ast.parse(prepared)
+        except:
+            return _format_clean_vm(prepared)
+        folder = RobustASTConstantFolder()
+        tree = folder.visit(tree)
         resolver = ASTTableResolver(self.strings)
-        self.tree = resolver.resolve(self.tree)
-        if not is_vm:
-            unflattener = ControlFlowUnflattener(self.tree)
-            self.tree = unflattener.unflatten()
+        tree = resolver.resolve(tree)
+        if is_vm:
+            class WhileFinder(lua_ast.ASTVisitor):
+                def __init__(self):
+                    self.target_while = None
+                    self.var_name = None
+                def visit_While(self, node):
+                    if isinstance(node.condition, Name):
+                        self.target_while = node
+                        self.var_name = node.condition.id
+            finder = WhileFinder()
+            finder.visit(tree)
+            if finder.target_while:
+                unflat = BinaryTreeUnflattener(finder.target_while, finder.var_name)
+                candidates = unflat.extract_all_candidate_states(prepared)
+                if candidates:
+                    entry = min(candidates)
+                    tree = unflat.reconstruct(entry, prepared)
         try:
-            final_code = lua_ast.to_lua_source(self.tree)
+            final_code = lua_ast.to_lua_source(tree)
             if is_vm:
-                return "-- [VM DETECTED] Math & Strings Devirtualized\n" + self._format_clean_vm(final_code)
+                return "-- [VM DETECTED] Math & Strings Devirtualized\n" + _format_clean_vm(final_code)
             return final_code
         except:
-            return self._format_clean_vm(prepared)
-    def _format_clean_vm(self, code):
-        code = re.sub(r'(?<!\n)\b(end)\b', r'\n\1\n', code)
-        code = re.sub(r'(?<!\n)\b(local\s)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(return\b)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(if\s)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(else\b)', r'\n\1\n', code)
-        code = re.sub(r'(?<!\n)\b(elseif\b)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(while\s)', r'\n\1', code)
-        code = re.sub(r'(?<!\n)\b(for\s)', r'\n\1', code)
-        code = re.sub(r'\}\s*\{', '}, {', code)
-        code = '\n'.join([line.strip() for line in code.split('\n') if line.strip()])
-        return code
+            return _format_clean_vm(prepared)
+
+class Instrumenter:
+    """Post-processes deobfuscated Lua code to add environment logging, opcode hooks, and meaningful variable renaming."""
+    def instrument(self, code):
+        lines = code.split('\n')
+        output = []
+        inserted_env = False
+        inserted_hook = False
+        state_var = 'l'   # default, will be overwritten if found
+
+        # Detect the state variable from while loop
+        for line in lines:
+            m = re.search(r'while\s+(\w+)\s+do', line)
+            if m:
+                state_var = m.group(1)
+                break
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].rstrip()
+            
+            # Insert environment logger after the first line that looks like a function body start
+            if not inserted_env and re.match(r'^(local\s+)?function\b|^return\s*\(?\s*function', line):
+                output.append(line)
+                output.append('')
+                output.append('    local loggedEnv = setmetatable({}, {')
+                output.append('        __index = function(t, k)')
+                output.append('            local v = _G[k]')
+                output.append('            print(string.format("[ENV READ] %s = %s", k, tostring(v)))')
+                output.append('            return v')
+                output.append('        end,')
+                output.append('        __newindex = function(t, k, v)')
+                output.append('            print(string.format("[ENV WRITE] %s = %s", k, tostring(v)))')
+                output.append('            rawset(_G, k, v)')
+                output.append('        end')
+                output.append('    })')
+                output.append('    _ENV = loggedEnv')
+                inserted_env = True
+                i += 1
+                continue
+
+            # Insert opcode hook inside the main while loop just before the if chain
+            if not inserted_hook and f'while {state_var} do' in line:
+                output.append(line)
+                output.append(f'        print(string.format("[HOOK OP] State ID: %d", {state_var}))')
+                inserted_hook = True
+                i += 1
+                continue
+
+            output.append(line)
+            i += 1
+
+        code = '\n'.join(output)
+
+        # Rename common obfuscated variables to their architectural roles
+        renames = {
+            r'\bR\b': 'EncryptedStrings',
+            r'\bE\b': 'GetString',
+            r'\bl\b': 'stateId',
+            r'\bQ\b': 'VirtualStack',
+            r'\bI\b': 'InstructionTable',
+            r'\bw\b': 'AllocSlot',
+            r'\bM\b': 'PackArgs',
+            r'\bY\b': 'CallEnv',
+            r'\bN\b': 'AlphabetMap',
+            r'\bh\b': 'charFunc',
+            r'\bJ\b': 'FuncWrap',
+        }
+        for pat, repl in renames.items():
+            code = re.sub(pat, repl, code)
+
+        return _format_clean_vm(code)
 
 class Unveiler:
     def __init__(self, java_available, unluac_path, run_unluac_fn, run_lua_harness_fn):
@@ -625,15 +634,18 @@ class Unveiler:
         if harness_result and _looks_like_real_code(harness_result):
             self._log("harness_success", True, f"captured {len(harness_result)} chars")
             return harness_result, 'lua_harness', 'Harness captured original source'
-        self._log("ast_decompile", True, "attempting AST-based decompilation")
+        self._log("ast_decompile", True, "attempting AST decompilation")
         decompiler = ASTDecompiler(source, full_strings)
         result = decompiler.decompile()
         if result and _looks_like_real_code(result):
             self._log("ast_decompile_success", True, f"decompiled {len(result)} chars")
-            header = "-- Deobfuscated via AST decompilation\n\n"
-            return header + result, 'ast_decompile', 'AST decompilation complete'
+            # Instrument the deobfuscated code
+            instrumenter = Instrumenter()
+            result = instrumenter.instrument(result)
+            header = "-- Deobfuscated & Instrumented via AST pipeline\n\n"
+            return header + result, 'ast_decompile_instrumented', 'AST decompilation with instrumentation'
         self._log("ast_decompile", False, "AST decompilation produced no meaningful output")
-        fallback = decompiler._format_clean_vm(_prepare_source_for_ast(source, full_strings))
+        fallback = _format_clean_vm(_substitute_e_calls(source, full_strings))
         if fallback and _looks_like_real_code(fallback):
             return fallback, 'regex_fallback', 'Regex-based string substitution'
         lines = [f"-- [{i}] {json.dumps(str(s))}" for i, s in enumerate(full_strings) if s]
@@ -658,6 +670,7 @@ class DeobfEngine:
             'lua_harness': True,
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'var_renamer': True,
+            'instrumentation': True,
         }
     def _trace(self, stage, success, message):
         self.trace.append(DiagnosticEvent(stage=stage, success=success, message=message))
@@ -992,7 +1005,7 @@ end
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('ast_decompile', 'lua_harness', 'regex_fallback'):
+        if result and method in ('ast_decompile_instrumented', 'lua_harness', 'regex_fallback'):
             result = self._apply_var_renamer(result)
         if logger:
             for entry in self.unveiler.trace:
