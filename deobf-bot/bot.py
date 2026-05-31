@@ -7,8 +7,6 @@ import httpx
 import base64
 import datetime
 import asyncio
-import json
-import time
 from discord.ext import commands
 
 logging.basicConfig(
@@ -33,87 +31,12 @@ ALLOWED_EXTENSIONS = ('.lua', '.txt', '.luau')
 MAX_BYTES = 5 * 1024 * 1024
 
 SUCCESS_METHODS = (
-    'lua_harness', 'print_capture', 'wearedevs_string_substitution',
-    'wearedevs_vm_lifted', 'state_machine_devirt', 'recursive_unveil',
-    'prometheus_vm', 'wearedevs_decode'
+    'state_machine_devirt', 'wearedevs_string_substitution', 'wearedevs_decode'
 )
 
-class ExponentialBackoff:
-    def __init__(self, base=1, max_retries=5):
-        self.base = base
-        self.max_retries = max_retries
-        self._exp = 0
-    
-    def delay(self):
-        self._exp = min(self._exp + 1, self.max_retries)
-        return self.base * (2 ** (self._exp - 1))
-    
-    def reset(self):
-        self._exp = 0
-
-async def call_api_with_retry(source_b64, max_retries=5):
-    backoff = ExponentialBackoff(base=1, max_retries=max_retries)
-    
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=300) as client:
-                response = await client.post(f'{API_URL}/deobf', json={'source_b64': source_b64})
-                
-                if response.status_code == 429:
-                    retry_after = response.headers.get('Retry-After', 5)
-                    await asyncio.sleep(float(retry_after))
-                    continue
-                
-                response.raise_for_status()
-                data = response.json()
-                
-                job_id = data.get('job_id', '').strip()
-                if not job_id:
-                    return data
-                
-                for poll_attempt in range(180):
-                    await asyncio.sleep(1)
-                    try:
-                        poll = await client.get(f'{API_URL}/deobf/{job_id}')
-                        
-                        if poll.status_code == 404:
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(backoff.delay())
-                                break
-                            return {'error': f'Job {job_id} not found after {max_retries} attempts. The API may have restarted. Please resubmit.'}
-                        
-                        poll.raise_for_status()
-                        poll_data = poll.json()
-                        
-                        if poll_data.get('status') != 'processing':
-                            return poll_data
-                    except httpx.HTTPStatusError as e:
-                        if e.response.status_code == 404 and attempt < max_retries - 1:
-                            await asyncio.sleep(backoff.delay())
-                            break
-                        raise
-                
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code >= 500 and attempt < max_retries - 1:
-                await asyncio.sleep(backoff.delay())
-                continue
-            return {'error': f'HTTP {e.response.status_code}: {e.response.text[:200]}'}
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(backoff.delay())
-                continue
-            return {'error': f'Connection error after {max_retries} attempts: {str(e)}'}
-        except Exception as e:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(backoff.delay())
-                continue
-            return {'error': str(e)}
-    
-    return {'error': f'Failed after {max_retries} retry attempts'}
-
-async def call_api_sync(source_b64):
-    async with httpx.AsyncClient(timeout=300) as client:
-        response = await client.post(f'{API_URL}/deobf/sync', json={'source_b64': source_b64})
+async def call_api_direct(source_b64):
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(f'{API_URL}/deobf/direct', json={'source_b64': source_b64})
         response.raise_for_status()
         return response.json()
 
@@ -146,7 +69,27 @@ async def run_deobf(raw_bytes, filename):
     
     try:
         source_b64 = base64.b64encode(raw_bytes).decode('ascii')
-        data = await call_api_with_retry(source_b64, max_retries=3)
+        data = await call_api_direct(source_b64)
+    except httpx.TimeoutException:
+        return {
+            'embed': discord.Embed(
+                title='API Timeout',
+                description='Deobfuscation API did not respond within 120 seconds',
+                color=0xe74c3c
+            ),
+            'files': [],
+            'full_diag': None,
+        }
+    except httpx.ConnectError:
+        return {
+            'files': [],
+            'full_diag': None,
+            'embed': discord.Embed(
+                title='API Unreachable',
+                description=f'Cannot connect to {API_URL}',
+                color=0xe74c3c
+            ),
+        }
     except Exception as e:
         log.error(f"API call failed: {e}")
         return {
@@ -178,8 +121,6 @@ async def run_deobf(raw_bytes, filename):
     
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
-    elif detected == 'bytecode':
-        title, color = 'Bytecode Extracted', 0xe67e22
     else:
         title, color = 'Deobfuscation Partial', 0xf1c40f
     
@@ -205,23 +146,11 @@ async def run_deobf(raw_bytes, filename):
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
     
     files = []
-    if result and detected != 'bytecode':
+    if result:
         files.append(discord.File(
             fp=io.BytesIO(result.encode('utf-8', errors='replace')),
             filename=f'deobfuscated_{filename}'
         ))
-    elif detected == 'bytecode' and result:
-        try:
-            raw_out = base64.b64decode(result)
-            files.append(discord.File(
-                fp=io.BytesIO(raw_out),
-                filename=f'extracted_{filename}.luac'
-            ))
-        except:
-            files.append(discord.File(
-                fp=io.BytesIO(result.encode('utf-8', errors='replace')),
-                filename=f'extracted_{filename}.txt'
-            ))
     
     full_diag = diagnostic if len(diagnostic) > 900 else None
     return {'embed': em, 'files': files, 'full_diag': full_diag}
