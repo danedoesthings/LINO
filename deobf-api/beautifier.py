@@ -62,7 +62,6 @@ def beautify(code: str) -> str:
                 depth += delta
 
     final_code = '\n'.join(indented_lines)
-    
     final_code = re.sub(r'___LINO_LITERAL_(\d+)___', lambda m: literals[int(m.group(1))], final_code)
 
     result_lines = []
