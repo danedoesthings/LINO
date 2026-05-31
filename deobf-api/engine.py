@@ -169,61 +169,6 @@ def _extract_shuffle_ops(source):
                 pass
     return ops
 
-def _apply_shuffle_pair_swaps(strings, ops):
-    result = list(strings)
-    for a, b in ops:
-        ai, bi = a - 1, b - 1
-        if 0 <= ai < len(result) and 0 <= bi < len(result):
-            result[ai], result[bi] = result[bi], result[ai]
-    return result
-
-def _decode_string_fully(s, alphabet):
-    if not s:
-        return ''
-    if _is_readable_identifier(s):
-        return s
-    if len(s) == 1:
-        return s
-    if _is_probably_text(s) and _shannon_entropy(s.encode('latin-1', errors='ignore')) < 6.5:
-        return s
-    try:
-        raw = _custom_b64_decode(s, alphabet)
-        if raw and len(raw) >= 1:
-            try:
-                text = raw.decode('utf-8')
-                if text and (re.match(r'^[\x20-\x7E]+$', text) or _is_readable_identifier(text) or _is_probably_text(text)):
-                    return text
-            except Exception:
-                pass
-            try:
-                text = raw.decode('latin-1', errors='replace')
-                if _is_probably_text(text):
-                    return text
-            except Exception:
-                pass
-    except Exception:
-        pass
-    if re.match(r'^[A-Za-z0-9+/=]+$', s.strip()):
-        try:
-            padded = s.strip() + '=' * (-len(s.strip()) % 4)
-            raw = base64.b64decode(padded, validate=False)
-            if raw:
-                try:
-                    text = raw.decode('utf-8')
-                    if text and (re.match(r'^[\x20-\x7E]+$', text) or _is_probably_text(text)):
-                        return text
-                except Exception:
-                    pass
-                try:
-                    text = raw.decode('latin-1', errors='replace')
-                    if _is_probably_text(text):
-                        return text
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    return s
-
 def _wearedevs_decode(source):
     diag = {}
     alphabet = _extract_wearedevs_alphabet(source)
@@ -236,8 +181,39 @@ def _wearedevs_decode(source):
     diag['string_count'] = len(encoded_strings)
     shuffle_ops = _extract_shuffle_ops(source)
     diag['shuffle_ops'] = len(shuffle_ops)
-    strings = _apply_shuffle_pair_swaps(encoded_strings, shuffle_ops)
-    decoded = [_decode_string_fully(s, alphabet) for s in strings]
+    raw_strings = list(encoded_strings)
+    for a, b in shuffle_ops:
+        ai, bi = a - 1, b - 1
+        if 0 <= ai < len(raw_strings) and 0 <= bi < len(raw_strings):
+            raw_strings[ai], raw_strings[bi] = raw_strings[bi], raw_strings[ai]
+    decoded = []
+    for s in raw_strings:
+        if not s:
+            decoded.append('')
+            continue
+        if _is_readable_identifier(s):
+            decoded.append(s)
+            continue
+        try:
+            raw = _custom_b64_decode(s, alphabet)
+            if raw and len(raw) >= 1:
+                try:
+                    text = raw.decode('utf-8')
+                    if text and _is_probably_text(text):
+                        decoded.append(text)
+                        continue
+                except:
+                    pass
+                try:
+                    text = raw.decode('latin-1', errors='replace')
+                    if text and _is_probably_text(text):
+                        decoded.append(text)
+                        continue
+                except:
+                    pass
+        except:
+            pass
+        decoded.append(s)
     diag['decoded_count'] = len(decoded)
     readable = [s for s in decoded if s and _is_probably_text(s)]
     lua_hits = sum(1 for s in decoded if any(kw in s for kw in LUA_KEYWORDS))
@@ -289,15 +265,20 @@ def _eval_arith(expr):
         pass
     return None
 
-def _replace_e_calls(code, strings, offset):
+def _replace_e_calls(code, full_strings, offset):
     def repl(m):
         n = _eval_arith(m.group(1))
         if n is None:
             return m.group(0)
         lua_idx = n + offset
         py_idx = lua_idx - 1
-        if 0 <= py_idx < len(strings):
-            return json.dumps(strings[py_idx])
+        if 0 <= py_idx < len(full_strings):
+            val = full_strings[py_idx]
+            if not val:
+                return 'nil'
+            if isinstance(val, str) and _is_readable_identifier(val):
+                return json.dumps(val)
+            return json.dumps(str(val))
         return m.group(0)
     return re.sub(r'\bE\s*\((-?\d+(?:[+\-*]\d+)*)\)', repl, code)
 
@@ -350,11 +331,42 @@ def _add_spacing(code):
     return code
 
 def _wearedevs_string_substitution(source, decoded_strings):
+    raw_strings = _extract_r_table_strings(source)
+    if not raw_strings:
+        return None
+    shuffle_ops = _extract_shuffle_ops(source)
+    full_strings = list(raw_strings)
+    for a, b in shuffle_ops:
+        ai, bi = a - 1, b - 1
+        if 0 <= ai < len(full_strings) and 0 <= bi < len(full_strings):
+            full_strings[ai], full_strings[bi] = full_strings[bi], full_strings[ai]
+    alphabet = _extract_wearedevs_alphabet(source)
+    for i, s in enumerate(full_strings):
+        if s and not _is_readable_identifier(s):
+            try:
+                raw = _custom_b64_decode(s, alphabet)
+                if raw and len(raw) >= 1:
+                    try:
+                        text = raw.decode('utf-8')
+                        if text and _is_probably_text(text):
+                            full_strings[i] = text
+                            continue
+                    except:
+                        pass
+                    try:
+                        text = raw.decode('latin-1', errors='replace')
+                        if text and _is_probably_text(text):
+                            full_strings[i] = text
+                            continue
+                    except:
+                        pass
+            except:
+                pass
     offset = _get_e_offset(source)
     if offset is None:
         return None
     result = source
-    result = _replace_e_calls(result, decoded_strings, offset)
+    result = _replace_e_calls(result, full_strings, offset)
     result = _simplify_arithmetic(result)
     result = _simplify_bare_arithmetic(result)
     result = _strip_bootstrap(result)
@@ -421,12 +433,6 @@ class StateMachineDevirtualizer:
                 resolved = self._resolve_strings(args)
                 if resolved:
                     self.output_lines.append(f"error({resolved})")
-            warn_match = re.search(r'warn\s*\(\s*([^)]+)\s*\)', body)
-            if warn_match:
-                args = warn_match.group(1)
-                resolved = self._resolve_strings(args)
-                if resolved:
-                    self.output_lines.append(f"warn({resolved})")
     def _resolve_strings(self, expr):
         for match in re.finditer(r'R\[(\d+)\]', expr):
             idx = int(match.group(1))
@@ -447,8 +453,8 @@ class StateMachineDevirtualizer:
     def _fallback_output(self):
         output = ["-- Decoded Constants from R table:"]
         for i, s in enumerate(self.strings):
-            if s and len(s) < 200:
-                output.append(f"--   [{i}] = {json.dumps(s)}")
+            if s and len(str(s)) < 200:
+                output.append(f"--   [{i}] = {json.dumps(str(s))}")
         return '\n'.join(output)
 
 class Unveiler:
