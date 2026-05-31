@@ -1,402 +1,93 @@
 import re
-import json
-from collections import defaultdict, deque
-from typing import List, Dict, Tuple, Optional, Set, Any
-
-class StateMachineAnalyzer:
-    def __init__(self, source: str, decoded_strings: List[str]):
-        self.source = source
-        self.strings = decoded_strings
-        self.state_ranges: Dict[int, Tuple[int, int]] = {}
-        self.state_bodies: Dict[int, str] = {}
-        self.transitions: Dict[int, List[int]] = defaultdict(list)
-        self.call_handlers: Dict[int, str] = {}
-        self.entry_state: Optional[int] = None
-        
-    def detect_state_machine(self) -> bool:
-        pattern = r'while\s+(\w+)\s+do\s+if\s+\1\s*<\s*(\d+)\s+then'
-        return bool(re.search(pattern, self.source))
-    
-    def full_reconstruct(self) -> Optional[str]:
-        if not self._extract_state_structure():
-            return None
-        if not self._find_entry_point():
-            return None
-        self._build_transition_graph()
-        return self._reconstruct_program()
-    
-    def _extract_state_structure(self) -> bool:
-        while_match = re.search(r'while\s+(\w+)\s+do\s+(.*?)end\s*(?:\)\s*\)|$)', self.source, re.DOTALL)
-        if not while_match:
-            return False
-        
-        state_var = while_match.group(1)
-        body = while_match.group(2)
-        
-        if_pattern = r'if\s+' + state_var + r'\s*<\s*(\d+)\s+then(.*?)(?:elseif\s+' + state_var + r'\s*<\s*(\d+)\s+then(.*?))*?\s*else\s*(.*?)\s*end'
-        matches = list(re.finditer(if_pattern, body, re.DOTALL))
-        
-        if not matches:
-            return False
-        
-        for i, match in enumerate(matches):
-            state_limit = int(match.group(1))
-            handler_body = match.group(2).strip()
-            
-            if i == 0:
-                self.state_ranges[0] = (0, state_limit - 1)
-                self.state_bodies[0] = handler_body
-            else:
-                prev_limit = matches[i-1].group(1)
-                self.state_ranges[int(prev_limit)] = (int(prev_limit), state_limit - 1)
-                self.state_bodies[int(prev_limit)] = handler_body
-            
-            if i == len(matches) - 1 and match.group(5):
-                else_body = match.group(5).strip()
-                self.state_ranges[state_limit] = (state_limit, float('inf'))
-                self.state_bodies[state_limit] = else_body
-        
-        return len(self.state_bodies) > 0
-    
-    def _find_entry_point(self) -> bool:
-        init_match = re.search(r'(\w+)\s*=\s*(\d+)', self.source[:3000])
-        if init_match:
-            init_val = int(init_match.group(2))
-            for state_min, (start, end) in self.state_ranges.items():
-                if start <= init_val <= end:
-                    self.entry_state = state_min
-                    return True
-        
-        self.entry_state = min(self.state_ranges.keys())
-        return True
-    
-    def _build_transition_graph(self) -> None:
-        for state_id, body in self.state_bodies.items():
-            assign_pattern = r'\b(\w+)\s*=\s*(-?\d+(?:\s*[+\-]\s*\d+)*)'
-            for match in re.finditer(assign_pattern, body):
-                expr = match.group(2).replace(' ', '')
-                try:
-                    next_val = eval(expr)
-                    if isinstance(next_val, int):
-                        for target_id, (start, end) in self.state_ranges.items():
-                            if start <= next_val <= end:
-                                self.transitions[state_id].append(target_id)
-                                break
-                except:
-                    pass
-            
-            call_match = re.search(r'\(\s*(\w+)\s*\)', body)
-            if call_match and call_match.group(1) in self.strings:
-                self.call_handlers[state_id] = call_match.group(1)
-    
-    def _reconstruct_program(self) -> str:
-        output_lines = []
-        visited = set()
-        stack = [(self.entry_state, 0)]
-        
-        while stack:
-            state_id, depth = stack.pop()
-            if state_id in visited:
-                continue
-            
-            visited.add(state_id)
-            indent = '  ' * depth
-            
-            body = self.state_bodies.get(state_id, '')
-            code = self._extract_code_from_body(body)
-            
-            if code:
-                output_lines.append(f"{indent}{code}")
-            
-            for next_state in self.transitions.get(state_id, []):
-                if next_state not in visited:
-                    stack.append((next_state, depth))
-        
-        unique_lines = []
-        seen = set()
-        for line in output_lines:
-            if line not in seen:
-                unique_lines.append(line)
-                seen.add(line)
-        
-        if not unique_lines:
-            return self._fallback_output()
-        
-        header = "-- State Machine Devirtualization Complete\n"
-        header += "-- Original program flow reconstructed\n\n"
-        return header + '\n'.join(unique_lines)
-    
-    def _extract_code_from_body(self, body: str) -> str:
-        const_loads = re.findall(r'(\w+)\s*=\s*Q\s*\[\s*I\s*\[\s*B\s*\+\s*(\d+)\s*\]\s*\]', body)
-        for var_name, offset in const_loads:
-            const_idx = int(offset) + 1
-            if 1 <= const_idx <= len(self.strings):
-                const_value = self.strings[const_idx - 1]
-                if const_value and len(const_value) < 500 and const_value.isprintable():
-                    return f"local {var_name} = {json.dumps(const_value)}"
-        
-        print_match = re.search(r'print\s*\(\s*([^)]+)\s*\)', body)
-        if print_match:
-            args = print_match.group(1)
-            resolved = self._resolve_constants(args)
-            return f"print({resolved})"
-        
-        error_match = re.search(r'error\s*\(\s*([^)]+)\s*\)', body)
-        if error_match:
-            args = error_match.group(1)
-            resolved = self._resolve_constants(args)
-            return f"error({resolved})"
-        
-        warn_match = re.search(r'warn\s*\(\s*([^)]+)\s*\)', body)
-        if warn_match:
-            args = warn_match.group(1)
-            resolved = self._resolve_constants(args)
-            return f"warn({resolved})"
-        
-        pcall_match = re.search(r'pcall\s*\(\s*(\w+)\s*,\s*\.\.\.\s*\)', body)
-        if pcall_match:
-            func = pcall_match.group(1)
-            return f"pcall({func}, ...)"
-        
-        setmeta_match = re.search(r'setmetatable\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', body)
-        if setmeta_match:
-            obj = setmeta_match.group(1)
-            mt = setmeta_match.group(2)
-            return f"setmetatable({obj}, {mt})"
-        
-        return ""
-    
-    def _resolve_constants(self, expr: str) -> str:
-        pattern = r'R\[(\d+)\]'
-        for match in re.finditer(pattern, expr):
-            idx = int(match.group(1))
-            if 1 <= idx <= len(self.strings):
-                const_value = self.strings[idx - 1]
-                if const_value:
-                    expr = expr.replace(match.group(0), json.dumps(const_value))
-        return expr
-    
-    def _fallback_output(self) -> str:
-        output = ["-- Decoded Constants:"]
-        for i, s in enumerate(self.strings):
-            if s and s.isprintable() and len(s) < 100:
-                output.append(f"--   [{i}] = {json.dumps(s)}")
-        
-        output.append("\n-- State Machine Structure:")
-        for state_id, (start, end) in sorted(self.state_ranges.items()):
-            output.append(f"--   State {state_id}: covers range [{start}, {end}]")
-        
-        return '\n'.join(output)
+from typing import Optional, Dict, List
 
 class StateMachineLifter:
-    def __init__(self, source: str, decoded_strings: List[str]):
+    def __init__(self, source: str, decoded_strings: list):
         self.source = source
         self.strings = decoded_strings
-        self.state_handlers: Dict[int, Dict[str, Any]] = {}
+        self.state_var = "vmState"
+        self.blocks: Dict[int, str] = {}
+        self.transitions: Dict[int, Optional[int]] = {}
         self.entry_state: Optional[int] = None
-        self.transitions: Dict[int, List[int]] = defaultdict(list)
-        self.visited_states: Set[int] = set()
-        self.output_lines: List[str] = []
-        self.indent_level: int = 0
-        self.register_map: Dict[str, str] = {}
-        self.temp_counter: int = 0
-        
+
     def lift(self) -> Optional[str]:
-        self._extract_state_machine()
-        if not self.state_handlers:
+        self._find_state_var()
+        if not self._parse_blocks():
             return None
-        self._find_entry_state()
-        if self.entry_state is None:
+        if not self._trace_states():
             return None
-        self._build_transition_graph()
-        self._trace_execution_path(self.entry_state)
-        if not self.output_lines:
-            return None
-        return self._format_output()
-    
-    def _extract_state_machine(self) -> None:
-        while_match = re.search(r'while\s+(\w+)\s+do\s+(.*?)end\s*(?:\)\s*\)|$)', self.source, re.DOTALL)
-        if not while_match:
-            return
-        
-        state_var = while_match.group(1)
-        body = while_match.group(2)
-        
-        pattern = r'if\s+' + state_var + r'\s*<\s*(\d+)\s+then(.*?)(?:elseif\s+' + state_var + r'\s*<\s*(\d+)\s+then(.*?))*?else(.*?)end'
-        matches = list(re.finditer(pattern, body, re.DOTALL))
-        
-        for match in matches:
-            state_num = int(match.group(1))
-            handler_body = match.group(2).strip()
-            self.state_handlers[state_num] = {
-                'body': handler_body,
-                'raw': match.group(0)
-            }
-        
-        else_body_match = re.search(r'else\s+(.*?)end', body, re.DOTALL)
-        if else_body_match and self.state_handlers:
-            self.state_handlers[max(self.state_handlers.keys()) + 1] = {
-                'body': else_body_match.group(1).strip(),
-                'raw': else_body_match.group(0)
-            }
-    
-    def _find_entry_state(self) -> None:
-        init_match = re.search(r'(\w+)\s*=\s*(\d+)', self.source[:2000])
-        if init_match:
-            possible_state = int(init_match.group(2))
-            if possible_state in self.state_handlers:
-                self.entry_state = possible_state
-                return
-        
-        for state_num in sorted(self.state_handlers.keys()):
-            if state_num < 100:
-                self.entry_state = state_num
-                return
-        
-        if self.state_handlers:
-            self.entry_state = min(self.state_handlers.keys())
-    
-    def _build_transition_graph(self) -> None:
-        for state_num, handler in self.state_handlers.items():
-            body = handler['body']
-            assign_pattern = r'\b(\w+)\s*=\s*(-?\d+(?:\s*[+\-]\s*\d+)*)'
-            for match in re.finditer(assign_pattern, body):
-                var_name = match.group(1)
-                expr = match.group(2).replace(' ', '')
-                if var_name in ['l', 'L', 'state', 'pc', 'ip']:
-                    try:
-                        next_state = eval(expr)
-                        if isinstance(next_state, int) and next_state in self.state_handlers:
-                            self.transitions[state_num].append(next_state)
-                    except:
-                        pass
-            
-            call_match = re.search(r'\(\s*(\w+)\s*\)', body)
-            if call_match and call_match.group(1) in self.strings:
-                self.transitions[state_num].append(-1)
-    
-    def _trace_execution_path(self, start_state: int) -> None:
-        stack = [(start_state, 0)]
-        
-        while stack:
-            state_num, depth = stack.pop()
-            if state_num in self.visited_states:
-                continue
-            
-            self.visited_states.add(state_num)
-            self.indent_level = depth
-            
-            handler = self.state_handlers.get(state_num)
-            if handler:
-                self._emit_state_code(handler, state_num)
-            
-            for next_state in self.transitions.get(state_num, []):
-                if next_state >= 0 and next_state not in self.visited_states:
-                    stack.append((next_state, depth + 1))
-    
-    def _emit_state_code(self, handler: Dict[str, Any], state_num: int) -> None:
-        body = handler['body']
-        
-        const_loads = re.findall(r'(\w+)\s*=\s*Q\s*\[\s*I\s*\[\s*B\s*\+\s*(\d+)\s*\]\s*\]', body)
-        for var_name, offset in const_loads:
-            const_idx = int(offset) + 1
-            if 1 <= const_idx <= len(self.strings):
-                const_value = self.strings[const_idx - 1]
-                if const_value and len(const_value) < 500:
-                    if var_name not in self.register_map:
-                        self.register_map[var_name] = const_value
-                        self._emit_line(f"local {var_name} = {json.dumps(const_value)}")
-        
-        func_calls = re.findall(r'(\w+)\s*=\s*(\w+)\(\)', body)
-        for dest_var, func_name in func_calls:
-            if func_name in self.strings:
-                actual_func = self.strings[self.strings.index(func_name)]
-                self._emit_line(f"local {dest_var} = {actual_func}()")
-            else:
-                self._emit_line(f"local {dest_var} = {func_name}()")
-        
-        pcall_match = re.search(r'pcall\s*\(\s*(\w+)\s*,\s*\.\.\.\s*\)', body)
-        if pcall_match:
-            func_name = pcall_match.group(1)
-            self._emit_line(f"pcall({func_name}, ...)")
-        
-        print_matches = re.finditer(r'print\s*\(\s*([^)]+)\s*\)', body)
-        for match in print_matches:
-            args = match.group(1)
-            resolved_args = self._resolve_string_constant(args)
-            self._emit_line(f"print({resolved_args})")
-        
-        error_matches = re.finditer(r'error\s*\(\s*([^)]+)\s*\)', body)
-        for match in error_matches:
-            msg = match.group(1)
-            resolved_msg = self._resolve_string_constant(msg)
-            self._emit_line(f"error({resolved_msg})")
-        
-        warn_matches = re.finditer(r'warn\s*\(\s*([^)]+)\s*\)', body)
-        for match in warn_matches:
-            msg = match.group(1)
-            resolved_msg = self._resolve_string_constant(msg)
-            self._emit_line(f"warn({resolved_msg})")
-        
-        setmetatable_match = re.search(r'setmetatable\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', body)
-        if setmetatable_match:
-            obj = setmetatable_match.group(1)
-            mt = setmetatable_match.group(2)
-            self._emit_line(f"setmetatable({obj}, {mt})")
-        
-        getmetatable_match = re.search(r'getmetatable\s*\(\s*(\w+)\s*\)', body)
-        if getmetatable_match:
-            obj = getmetatable_match.group(1)
-            temp_var = f"_temp_{self.temp_counter}"
-            self.temp_counter += 1
-            self._emit_line(f"local {temp_var} = getmetatable({obj})")
-    
-    def _resolve_string_constant(self, expr: str) -> str:
-        const_pattern = r'R\[(\d+)\]'
-        for match in re.finditer(const_pattern, expr):
-            idx = int(match.group(1))
-            if 1 <= idx <= len(self.strings):
-                const_value = self.strings[idx - 1]
-                if const_value:
-                    expr = expr.replace(match.group(0), json.dumps(const_value))
-        
-        for var_name, const_value in self.register_map.items():
-            if var_name in expr and isinstance(const_value, str):
-                expr = expr.replace(var_name, json.dumps(const_value))
-        
-        return expr
-    
-    def _emit_line(self, line: str) -> None:
-        indent = '  ' * self.indent_level
-        self.output_lines.append(f"{indent}{line}")
-    
-    def _format_output(self) -> str:
-        header = "-- Deobfuscated via state machine devirtualization\n"
-        header += "-- Extracted from WeAreDevs while-state VM\n"
-        header += "-- Original program logic reconstructed from state transitions\n\n"
-        
-        seen = set()
-        unique_lines = []
-        for line in self.output_lines:
-            if line not in seen:
-                unique_lines.append(line)
-                seen.add(line)
-        
-        if not unique_lines:
-            return self._fallback_output()
-        
-        return header + '\n'.join(unique_lines)
-    
-    def _fallback_output(self) -> str:
-        output = []
-        output.append("-- Decoded constants from R table:")
-        for i, s in enumerate(self.strings):
-            if s and len(s) < 100 and s.isprintable():
-                output.append(f"-- [{i}] = {json.dumps(s)}")
-        
-        for state_num, handler in sorted(self.state_handlers.items())[:20]:
-            output.append(f"\n-- STATE {state_num}:")
-            body_preview = handler['body'][:500].replace('\n', ' ')
-            output.append(f"-- {body_preview}")
-        
-        return '\n'.join(output)
+        return self._emit_linear_code()
+
+    def _find_state_var(self):
+        m = re.search(r'while\s+(\w+)\s+do', self.source)
+        if m:
+            self.state_var = m.group(1)
+
+    def _parse_blocks(self) -> bool:
+        pat = re.compile(
+            rf'if\s+{re.escape(self.state_var)}\s*==\s*(-?\d+)\s*then\s*(.*?)'
+            rf'(?=\n\s*(?:elseif|else|end)\b)',
+            re.DOTALL,
+        )
+        matches = pat.findall(self.source)
+        if not matches:
+            pat2 = re.compile(
+                rf'if\s+{re.escape(self.state_var)}\s*<\s*(-?\d+)\s*then\s*(.*?)'
+                rf'(?=\n\s*(?:elseif|else|end)\b)',
+                re.DOTALL,
+            )
+            matches = pat2.findall(self.source)
+
+        for num_str, body in matches:
+            state = int(num_str)
+            self.blocks[state] = body
+
+        return len(self.blocks) > 0
+
+    def _trace_states(self) -> bool:
+        for state in self.blocks:
+            self.transitions[state] = self._find_next_state(state)
+
+        positives = [s for s in self.transitions if s > 0]
+        self.entry_state = min(positives) if positives else min(self.transitions)
+        return self.entry_state is not None
+
+    def _find_next_state(self, state: int) -> Optional[int]:
+        block = self.blocks.get(state, "")
+        m = re.search(
+            rf'{re.escape(self.state_var)}\s*=\s*(-?\d+)', block
+        )
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _emit_linear_code(self) -> str:
+        visited: set[int] = set()
+        order: list[int] = []
+        current = self.entry_state
+        while current is not None and current not in visited:
+            visited.add(current)
+            order.append(current)
+            current = self.transitions.get(current)
+
+        output_lines = []
+        for state in order:
+            block = self.blocks[state]
+            block = re.sub(
+                rf'{re.escape(self.state_var)}\s*=\s*-?\d+\s*;?\s*', '', block
+            )
+            block = block.strip()
+            if block:
+                output_lines.append(block)
+
+        return self._resolve_string_refs('\n'.join(output_lines))
+
+    def _resolve_string_refs(self, code: str) -> str:
+        def repl(m):
+            n = int(m.group(1))
+            if 1 <= n <= len(self.strings):
+                s = self.strings[n - 1]
+                if s:
+                    return repr(s)
+            return m.group(0)
+        return re.sub(r'\bGetStr\s*\(\s*(\d+)\s*\)', repl, code)
