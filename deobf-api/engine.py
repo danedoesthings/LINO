@@ -696,7 +696,7 @@ class Instrumenter:
         (r'\bGetService\b', 'getService'),
     ]
 
-    _ENV_PROXY = '''
+    _ENV_PROXY = r'''
     local _origEnv = getfenv and getfenv() or _ENV
     local _loggedEnv = setmetatable({}, {
         __index = function(_t, k)
