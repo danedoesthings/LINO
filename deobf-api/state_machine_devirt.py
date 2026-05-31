@@ -1,5 +1,39 @@
 import re
+import ast
 from typing import Optional, Dict, List, Tuple, Any
+
+class ExpressionFolder:
+    @staticmethod
+    def fold_math_expressions(text: str) -> str:
+        pattern = r'\b([-+]?\d+(?:\s*[-+*/%^]\s*[-+]?\d+|\s*\)\s*|\s*\(\s*)+)\b'
+
+        def evaluate_match(match):
+            expr_str = match.group(0).strip()
+            try:
+                node = ast.parse(expr_str, mode='eval')
+                if ExpressionFolder._is_safe_node(node.body):
+                    val = eval(compile(node, filename='', mode='eval'))
+                    return str(int(val))
+            except Exception:
+                pass
+            return expr_str
+
+        old_text = ""
+        while old_text != text:
+            old_text = text
+            text = re.sub(pattern, evaluate_match, text)
+        return text
+
+    @staticmethod
+    def _is_safe_node(node) -> bool:
+        if isinstance(node, (ast.Num, ast.Constant)):
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow)):
+            return ExpressionFolder._is_safe_node(node.left) and ExpressionFolder._is_safe_node(node.right)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            return ExpressionFolder._is_safe_node(node.operand)
+        return False
+
 
 class StateMachineLifter:
     def __init__(self, source: str, decoded_strings: list):
@@ -239,7 +273,9 @@ class StateMachineLifter:
         if self.entry_state is not None:
             trace(self.entry_state)
 
-        return self._resolve_string_refs('\n'.join(output_lines))
+        raw_output = '\n'.join(output_lines)
+        resolved_strings = self._resolve_string_refs(raw_output)
+        return ExpressionFolder.fold_math_expressions(resolved_strings)
 
     def _resolve_string_refs(self, code: str) -> str:
         def repl(m):
