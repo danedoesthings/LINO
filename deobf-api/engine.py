@@ -542,23 +542,20 @@ class ASTDecompiler:
             return _format_clean_vm(prepared)
 
 # =============================================================================
-# UPGRADED INSTRUMENTER with comment safety, smart splitting, and beautifier
+# FIXED INSTRUMENTER – no aggressive splitting, safe comment handling
 # =============================================================================
 class Instrumenter:
     def instrument(self, code):
         code = global_fold_math_regex(code)
-        
+
         processed_lines = []
         for line in code.split('\n'):
             if "--" in line and not any(safe_header in line for safe_header in [
                 "[HOOK OP]", "[VM DETECTED]", "Advanced Semantic", "Deobfuscated & Instrumented"
             ]):
-                line = line.replace("--", " - - ")
+                line = line.replace("--", " -- ")
             processed_lines.append(line)
         code = '\n'.join(processed_lines)
-
-        code = re.sub(r'([0-9a-zA-Z_])\s*(and|or|not|then|do|end|else|elseif)\b', r'\1 \2', code)
-        code = re.sub(r'\b(and|or|not|then|do|end|else|elseif)\s*([0-9a-zA-Z_])', r'\1 \2', code)
 
         lines = code.split('\n')
         output = []
@@ -633,23 +630,8 @@ class Instrumenter:
         code = re.sub(r';', '\n', code)
         code = re.sub(r'\n\s*\n', '\n', code)
 
-        control_keywords = {'then','do','and','or','not','else','elseif','return',
-                           'local','function','in','for','while','repeat','until','if'}
-        
-        # Pass 1: split after closing delimiters
         pattern_delimiters = r'(\)|\]|\})\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([=\(\[{])'
         code = re.sub(pattern_delimiters, r'\1\n\2\3', code)
-
-        # Pass 2: split word statements only when separated by whitespace
-        pattern_words = r'\b([a-zA-Z0-9_]+)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*([=\(\[{])'
-        def statement_replacer(m):
-            preceding_token = m.group(1)
-            if preceding_token in control_keywords:
-                return m.group(0)
-            return f"{preceding_token}\n{m.group(2)}{m.group(3)}"
-            
-        for _ in range(3):
-            code = re.sub(pattern_words, statement_replacer, code)
 
         lines = code.split('\n')
         indent_level = 0
