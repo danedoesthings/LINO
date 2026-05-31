@@ -53,7 +53,9 @@ class Unveiler:
             return harness_result, 'lua_harness', 'Harness captured original source'
 
         self._log('devirtualise', True, 'attempting state machine unflattening')
-        sm_lifter = StateMachineLifter(source, decoder.strings)
+        devirt = Devirtualiser(decoder)
+        processed = devirt.process(source)
+        sm_lifter = StateMachineLifter(processed, decoder.strings)
         lifted_result = sm_lifter.lift()
 
         if lifted_result:
@@ -64,12 +66,9 @@ class Unveiler:
             return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
 
         self._log('devirtualise', True, 'falling back to static devirtualisation')
-        devirt = Devirtualiser(decoder)
-        result = devirt.process(source)
-
-        if result:
+        if processed:
             renamer = VarRenamer()
-            result = renamer.rename(result)
+            result = renamer.rename(processed)
             result = beautify(result)
             header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete'
