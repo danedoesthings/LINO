@@ -34,10 +34,12 @@ fakeEnv.getfenv = function() return fakeEnv end
 fakeEnv.setfenv = function() end
 fakeEnv.require = function() return {} end
 
-local cleanRunner = [[
-    local fakeEnv = ...
-    setfenv(1, fakeEnv)
-]] .. inputSource:match("(local R=.-})") .. [[ \n return R]]
+local matrixBlock = inputSource:match("local R%s*=%s*(%b{})")
+if not matrixBlock then
+    error("Failed to extract the string matrix structure statically.")
+end
+
+local cleanRunner = "local fakeEnv = ...\nsetfenv(1, fakeEnv)\nlocal R = " .. matrixBlock .. "\nreturn R"
 
 local chunk, err = luau.load(cleanRunner)
 if err then
