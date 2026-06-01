@@ -9,8 +9,6 @@ end
 
 local inputSource = fs.readFile(targetFile)
 
-print("[+] Initializing Secure Environment Hooks...")
-
 local capturedStrings = {}
 local fakeEnv = {}
 
@@ -36,8 +34,6 @@ fakeEnv.getfenv = function() return fakeEnv end
 fakeEnv.setfenv = function() end
 fakeEnv.require = function() return {} end
 
-print("[+] Extracting and running inner string decryption tables...")
-
 local cleanRunner = [[
     local fakeEnv = ...
     setfenv(1, fakeEnv)
@@ -53,12 +49,9 @@ if not success then
     error("Runtime exception during sandboxed evaluation: " .. tostring(dictionaryTable))
 end
 
-print("[+] Successfully captured string matrix variables!")
-
 local cache = {}
 for idx, val in pairs(dictionaryTable) do
     cache[tostring(idx)] = val
 end
 
 fs.writeFile("string_cache.json", require("@lune/net").jsonEncode(cache))
-print("[+] Data written to string_cache.json. Ready for Stage 2.")
