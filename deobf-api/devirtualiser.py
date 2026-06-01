@@ -106,9 +106,9 @@ class Devirtualiser:
         self.state_count = 0
 
     def process(self, source: str) -> str:
-        source = fold_constants(source)
         source = substitute_string_calls(source, self.decoder)
         source = substitute_table_indices(source, self.decoder)
+        source = fold_constants(source)
         source = strip_bootstrap(source)
         self.vm_detected = is_vm_obfuscated(source)
         if self.vm_detected:
