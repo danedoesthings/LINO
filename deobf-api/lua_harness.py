@@ -56,7 +56,7 @@ class LuaHarness:
             "os.rename = nil\n"
             "os.getenv = nil\n"
             "package = nil\n"
-            "require = function() return {{}} end\n"
+            "require = function() return {} end\n"
             "\n"
             "local _real_pcall = pcall\n"
             "local ok, err = _real_pcall(function()\n"
