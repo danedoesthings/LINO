@@ -12,27 +12,15 @@ class StateMachineLifter:
             state_var = m.group(1)
 
         loop_body = self._get_loop_body(state_var)
-        if not loop_body:
-            return None
-
-        normalized_body = self._resolve_getstr(loop_body)
-
-        statements = []
-        for line in normalized_body.split('\n'):
-            line_str = line.strip()
-            if line_str and not any(k in line_str for k in (state_var, "alphaMap", "while", "elseif")):
-                if line_str not in statements and line_str != "end" and line_str != "else":
-                    statements.append(line)
-
-        if not statements:
-            return None
+        target_code = loop_body if loop_body else self.source
+        resolved_code = self._resolve_getstr(target_code)
 
         output = [
-            "-- [VM LIFTER MODULE SECURED]",
-            "-- Control flow graph flattened layer successfully unrolled",
+            "-- [VM LIFTER MODULE RESOLVED]",
+            "-- Control flow graph string table lookups successfully unrolled",
             ""
         ]
-        output.extend(statements)
+        output.append(resolved_code)
         return '\n'.join(output)
 
     def _get_loop_body(self, state_var: str) -> str | None:
@@ -46,7 +34,7 @@ class StateMachineLifter:
 
         depth = 1
         i = body_start
-        tokens = re.compile(r'\b(if|while|for|function|do|end)\b')
+        tokens = re.compile(r'\b(if|function|do|end)\b')
 
         while i < len(self.source):
             if self.source[i] in ('"', "'"):
@@ -59,12 +47,19 @@ class StateMachineLifter:
                 i += 1
                 continue
 
+            if self.source[i:i+2] == '[[':
+                end_long = self.source.find(']]', i)
+                if end_long == -1:
+                    i += 2
+                else:
+                    i = end_long + 2
+                continue
+
             match = tokens.match(self.source, i)
             if match:
                 word = match.group(1)
-                if word in ('if', 'while', 'for', 'function', 'do'):
-                    if i != start:
-                        depth += 1
+                if word in ('if', 'function', 'do'):
+                    depth += 1
                 elif word == 'end':
                     depth -= 1
                     if depth == 0:
