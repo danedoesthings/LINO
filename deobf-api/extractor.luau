@@ -9,46 +9,40 @@ end
 
 local inputSource = fs.readFile(targetFile)
 
-local capturedStrings = {}
-local fakeEnv = {}
+local arrayName = inputSource:match("local%s+([%w_]+)%s*=%s*{")
+local initBlock = inputSource:match("^(.-)return%s*%(?%s*function")
 
-fakeEnv.string = setmetatable({}, {
-    __index = function(_, key)
-        return function(...)
-            local result = string[key](...)
-            if key == "char" or key == "sub" then
-                table.insert(capturedStrings, tostring(result))
-            end
-            return result
-        end
+if not arrayName or not initBlock then
+    local matrixBlock = inputSource:match("local R%s*=%s*(%b{})")
+    if matrixBlock then
+        arrayName = "R"
+        initBlock = "local R = " .. matrixBlock
+    else
+        error("Could not locate string initialization block.")
     end
-})
-
-fakeEnv.table = setmetatable({}, {
-    __index = function(_, key)
-        return table[key]
-    end
-})
-
-fakeEnv.getfenv = function() return fakeEnv end
-fakeEnv.setfenv = function() end
-fakeEnv.require = function() return {} end
-
-local matrixBlock = inputSource:match("local R%s*=%s*(%b{})")
-if not matrixBlock then
-    error("Failed to extract the string matrix structure statically.")
 end
 
-local cleanRunner = "local fakeEnv = ...\nsetfenv(1, fakeEnv)\nlocal R = " .. matrixBlock .. "\nreturn R"
+local cleanRunner = [[
+    local fakeEnv = ...
+    setfenv(1, fakeEnv)
+]] .. "\n" .. initBlock .. "\nreturn " .. arrayName
+
+local fakeEnv = {
+    string = string, math = math, table = table,
+    ipairs = ipairs, pairs = pairs, type = type,
+    tonumber = tonumber, tostring = tostring, print = print
+}
+fakeEnv.getfenv = function() return fakeEnv end
+fakeEnv.setfenv = function() end
 
 local chunk, err = luau.load(cleanRunner)
 if err then
-    error("Failed to parse string matrix statically: " .. tostring(err))
+    error("Failed to compile extraction block: " .. tostring(err))
 end
 
 local success, dictionaryTable = pcall(chunk, fakeEnv)
 if not success then
-    error("Runtime exception during sandboxed evaluation: " .. tostring(dictionaryTable))
+    error("Runtime exception during evaluation: " .. tostring(dictionaryTable))
 end
 
 local cache = {}
