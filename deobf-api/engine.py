@@ -65,7 +65,7 @@ class Unveiler:
         self._log('devirtualise', True, 'attempting state machine unflattening')
         devirt = Devirtualiser(decoder)
         processed = devirt.process(source)
-        sm_lifter = StateMachineLifter(processed, decoder.strings)
+        sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
         lifted_result = sm_lifter.lift()
 
         if lifted_result:
