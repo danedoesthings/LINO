@@ -1,0 +1,13 @@
+{
+    "generator": {
+        "name": "readable",
+        "column_span": 120
+    },
+    "rules": [
+        "compute_expression",
+        "remove_unused_if_branch",
+        "remove_unused_while",
+        "convert_index_to_field",
+        "remove_nil_declaration"
+    ]
+}
