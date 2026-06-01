@@ -23,53 +23,54 @@ class LuaHarness:
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
+        output_path_fixed = output_path.replace('\\', '/')
 
-        harness_code = f'''
-local _real_loadstring = loadstring or load
-local _real_load = load or loadstring
-local _captured_payload = ""
-
-local function hook_load(chunk, chunkname)
-    if type(chunk) == "string" and #chunk > 0 then
-        _captured_payload = chunk
-        local f = io.open("{output_path.replace('\\\\', '/')}", "w")
-        if f then
-            f:write(chunk)
-            f:close()
-        end
-    end
-    return _real_loadstring(chunk, chunkname)
-end
-
-_G.loadstring = hook_load
-_G.load = hook_load
-if getfenv then
-    local env = getfenv()
-    env.loadstring = hook_load
-    env.load = hook_load
-end
-
-os.execute = nil
-os.exit = nil
-os.remove = nil
-os.rename = nil
-os.getenv = nil
-package = nil
-require = function() return {{}} end
-
-local _real_pcall = pcall
-local ok, err = _real_pcall(function()
-    {source}
-end)
-
-if not ok and _captured_payload == "" then
-    local f = io.open("{output_path.replace('\\\\', '/')}", "w")
-    if f then
-        f:write("-- [HARNESS ERROR] " .. tostring(err))
-        f:close()
-    end
-end
-'''
+        harness_code = (
+            "local _real_loadstring = loadstring or load\n"
+            "local _real_load = load or loadstring\n"
+            'local _captured_payload = ""\n'
+            "\n"
+            "local function hook_load(chunk, chunkname)\n"
+            '    if type(chunk) == "string" and #chunk > 0 then\n'
+            "        _captured_payload = chunk\n"
+            '        local f = io.open("' + output_path_fixed + '", "w")\n'
+            "        if f then\n"
+            "            f:write(chunk)\n"
+            "            f:close()\n"
+            "        end\n"
+            "    end\n"
+            "    return _real_loadstring(chunk, chunkname)\n"
+            "end\n"
+            "\n"
+            "_G.loadstring = hook_load\n"
+            "_G.load = hook_load\n"
+            "if getfenv then\n"
+            "    local env = getfenv()\n"
+            "    env.loadstring = hook_load\n"
+            "    env.load = hook_load\n"
+            "end\n"
+            "\n"
+            "os.execute = nil\n"
+            "os.exit = nil\n"
+            "os.remove = nil\n"
+            "os.rename = nil\n"
+            "os.getenv = nil\n"
+            "package = nil\n"
+            "require = function() return {{}} end\n"
+            "\n"
+            "local _real_pcall = pcall\n"
+            "local ok, err = _real_pcall(function()\n"
+            + source +
+            "\nend)\n"
+            "\n"
+            'if not ok and _captured_payload == "" then\n'
+            '    local f = io.open("' + output_path_fixed + '", "w")\n'
+            "    if f then\n"
+            '        f:write("-- [HARNESS ERROR] " .. tostring(err))\n'
+            "        f:close()\n"
+            "    end\n"
+            "end\n"
+        )
 
         try:
             with open(harness_path, "w", encoding="utf-8") as f:
