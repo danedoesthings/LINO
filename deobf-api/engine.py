@@ -9,6 +9,7 @@ from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
 from lua_harness import LuaHarness
+from lune_pipeline import run_lune_darklua_pipeline
 from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
 
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
@@ -52,6 +53,15 @@ class Unveiler:
             self._log('harness_success', True, f'captured {len(harness_result)} chars')
             return harness_result, 'lua_harness', 'Harness captured original source'
 
+        self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
+        lune_result = run_lune_darklua_pipeline(source)
+        if lune_result and looks_like_real_code(lune_result):
+            renamer = VarRenamer()
+            lune_result = renamer.rename(lune_result)
+            lune_result = beautify(lune_result)
+            self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
+            return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
+
         self._log('devirtualise', True, 'attempting state machine unflattening')
         devirt = Devirtualiser(decoder)
         processed = devirt.process(source)
@@ -91,6 +101,7 @@ class DeobfEngine:
             'wearedevs_decode': True,
             'static_analysis': True,
             'lua_harness': self.harness.available,
+            'lune_darklua': True,
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'var_renamer': True,
             'state_machine_lifter': True,
@@ -104,7 +115,7 @@ class DeobfEngine:
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('state_machine_lifted', 'static_analysis', 'lua_harness'):
+        if result and method in ('lune_darklua', 'state_machine_lifted', 'static_analysis', 'lua_harness'):
             result = self.var_renamer.rename(result)
         if logger:
             for entry in self.unveiler.trace:
