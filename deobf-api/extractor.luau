@@ -10,13 +10,59 @@ end
 local inputSource = fs.readFile(targetFile)
 
 local arrayName = inputSource:match("local%s+([%w_]+)%s*=%s*{")
-local initBlock = inputSource:match("^(.-)return%s*%(?%s*function")
+local arrayStart = arrayName and inputSource:find("local%s+" .. arrayName .. "%s*=%s*{")
 
-if not arrayName or not initBlock then
-    local matrixBlock = inputSource:match("local R%s*=%s*(%b{})")
-    if matrixBlock then
-        arrayName = "R"
-        initBlock = "local R = " .. matrixBlock
+local initBlock
+if arrayStart then
+    local tail = inputSource:sub(arrayStart)
+    local depth = 0
+    local i = 1
+    local cutPos = nil
+    while i <= #tail do
+        local c = tail:sub(i, i)
+        if c == '"' or c == "'" then
+            local q = c
+            i = i + 1
+            while i <= #tail and tail:sub(i, i) ~= q do
+                if tail:sub(i, i) == '\\' then i = i + 1 end
+                i = i + 1
+            end
+            i = i + 1
+        elseif tail:sub(i, i+1) == '--' and tail:sub(i, i+3) ~= '--[[' then
+            local nl = tail:find('\n', i + 2)
+            i = nl and nl + 1 or #tail + 1
+        elseif tail:sub(i, i+3) == '--[[' or tail:sub(i, i+1) == '[[' then
+            local close = tail:find(']]', i + 2)
+            i = close and close + 2 or #tail + 1
+        else
+            local kw = tail:match('^%f[%w_](function)%f[%W_]', i)
+                    or tail:match('^%f[%w_](do)%f[%W_]', i)
+                    or tail:match('^%f[%w_](end)%f[%W_]', i)
+                    or tail:match('^%f[%w_](return)%f[%W_]', i)
+            if kw == 'function' or kw == 'do' then
+                depth = depth + 1
+                i = i + #kw
+            elseif kw == 'end' then
+                depth = depth - 1
+                i = i + #kw
+            elseif kw == 'return' and depth == 0 then
+                cutPos = i
+                break
+            else
+                i = i + 1
+            end
+        end
+    end
+    if cutPos and cutPos > 1 then
+        initBlock = tail:sub(1, cutPos - 1):gsub('%s+$', '')
+    end
+end
+
+if not arrayName or not initBlock or initBlock == "" then
+    local fallbackBlock = inputSource:match("^(.-)return%s*%(?%s*function")
+    if fallbackBlock and fallbackBlock ~= "" then
+        initBlock = fallbackBlock
+        arrayName = arrayName or inputSource:match("local%s+([%w_]+)%s*=%s*{")
     else
         error("Could not locate string initialization block.")
     end
