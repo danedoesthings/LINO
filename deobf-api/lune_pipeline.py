@@ -1,8 +1,4 @@
-import os
-import json
-import subprocess
-import tempfile
-import shutil
+import os, json, subprocess, tempfile, shutil, re
 
 def run_lune_darklua_pipeline(source: str) -> str:
     tmpdir = tempfile.mkdtemp()
@@ -10,7 +6,7 @@ def run_lune_darklua_pipeline(source: str) -> str:
     cache_path = os.path.join(tmpdir, "string_cache.json")
     stage2_path = os.path.join(tmpdir, "stage2.lua")
     output_path = os.path.join(tmpdir, "output.lua")
-    
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     extractor_path = os.path.join(base_dir, "extractor.luau")
     darklua_config_path = os.path.join(base_dir, "darklua.json")
@@ -19,7 +15,7 @@ def run_lune_darklua_pipeline(source: str) -> str:
         with open(input_path, "w", encoding="utf-8") as f:
             f.write(source)
 
-        result = subprocess.run(
+        subprocess.run(
             ["lune", "run", extractor_path, input_path],
             capture_output=True, text=True, timeout=45, cwd=tmpdir
         )
@@ -37,6 +33,24 @@ def run_lune_darklua_pipeline(source: str) -> str:
             safe_string = raw_string.replace('\\', '\\\\').replace('"', '\\"')
             source_code = source_code.replace(f"R[{index}]", f'"{safe_string}"')
             source_code = source_code.replace(f'R["{index}"]', f'"{safe_string}"')
+
+        getter_match = re.search(
+            r'function\s+([a-zA-Z0-9_]+)\s*\([^)]*\)\s*return\s+[a-zA-Z0-9_]+\s*\[[^\]]+\+\s*\(?(\d+)\)?\s*\]\s*end',
+            source_code
+        )
+        if getter_match:
+            getter_name = getter_match.group(1)
+            offset_const = int(getter_match.group(2))
+
+            def repl(m):
+                idx = int(m.group(1)) + offset_const
+                str_idx = str(idx)
+                if str_idx in string_lookup:
+                    safe_str = string_lookup[str_idx].replace('\\', '\\\\').replace('"', '\\"')
+                    return f'"{safe_str}"'
+                return m.group(0)
+
+            source_code = re.sub(rf'{getter_name}\s*\(\s*(-?\d+)\s*\)', repl, source_code)
 
         with open(stage2_path, "w", encoding="utf-8") as f:
             f.write(source_code)
