@@ -86,7 +86,10 @@ class LuaHarness:
                 proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
                 except Exception:
                     pass
 
