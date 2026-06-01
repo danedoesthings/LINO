@@ -47,12 +47,21 @@ class StateMachineLifter:
                 i += 1
                 continue
 
-            if self.source[i:i+2] == '[[':
-                end_long = self.source.find(']]', i)
+            if self.source[i:i+4] == '--[[' or self.source[i:i+2] == '[[':
+                is_comment = self.source[i:i+4] == '--[['
+                start_offset = 4 if is_comment else 2
+                end_long = self.source.find(']]', i + start_offset)
                 if end_long == -1:
-                    i += 2
+                    i += start_offset
                 else:
                     i = end_long + 2
+                continue
+
+            if self.source[i:i+2] == '--':
+                end_line = self.source.find('\n', i + 2)
+                if end_line == -1:
+                    break
+                i = end_line + 1
                 continue
 
             match = tokens.match(self.source, i)
@@ -70,10 +79,15 @@ class StateMachineLifter:
         return None
 
     def _resolve_getstr(self, code: str) -> str:
+        offset_constant = 48884
+        m_offset = re.search(r'GetStr\s*\+\s*\(?(\d+)\)?', self.source)
+        if m_offset:
+            offset_constant = int(m_offset.group(1))
+
         def repl(m):
             try:
                 offset = int(m.group(1))
-                idx = offset + 48884
+                idx = offset + offset_constant - 1
                 if 0 <= idx < len(self.strings):
                     s = self.strings[idx]
                     if s is not None:
