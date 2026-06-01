@@ -6,81 +6,19 @@ class StateMachineLifter:
         self.strings = decoded_strings if decoded_strings else []
 
     def lift(self) -> str | None:
-        state_var = "vmState"
-        m = re.search(r'while\s+(\w+)\s+do', self.source)
-        if m:
-            state_var = m.group(1)
-
-        loop_body = self._get_loop_body(state_var)
-        target_code = loop_body if loop_body else self.source
-        resolved_code = self._resolve_getstr(target_code)
+        resolved_code = self._resolve_getstr(self.source)
 
         output = [
-            "-- [VM LIFTER MODULE RESOLVED]",
-            "-- Control flow graph string table lookups successfully unrolled",
+            "-- [VM EMULATOR DETECTED]",
+            "-- String extraction applied statically.",
             ""
         ]
         output.append(resolved_code)
         return '\n'.join(output)
 
-    def _get_loop_body(self, state_var: str) -> str | None:
-        start = self.source.find(f'while {state_var} do')
-        if start == -1:
-            start = self.source.find(f'while{state_var}do')
-        if start == -1:
-            return None
-
-        body_start = self.source.find('do', start) + 2
-
-        depth = 1
-        i = body_start
-        tokens = re.compile(r'\b(if|function|do|end)\b')
-
-        while i < len(self.source):
-            if self.source[i] in ('"', "'"):
-                q = self.source[i]
-                i += 1
-                while i < len(self.source) and self.source[i] != q:
-                    if self.source[i] == '\\':
-                        i += 1
-                    i += 1
-                i += 1
-                continue
-
-            if self.source[i:i+4] == '--[[' or self.source[i:i+2] == '[[':
-                is_comment = self.source[i:i+4] == '--[['
-                start_offset = 4 if is_comment else 2
-                end_long = self.source.find(']]', i + start_offset)
-                if end_long == -1:
-                    i += start_offset
-                else:
-                    i = end_long + 2
-                continue
-
-            if self.source[i:i+2] == '--':
-                end_line = self.source.find('\n', i + 2)
-                if end_line == -1:
-                    break
-                i = end_line + 1
-                continue
-
-            match = tokens.match(self.source, i)
-            if match:
-                word = match.group(1)
-                if word in ('if', 'function', 'do'):
-                    depth += 1
-                elif word == 'end':
-                    depth -= 1
-                    if depth == 0:
-                        return self.source[body_start:i].strip()
-                i += len(word)
-            else:
-                i += 1
-        return None
-
     def _resolve_getstr(self, code: str) -> str:
-        offset_constant = 48884
-        m_offset = re.search(r'GetStr\s*\+\s*\(?(\d+)\)?', self.source)
+        offset_constant = 0
+        m_offset = re.search(r'GetStr\s*\+\s*\(?\s*(\d+)\s*\)?', code)
         if m_offset:
             offset_constant = int(m_offset.group(1))
 
@@ -96,4 +34,5 @@ class StateMachineLifter:
             except Exception:
                 pass
             return m.group(0)
+
         return re.sub(r'GetStr\s*\(\s*(-?\d+)\s*\)', repl, code)
