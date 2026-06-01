@@ -1,9 +1,10 @@
 import re
 
 class StateMachineLifter:
-    def __init__(self, source: str, decoded_strings: list = None):
+    def __init__(self, source: str, decoded_strings: list = None, offset: int = 0):
         self.source = source
         self.strings = decoded_strings if decoded_strings else []
+        self.offset = offset
 
     def lift(self) -> str | None:
         resolved_code = self._resolve_getstr(self.source)
@@ -17,10 +18,12 @@ class StateMachineLifter:
         return '\n'.join(output)
 
     def _resolve_getstr(self, code: str) -> str:
-        offset_constant = 0
-        m_offset = re.search(r'GetStr\s*\+\s*\(?\s*(\d+)\s*\)?', code)
-        if m_offset:
-            offset_constant = int(m_offset.group(1))
+        
+        offset_constant = self.offset
+        if not offset_constant:
+            m_offset = re.search(r'GetStr\s*\+\s*\(?\s*(\d+)\s*\)?', code)
+            if m_offset:
+                offset_constant = int(m_offset.group(1))
 
         def repl(m):
             try:
