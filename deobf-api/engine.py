@@ -87,35 +87,34 @@ class Unveiler:
                 renamer = VarRenamer()
                 lifted = renamer.rename(lifted)
                 lifted = beautify(lifted)
-                self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
-                return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
+                if self._is_valid_lua(lifted):
+                    self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+                    return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('devirtualise', True, 'attempting state machine unflattening')
-        devirt = Devirtualiser(decoder)
+        devirt = Devirtualiser(decoder, annotate=False)
         processed = devirt.process(source)
-        if not self._is_valid_lua(processed):
-            self._log('devirtualise', False, 'devirtualiser produced invalid Lua, skipping fold and beautify')
-            sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
-            lifted_result = sm_lifter.lift()
-            if lifted_result:
-                self._log('devirtualise_success', True, 'state machine unflattened (without fold)')
-                return lifted_result, 'state_machine_lifted', 'State machine unflattened (syntax errors present)'
-        else:
-            sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
-            lifted_result = sm_lifter.lift()
-            if lifted_result:
+        sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
+        lifted_result = sm_lifter.lift()
+        if lifted_result:
+            if not self._is_valid_lua(lifted_result):
+                self._log('devirtualise', False, 'state machine lifter produced invalid Lua')
+            else:
                 renamer = VarRenamer()
                 final_code = renamer.rename(lifted_result)
                 final_code = beautify(final_code)
-                self._log('devirtualise_success', True, 'state machine unflattened')
-                return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
+                if self._is_valid_lua(final_code):
+                    self._log('devirtualise_success', True, 'state machine unflattened')
+                    return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
 
         self._log('devirtualise', True, 'falling back to static devirtualisation')
-        if processed:
+        devirt_annotated = Devirtualiser(decoder, annotate=True)
+        processed_annotated = devirt_annotated.process(source)
+        if processed_annotated:
             renamer = VarRenamer()
-            result = renamer.rename(processed)
+            result = renamer.rename(processed_annotated)
             result = beautify(result)
-            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
+            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt_annotated.vm_detected else '-- Deobfuscated via static analysis\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete'
 
         self._log('devirtualise', False, 'static analysis produced no meaningful output')
@@ -151,8 +150,8 @@ class DeobfEngine:
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('lune_darklua', 'state_machine_lifted', 'static_analysis', 'lua_harness', 'vm_lifted'):
-            result = self.var_renamer.rename(result)
+        if result and method not in ('wearedevs_decode',):
+            pass
         if logger:
             for entry in self.unveiler.trace:
                 logger.add_trace(entry['stage'], entry['success'], entry['message'])
