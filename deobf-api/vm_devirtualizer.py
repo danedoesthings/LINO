@@ -10,28 +10,30 @@ from string_decoder import StringTableDecoder
 
 
 class VMDevirtualizer:
-    def __init__(self, source: str, decoder: StringTableDecoder):
+    def __init__(self, source: str, decoder: StringTableDecoder, wrapper_name: str = "GetStr"):
         self.source = source
         self.decoder = decoder
         self.strings = decoder.strings
         self.offset = decoder.offset
+        self.wrapper_name = wrapper_name
         self.vm_state_var: str = "vmState"
-        self.states: Dict[int, dict] = {}
-        self.entry_state: Optional[int] = None
-        self.transitions: Dict[int, List[int]] = {}
+        self.states: Dict[str, dict] = {}
+        self.entry_state: Optional[str] = None
+        self.transitions: Dict[str, List[str]] = {}
         self.lifted_code: List[str] = []
         self.diagnostics: List[str] = []
+        self._state_counter: int = 0
 
     def devirtualize(self) -> Optional[str]:
         self.diagnostics = []
         code = self._resolve_all_strings(self.source)
-        code = self._fix_missing_commas(code)
-        self.diagnostics.append("Strings resolved and commas fixed")
+        code = self._sanitize_code(code)
+        self.diagnostics.append("Strings resolved and code sanitized")
 
         try:
             tree = lua_ast.parse(code)
         except Exception as e:
-            self.diagnostics.append(f"Parse error after fix: {e}")
+            self.diagnostics.append(f"Parse error after sanitize: {e}")
             return None
 
         while_node = self._find_dispatcher(tree)
@@ -65,7 +67,7 @@ class VMDevirtualizer:
     def _resolve_all_strings(self, code: str) -> str:
         offset_constant = self.offset
         if not offset_constant:
-            m_offset = re.search(r'GetStr\s*\+\s*\(?\s*(\d+)\s*\)?', code)
+            m_offset = re.search(rf'{self.wrapper_name}\s*\+\s*\(?\s*(\d+)\s*\)?', code)
             if m_offset:
                 offset_constant = int(m_offset.group(1))
 
@@ -82,16 +84,15 @@ class VMDevirtualizer:
             except Exception:
                 return m.group(0)
 
-        code = re.sub(r'GetStr\s*\(\s*(-?\d+)\s*\)', repl, code)
-        code = re.sub(r'\bEncStr\s*\[\s*(-?\d+)\s*\]',
-                      lambda m: f'"{self.strings[int(m.group(1)) - 1]}"' if 0 <= int(m.group(1)) - 1 < len(self.strings) else m.group(0),
-                      code)
+        code = re.sub(rf'{self.wrapper_name}\s*\(\s*(-?\d+)\s*\)', repl, code)
         return code
 
-    def _fix_missing_commas(self, code: str) -> str:
+    def _sanitize_code(self, code: str) -> str:
         code = re.sub(r'(\b[a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*([,})])', r'\1, \2\3', code)
         code = re.sub(r'(\b[a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*$', r'\1, \2', code, flags=re.MULTILINE)
-        code = re.sub(r'(\b[a-zA-Z_][a-zA-Z0-9_]*)\s+(?=[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*function)', r'\1, ', code)
+        code = re.sub(r'\)\s*\)', '))', code)
+        code = re.sub(r'(\w+)\s*\(\s*(\w+)\s*\)\s*(\w+)', r'\1(\2)\3', code)
+        code = re.sub(r'\bnil\s*\)', 'nil)', code)
         return code
 
     def _find_dispatcher(self, tree: lua_ast.Chunk) -> Optional[While]:
@@ -138,53 +139,68 @@ class VMDevirtualizer:
         if boundary is not None:
             true_cond = conditions + [f"{self.vm_state_var} < {boundary}"]
             false_cond = conditions + [f"{self.vm_state_var} >= {boundary}"]
-            self._process_block(node.body.body, true_cond, prefix)
-            if node.else_body:
-                for stmt in node.else_body.body:
-                    if isinstance(stmt, If):
-                        self._walk_if_tree(stmt, false_cond, prefix)
-                    else:
-                        self._process_remaining([stmt], false_cond, prefix)
+
+            if len(node.body.body) == 1 and isinstance(node.body.body[0], If):
+                self._walk_if_tree(node.body.body[0], true_cond, prefix)
             else:
-                self._process_remaining([], false_cond, prefix)
+                self._process_block(node.body.body, true_cond, prefix)
+
+            if node.else_body:
+                if len(node.else_body.body) == 1 and isinstance(node.else_body.body[0], If):
+                    self._walk_if_tree(node.else_body.body[0], false_cond, prefix)
+                else:
+                    self._process_block(node.else_body.body, false_cond, prefix)
         else:
             self._process_block(node.body.body, conditions, prefix)
 
     def _process_block(self, stmts: list, conditions: list, prefix: str) -> None:
+        next_state = None
         last_assign = None
-        state = None
+        all_targets = []
+
         for stmt in reversed(stmts):
             if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
-                state = self._get_assigned_state(stmt)
-                last_assign = stmt
-                break
-        if state is None:
-            self.diagnostics.append(f"No state assignment found in block with {len(stmts)} statements")
-            return
-        block_stmts = stmts[:-1] if last_assign else stmts
-        code = self._stmts_to_source(block_stmts)
-        if state not in self.states:
-            self.states[state] = {
-                'code': code,
-                'conditions': conditions,
-                'next': None,
-            }
-        if self.entry_state is None:
-            self.entry_state = state
+                if next_state is None:
+                    next_state = self._get_assigned_state(stmt)
+                    last_assign = stmt
+                all_targets.append(self._get_assigned_state(stmt))
+            elif isinstance(stmt, If):
+                self._extract_all_state_assigns(stmt, all_targets)
 
-    def _process_remaining(self, stmts: list, conditions: list, prefix: str) -> None:
-        if not stmts:
-            return
-        self._process_block(stmts, conditions, prefix)
+        block_id = self._derive_state_id_from_conditions(conditions)
+        clean_stmts = [s for s in stmts if s != last_assign]
+
+        self.states[block_id] = {
+            'stmts': clean_stmts,
+            'conditions': conditions,
+            'next': next_state,
+            'all_targets': all_targets,
+        }
+
+        if self.entry_state is None:
+            self.entry_state = block_id
+
+    def _extract_all_state_assigns(self, node: If, targets: list) -> None:
+        for stmt in node.body.body:
+            if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
+                targets.append(self._get_assigned_state(stmt))
+            elif isinstance(stmt, If):
+                self._extract_all_state_assigns(stmt, targets)
+        if node.else_body:
+            for stmt in node.else_body.body:
+                if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
+                    targets.append(self._get_assigned_state(stmt))
+                elif isinstance(stmt, If):
+                    self._extract_all_state_assigns(stmt, targets)
+
+    def _derive_state_id_from_conditions(self, conditions: list) -> str:
+        if not conditions:
+            self._state_counter += 1
+            return f"entry_{self._state_counter}"
+        return " & ".join(conditions)
 
     def _is_state_assign(self, node) -> bool:
-        if isinstance(node, Assign):
-            if len(node.targets) != 1:
-                return False
-            target = node.targets[0]
-            if isinstance(target, Name) and target.id == self.vm_state_var:
-                return True
-        elif isinstance(node, LocalAssign):
+        if isinstance(node, (Assign, LocalAssign)):
             if len(node.targets) != 1:
                 return False
             target = node.targets[0]
@@ -193,16 +209,9 @@ class VMDevirtualizer:
         return False
 
     def _get_assigned_state(self, node) -> Optional[int]:
-        if isinstance(node, Assign):
-            if len(node.values) != 1:
-                return None
-            val = node.values[0]
-        elif isinstance(node, LocalAssign):
-            if len(node.values) != 1:
-                return None
-            val = node.values[0]
-        else:
+        if len(node.values) != 1:
             return None
+        val = node.values[0]
         if isinstance(val, Number):
             return int(val.n)
         if isinstance(val, UnaryOp) and val.op == '-' and isinstance(val.operand, Number):
@@ -217,26 +226,104 @@ class VMDevirtualizer:
                 return -int(node.right.operand.n)
         return None
 
-    def _stmts_to_source(self, stmts: list) -> str:
-        if not stmts:
+    def _node_to_source(self, node) -> str:
+        if node is None:
             return ""
-        lines = []
-        for stmt in stmts:
-            if hasattr(stmt, 'to_lua'):
-                lines.append(stmt.to_lua())
-            else:
-                lines.append(str(stmt))
-        return "\n".join(lines)
+        if isinstance(node, Block):
+            return "\n".join(self._node_to_source(s) for s in node.body)
+        if isinstance(node, list):
+            return "\n".join(self._node_to_source(s) for s in node)
+        if isinstance(node, Name):
+            return node.id
+        if isinstance(node, Number):
+            return str(node.n)
+        if isinstance(node, String):
+            escaped = node.s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+            return f'"{escaped}"'
+        if isinstance(node, Assign):
+            targets = ", ".join(self._node_to_source(t) for t in node.targets)
+            values = ", ".join(self._node_to_source(v) for v in node.values)
+            return f"{targets} = {values}"
+        if isinstance(node, LocalAssign):
+            targets = ", ".join(self._node_to_source(t) for t in node.targets)
+            if node.values:
+                values = ", ".join(self._node_to_source(v) for v in node.values)
+                return f"local {targets} = {values}"
+            return f"local {targets}"
+        if isinstance(node, BinaryOp):
+            return f"({self._node_to_source(node.left)} {node.op} {self._node_to_source(node.right)})"
+        if isinstance(node, UnaryOp):
+            return f"({node.op}{self._node_to_source(node.operand)})"
+        if isinstance(node, Index):
+            obj = self._node_to_source(node.value)
+            idx = self._node_to_source(node.idx)
+            if isinstance(node.idx, String):
+                return f'{obj}["{node.idx.s}"]'
+            return f"{obj}[{idx}]"
+        if isinstance(node, Call):
+            func = self._node_to_source(node.func)
+            args = ", ".join(self._node_to_source(a) for a in node.args)
+            return f"{func}({args})"
+        if isinstance(node, Invoke):
+            obj = self._node_to_source(node.source)
+            method = node.func.id
+            args = ", ".join(self._node_to_source(a) for a in node.args)
+            return f"{obj}:{method}({args})"
+        if isinstance(node, Function):
+            params = ", ".join(p.id for p in node.args)
+            body = self._node_to_source(node.body)
+            return f"function({params})\n{body}\nend"
+        if isinstance(node, If):
+            out = f"if {self._node_to_source(node.test)} then\n"
+            out += self._node_to_source(node.body)
+            if node.else_body:
+                out += f"\nelse\n{self._node_to_source(node.else_body)}"
+            out += "\nend"
+            return out
+        if isinstance(node, Table):
+            if node.fields:
+                fields = []
+                for f in node.fields:
+                    if isinstance(f, Field):
+                        if f.key:
+                            fields.append(f"[{self._node_to_source(f.key)}] = {self._node_to_source(f.value)}")
+                        else:
+                            fields.append(self._node_to_source(f.value))
+                return "{" + ", ".join(fields) + "}"
+            return "{}"
+        if isinstance(node, Field):
+            if node.key:
+                return f"[{self._node_to_source(node.key)}] = {self._node_to_source(node.value)}"
+            return self._node_to_source(node.value)
+        if isinstance(node, Vararg):
+            return "..."
+        if isinstance(node, str):
+            return node
+        return f"-- <{type(node).__name__}>"
 
     def _build_transitions(self) -> None:
-        for state, info in self.states.items():
-            code = info['code']
-            m = re.search(rf'{self.vm_state_var}\s*=\s*(-?\d+)', code)
+        for state_id, info in self.states.items():
+            self.transitions[state_id] = []
+            for target in info.get('all_targets', []):
+                if target is not None:
+                    for other_id, other_info in self.states.items():
+                        if other_info.get('conditions') and self._state_matches_conditions(target, other_info['conditions']):
+                            if other_id not in self.transitions[state_id]:
+                                self.transitions[state_id].append(other_id)
+
+    def _state_matches_conditions(self, state_num: int, conditions: list) -> bool:
+        if not conditions:
+            return False
+        for cond in conditions:
+            m = re.match(rf'{self.vm_state_var}\s*<\s*(-?\d+)', cond)
             if m:
-                info['next'] = int(m.group(1))
-                if state not in self.transitions:
-                    self.transitions[state] = []
-                self.transitions[state].append(int(m.group(1)))
+                if state_num >= int(m.group(1)):
+                    return False
+            m = re.match(rf'{self.vm_state_var}\s*>=\s*(-?\d+)', cond)
+            if m:
+                if state_num < int(m.group(1)):
+                    return False
+        return True
 
     def _lift_to_code(self) -> None:
         self.lifted_code = []
@@ -247,75 +334,56 @@ class VMDevirtualizer:
         visited = set()
         self._emit_state(self.entry_state, visited, 0)
 
-    def _emit_state(self, state: int, visited: set, depth: int) -> None:
-        if state is None or state in visited:
-            if state in visited:
-                self.lifted_code.append("  " * depth + f"-- loop back to state {state}")
+    def _emit_state(self, state_id: str, visited: set, depth: int) -> None:
+        if state_id is None:
             return
-        visited.add(state)
-        info = self.states.get(state)
+        if state_id in visited:
+            return
+
+        visited.add(state_id)
+        info = self.states.get(state_id)
         if not info:
-            self.lifted_code.append("  " * depth + f"-- unknown state {state}")
+            self.lifted_code.append("  " * depth + f"-- unknown state {state_id}")
             return
 
-        code = info['code']
-        lifted = self._classify_and_lift(code)
         indent = "  " * depth
+        self.lifted_code.append(indent + f"-- state section: {state_id}")
 
-        if lifted:
-            self.lifted_code.append(indent + f"-- state {state}")
-            for line in lifted.split("\n"):
-                if line.strip():
-                    self.lifted_code.append(indent + line)
-        else:
-            self.lifted_code.append(indent + f"-- state {state}: raw code follows")
-            for line in code.split("\n"):
-                if line.strip():
-                    self.lifted_code.append(indent + "-- " + line.strip())
+        for stmt in info['stmts']:
+            lifted_line = self._lift_ast_statement(stmt)
+            if lifted_line:
+                self.lifted_code.append(indent + lifted_line)
 
-        next_state = info.get('next')
-        if next_state is not None:
-            self._emit_state(next_state, visited, depth)
+        for next_id in self.transitions.get(state_id, []):
+            self._emit_state(next_id, visited, depth)
 
-    def _classify_and_lift(self, code: str) -> Optional[str]:
-        lines = []
-        for line in code.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            lifted = self._lift_single_line(line)
-            if lifted:
-                lines.append(lifted)
-            else:
-                lines.append(f"-- {line}")
-        return "\n".join(lines) if lines else None
+    def _lift_ast_statement(self, stmt) -> str:
+        if isinstance(stmt, (Assign, LocalAssign)) and len(stmt.targets) == 1 and len(stmt.values) == 1:
+            target = stmt.targets[0]
+            val = stmt.values[0]
 
-    def _lift_single_line(self, line: str) -> Optional[str]:
-        m_move = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*(\w+)\s*\[\s*(\w+)\s*\]$', line)
-        if m_move:
-            dest_tbl, dest_idx, src_tbl, src_idx = m_move.groups()
-            if dest_tbl in ('instrTbl', 'vmStack') and src_tbl in ('instrTbl', 'vmStack'):
-                return f"local {dest_idx} = {src_idx}  -- MOVE"
+            if isinstance(target, Index):
+                tbl = self._node_to_source(target.value)
+                idx = self._node_to_source(target.idx)
 
-        m_loadk = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*"([^"]*)"$', line)
-        if m_loadk:
-            tbl, idx, val = m_loadk.groups()
-            if tbl in ('instrTbl', 'vmStack'):
-                return f"local {idx} = \"{val}\"  -- LOADK"
+                if isinstance(val, Index):
+                    src_tbl = self._node_to_source(val.value)
+                    src_idx = self._node_to_source(val.idx)
+                    return f"local {idx} = {src_idx}  -- MOVE from {tbl}"
+                if isinstance(val, String):
+                    return f"local {idx} = \"{val.s}\"  -- LOADK"
+                if isinstance(val, Number):
+                    return f"local {idx} = {val.n}  -- LOADK_NUM"
+                if isinstance(val, Call):
+                    func_name = self._node_to_source(val.func)
+                    return f"local {idx} = {func_name}(...)  -- CLOSURE"
 
-        m_call = re.match(r'\{?(\w+)\s*\(\s*(\w+)\s*\)\}?$', line)
-        if m_call:
-            func, arg = m_call.groups()
-            return f"{func}({arg})  -- CALL"
+        if isinstance(stmt, Call):
+            func_name = self._node_to_source(stmt.func)
+            args = ", ".join(self._node_to_source(a) for a in stmt.args)
+            return f"{func_name}({args})  -- CALL"
 
-        m_closure = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*(\w+)\s*\(', line)
-        if m_closure:
-            tbl, idx, factory = m_closure.groups()
-            if factory in ('funcWrap', 'helperG', 'tokenMap', 'shuffleTbl', 'r5', 'e', 'regD'):
-                return f"local {idx} = {factory}(...)  -- CLOSURE"
+        if isinstance(stmt, (Assign, LocalAssign)):
+            return self._node_to_source(stmt) + "  -- ASSIGN"
 
-        m_state = re.match(rf'{self.vm_state_var}\s*=\s*(-?\d+)$', line)
-        if m_state:
-            return f"goto state {m_state.group(1)}"
-
-        return None
+        return self._node_to_source(stmt)
