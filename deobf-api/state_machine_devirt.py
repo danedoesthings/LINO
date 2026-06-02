@@ -16,22 +16,33 @@ class StateMachineLifter:
         self.vm_state_var: Optional[str] = None
         self.entry_state: Optional[int] = None
         self.handlers: Dict[int, dict] = {}
+        self.diagnostics: List[str] = []
 
     def lift(self) -> Optional[str]:
+        self.diagnostics = []
         code = self._resolve_getstr(self.source)
-        tree = lua_ast.parse(code)
+        try:
+            tree = lua_ast.parse(code)
+        except Exception as e:
+            self.diagnostics.append(f"Parse error: {e}")
+            return None
+
         while_node = self._find_dispatcher(tree)
         if while_node is None:
+            self.diagnostics.append("No 'while' dispatcher found in AST")
             return None
 
         self.vm_state_var = self._get_while_variable(while_node)
         if not self.vm_state_var:
+            self.diagnostics.append("Could not determine VM state variable name")
             return None
 
         self._extract_states(while_node.body)
         if not self.handlers:
+            self.diagnostics.append("No state handlers extracted from dispatcher body")
             return None
 
+        self.diagnostics.append(f"Extracted {len(self.handlers)} states, entry state = {self.entry_state}")
         return self._emit_lua()
 
     def _resolve_getstr(self, code: str) -> str:
@@ -49,7 +60,7 @@ class StateMachineLifter:
                     if s is not None:
                         escaped = s.replace('\\', '\\\\').replace('"', '\\"')
                         return f'"{escaped}"'
-                return f'({n})'
+                return 'nil'
             except Exception:
                 return m.group(0)
         return re.sub(r'GetStr\s*\(\s*(-?\d+)\s*\)', repl, code)
@@ -57,6 +68,7 @@ class StateMachineLifter:
     def _find_dispatcher(self, tree: lua_ast.Chunk) -> Optional[While]:
         for node in tree.body.body:
             if isinstance(node, While):
+                self.diagnostics.append(f"Found dispatcher at top level, condition type: {type(node.test)}")
                 return node
             if hasattr(node, 'body'):
                 inner = self._find_in_block(node.body)
@@ -86,6 +98,7 @@ class StateMachineLifter:
     def _get_while_variable(self, node: While) -> Optional[str]:
         if isinstance(node.test, Name):
             return node.test.id
+        self.diagnostics.append(f"While condition is not a simple name: {type(node.test)}")
         return None
 
     def _extract_states(self, body: List[Any]) -> None:
@@ -105,6 +118,7 @@ class StateMachineLifter:
     def _handle_if(self, node: If, parent_conditions: list, prefix: list, remaining: list) -> None:
         boundary = self._eval_boundary(node.test)
         if boundary is None:
+            self.diagnostics.append(f"If condition not a simple '<': {node.test}")
             self._walk_ifs(node.body.body, parent_conditions, prefix)
             if node.else_body:
                 self._walk_ifs(node.else_body.body, parent_conditions, prefix)
@@ -181,19 +195,6 @@ class StateMachineLifter:
             if isinstance(node.right, UnaryOp) and node.right.op == '-' and isinstance(node.right.operand, Number):
                 return -int(node.right.operand.n)
         return None
-
-    def _expr_to_str(self, node) -> str:
-        if isinstance(node, BinaryOp):
-            return f"({self._expr_to_str(node.left)} {node.op} {self._expr_to_str(node.right)})"
-        if isinstance(node, Number):
-            return str(node.n)
-        if isinstance(node, Name):
-            return node.id
-        if isinstance(node, String):
-            return f'"{node.s}"'
-        if isinstance(node, UnaryOp):
-            return f"{node.op}{self._expr_to_str(node.operand)}"
-        return str(node)
 
     def _statements_to_lines(self, stmts: list) -> str:
         if not stmts:
