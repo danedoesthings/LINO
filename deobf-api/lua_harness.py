@@ -66,6 +66,8 @@ local _log_count = 0
 local _log_limit = """ + str(LOG_LIMIT) + r"""
 local _captured_buffers = {}
 local _buffer_count = 0
+local _state_count = 0
+local _state_limit = 3000
 
 function _log(msg)
     if _log_file and _log_count < _log_limit then
@@ -77,17 +79,46 @@ end
 
 function _save_buffer(data, tag)
     _buffer_count = _buffer_count + 1
-    _log("[BUFFER][" .. tag .. "][" .. _buffer_count .. "] len=" .. #data)
     if _buffer_count == 1 then
+        _log("[BUFFER][" .. tag .. "][" .. _buffer_count .. "] len=" .. #data .. " first=" .. data:sub(1, 200))
         local f = io.open(_outpath, "w")
         if f then f:write(data); f:close() end
     end
 end
 
+function _log_state(state)
+    _state_count = _state_count + 1
+    if _state_count <= _state_limit then
+        if _state_count <= 10 or _state_count % 100 == 0 then
+            _log("[STATE][" .. _state_count .. "] -> " .. state)
+        end
+    end
+end
+
+function _log_reg_write(tbl_name, key, value)
+    if _state_count > _state_limit then return end
+    local vtype = type(value)
+    local vstr
+    if vtype == "string" then
+        vstr = value:sub(1, 120)
+        if #value > 20 then _save_buffer(value, "reg_string") end
+    elseif vtype == "number" then
+        vstr = tostring(value)
+    elseif vtype == "function" then
+        vstr = "function"
+    elseif vtype == "table" then
+        vstr = "table"
+    elseif vtype == "nil" then
+        vstr = "nil"
+    else
+        vstr = vtype
+    end
+    _log("[REG][" .. tbl_name .. "][" .. tostring(key) .. "] = " .. vstr .. " (" .. vtype .. ")")
+end
+
 table.concat = function(t, sep, i, j)
     local r = ORIGINAL_CONCAT(t, sep, i, j)
     if type(r) == "string" and #r > 100 then
-        _log("[CONCAT] len=" .. #r .. " first=" .. r:sub(1, 150))
         _save_buffer(r, "concat")
     end
     return r
@@ -96,15 +127,12 @@ end
 string.char = function(...)
     local r = ORIGINAL_CHAR(...)
     local argc = select("#", ...)
-    if argc >= 4 and #r > 0 then
-        if #r > 50 then _save_buffer(r, "char") end
-    end
+    if argc >= 4 and #r > 50 then _save_buffer(r, "char") end
     return r
 end
 
 function loadstring(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _log("[LOADSTRING] len=" .. #chunk)
         _save_buffer(chunk, "loadstring")
     end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
@@ -113,7 +141,6 @@ end
 
 function load(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _log("[LOAD] len=" .. #chunk)
         _save_buffer(chunk, "load")
     end
     if ORIGINAL_LOAD then return ORIGINAL_LOAD(chunk, chunkname) end
@@ -322,41 +349,10 @@ if _hooked_sethook then
     _hooked_sethook(function(event)
         _instruction_count = _instruction_count + 1
         if _instruction_count > _vm_limit then
-            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions, " .. _buffer_count .. " buffers captured")
+            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions, " .. _buffer_count .. " buffers")
             error("VM LOOP LIMIT REACHED", 0)
         end
     end, "", 1000)
-end
-
-local _state_count = 0
-local _state_limit = 3000
-
-function _log_state(state, next_state, line)
-    _state_count = _state_count + 1
-    if _state_count <= _state_limit then
-        _log(string.format("[STATE][%d] %d -> %s", _state_count, state, tostring(next_state)))
-    end
-end
-
-function _log_reg_write(tbl_name, key, value)
-    if _state_count > _state_limit then return end
-    local vtype = type(value)
-    local vstr
-    if vtype == "string" then
-        vstr = value:sub(1, 120)
-        if #value > 20 then _save_buffer(value, "reg_string") end
-    elseif vtype == "number" then
-        vstr = tostring(value)
-    elseif vtype == "function" then
-        vstr = "function"
-    elseif vtype == "table" then
-        vstr = "table"
-    elseif vtype == "nil" then
-        vstr = "nil"
-    else
-        vstr = vtype
-    end
-    _log(string.format("[REG][%s][%s] = %s (%s)", tbl_name, tostring(key), vstr, vtype))
 end
 """
 
@@ -374,24 +370,25 @@ class LuaHarness:
         return None
 
     def _instrument_source(self, source: str) -> str:
-        """Inject logging calls directly into the VM source before execution."""
-        # Hook instrTbl writes: instrTbl[regA] = value  ->  instrTbl[regA] = _log_reg_write("instrTbl", regA, value)
+        """Inject _log_reg_write and _log_state calls into the VM source."""
+        # Hook instrTbl[key] = value  ->  instrTbl[key] = (_log_reg_write("instrTbl", key, value) or value)
         source = re.sub(
-            r'\b(instrTbl)\s*\[\s*([^\]]+)\s*\]\s*=\s*([^;]+?)(?=\n|;|$|instrTbl|vmStack)',
+            r'\b(instrTbl)\s*\[\s*(.+?)\s*\]\s*=\s*(.+?)(?=\n|;|$)',
             r'\1[ \2 ] = (_log_reg_write("\1", \2, \3) or \3)',
             source
         )
-        # Hook vmStack writes
+        # Hook vmStack[key] = value
         source = re.sub(
-            r'\b(vmStack)\s*\[\s*([^\]]+)\s*\]\s*=\s*([^;]+?)(?=\n|;|$|instrTbl|vmStack)',
+            r'\b(vmStack)\s*\[\s*(.+?)\s*\]\s*=\s*(.+?)(?=\n|;|$)',
             r'\1[ \2 ] = (_log_reg_write("\1", \2, \3) or \3)',
             source
         )
-        # Hook vmState transitions
+        # Hook vmState = <number> but only as a standalone assignment
         source = re.sub(
-            r'\b(vmState)\s*=\s*(-?\d+)',
-            r'(\2)\1 = _log_state(\1, \2) or \2',
-            source
+            r'^(\s*)(vmState)\s*=\s*(-?\d+)(\s*)$',
+            r'\1\2 = (_log_state(\3) or \3)\4',
+            source,
+            flags=re.MULTILINE
         )
         return source
 
