@@ -1,7 +1,6 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local luau = require("@lune/luau")
-local net = require("@lune/net")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "captured.lua"
@@ -112,10 +111,7 @@ local env = {
         log("[REQUEST] " .. (o.Url or "?"))
         return { StatusCode = 200, Body = "--REMOTE_PAYLOAD", Headers = {} }
     end,
-    http_request = function(o)
-        log("[HTTP_REQUEST] " .. (o.Url or "?"))
-        return { StatusCode = 200, Body = "--REMOTE_PAYLOAD", Headers = {} }
-    end,
+    http_request = request,
     readfile = function(f) log("[READFILE] " .. f); return "" end,
     writefile = function(f, c) log("[WRITEFILE] " .. f) end,
     appendfile = function(f, c) log("[APPENDFILE] " .. f) end,
@@ -142,32 +138,19 @@ local env = {
     setclipboard = function(s) log("[SETCLIPBOARD] " .. s:sub(1, 100)) end,
     toclipboard = function(s) log("[TOCLIPBOARD] " .. s:sub(1, 100)) end,
     crypt = {
-        encrypt = function(d) return d end,
-        decrypt = function(d) return d end,
-        hash = function(d) return "hash" end,
-        generatekey = function() return "key" end,
-        base64encode = function(d) return d end,
-        base64decode = function(d) return d end,
+        encrypt = function(d) return d end, decrypt = function(d) return d end,
+        hash = function(d) return "hash" end, generatekey = function() return "key" end,
+        base64encode = function(d) return d end, base64decode = function(d) return d end,
         base64 = { encode = function(d) return d end, decode = function(d) return d end },
         custom = { encrypt = function(d) return d end, decrypt = function(d) return d end },
     },
     syn = {
-        request = function(o)
-            log("[SYN.REQUEST] " .. (o.Url or "?"))
-            return { StatusCode = 200, Body = "--REMOTE_PAYLOAD", Headers = {} }
-        end,
-        crypt = {
-            encrypt = function(d) return d end,
-            decrypt = function(d) return d end,
-            hash = function(d) return "hash" end,
-            generatekey = function() return "key" end,
-            base64encode = function(d) return d end,
-            base64decode = function(d) return d end,
-            base64 = { encode = function(d) return d end, decode = function(d) return d end },
-            custom = { encrypt = function(d) return d end, decrypt = function(d) return d end },
+        request = request, crypt = {
+            encrypt = function(d) return d end, decrypt = function(d) return d end,
+            hash = function(d) return "hash" end, generatekey = function() return "key" end,
+            base64encode = function(d) return d end, base64decode = function(d) return d end,
         },
-        queue_on_teleport = function() end,
-        protect_gui = function() end,
+        queue_on_teleport = function() end, protect_gui = function() end,
     },
     fluxus = {},
     debug = {
@@ -193,19 +176,15 @@ local env = {
     string = string,
     table = table,
     bit32 = rawget(_G, "bit32") or {
-        bxor = function(a, b) return a ~ b end,
-        band = function(a, b) return a & b end,
-        bor = function(a, b) return a | b end,
-        lshift = function(v, n) return (v << n) & 0xFFFFFFFF end,
-        rshift = function(v, n) return v >> n end,
-        arshift = function(v, n) return v >> n end,
+        bxor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) ~= (b % 2) then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
+        band = function(a, b) local r, m = 0, 1; while a > 0 and b > 0 do if (a % 2) + (b % 2) == 2 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
+        bor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) + (b % 2) > 0 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
+        lshift = function(v, n) return math.floor(v * (2 ^ n)) % 4294967296 end,
+        rshift = function(v, n) return math.floor(v / (2 ^ n)) end,
+        arshift = function(v, n) return math.floor(v / (2 ^ n)) end,
     },
     bit = rawget(_G, "bit") or rawget(_G, "bit32"),
-    newproxy = newproxy or function(addmeta)
-        local p = {}
-        if addmeta then setmetatable(p, {}) end
-        return p
-    end,
+    newproxy = newproxy or function(addmeta) local p = {}; if addmeta then setmetatable(p, {}) end; return p end,
     unpack = unpack or table.unpack,
     getfenv = getfenv or function() return env end,
     setfenv = setfenv or function(f, e) return f end,
@@ -214,10 +193,13 @@ local env = {
         if id == "@lune/fs" then return fs end
         if id == "@lune/process" then return process end
         if id == "@lune/luau" then return luau end
-        return setmetatable({}, {
-            __index = function() return function() end end,
-            __call = function() return nil end
-        })
+        return setmetatable({}, { __index = function() return function() end end, __call = function() return nil end })
+    end,
+    pcall = function(fn, ...)
+        log("[PCALL]")
+        local results = { pcall(fn, ...) }
+        if not results[1] then log("[PCALL_ERROR] " .. tostring(results[2])) end
+        return unpack(results)
     end,
 }
 
@@ -234,43 +216,23 @@ end
 env.loadstring = wrapped_loadstring
 env.load = wrapped_loadstring
 
-env.pcall = function(fn, ...)
-    log("[PCALL]")
-    local results = { pcall(fn, ...) }
-    if not results[1] then
-        log("[PCALL_ERROR] " .. tostring(results[2]))
-    end
-    return unpack(results)
-end
-
 env._25ms = _25ms
 
-env.type = function(obj)
-    local mt = getmetatable(obj)
-    if mt and mt.__type then return mt.__type() end
-    return type(obj)
-end
-
 _G.print = function(...)
-    local args = {...}
     local parts = {}
-    for i = 1, select("#", ...) do
-        parts[i] = tostring(select(i, ...))
-    end
+    for i = 1, select("#", ...) do parts[i] = tostring(select(i, ...)) end
     log("[PRINT] " .. table.concat(parts, "\t"))
 end
 
 _G.warn = function(...)
-    local args = {...}
     local parts = {}
-    for i = 1, select("#", ...) do
-        parts[i] = tostring(select(i, ...))
-    end
+    for i = 1, select("#", ...) do parts[i] = tostring(select(i, ...)) end
     log("[WARN] " .. table.concat(parts, "\t"))
 end
 
-local function _real_concat(t, sep, i, j)
-    local r = table.concat(t, sep, i, j)
+local _real_concat = table.concat
+table.concat = function(t, sep, i, j)
+    local r = _real_concat(t, sep, i, j)
     if type(r) == "string" and #r > 10 then
         log("[TABLE.CONCAT] len=" .. #r .. " first=" .. r:sub(1, 150))
         _25ms(r)
@@ -278,8 +240,9 @@ local function _real_concat(t, sep, i, j)
     return r
 end
 
-local function _real_char(...)
-    local r = string.char(...)
+local _real_char = string.char
+string.char = function(...)
+    local r = _real_char(...)
     if select("#", ...) >= 3 and #r > 0 then
         log("[STRING.CHAR] args=" .. select("#", ...) .. " result=" .. r:sub(1, 100))
         _25ms(r)
@@ -287,34 +250,13 @@ local function _real_char(...)
     return r
 end
 
-local _real_gsub = string.gsub
-string.gsub = function(s, p, r, n)
-    local res = _real_gsub(s, p, r, n)
-    if type(res) == "string" and #res > 50 then
-        log("[STRING.GSUB] len=" .. #res .. " first=" .. res:sub(1, 100))
-        _25ms(res)
-    end
-    return res
-end
-
-local _real_sub = string.sub
-string.sub = function(s, i, j)
-    local res = _real_sub(s, i, j)
-    if type(res) == "string" and #res > 50 then
-        log("[STRING.SUB] len=" .. #res .. " first=" .. res:sub(1, 100))
-        _25ms(res)
-    end
-    return res
-end
-
-string.char = _real_char
-table.concat = _real_concat
-
 log("Starting execution of " .. targetFile)
 
 local chunk, err = luau.load(input)
 if err then
     log("[COMPILE_ERROR] " .. err)
+    fs.writeFile(outFile, "-- [ERROR] Compile error: " .. err)
+    fs.writeFile(logFile, table.concat(_log, "\n"))
     error("Compile error: " .. err)
 end
 
@@ -331,5 +273,3 @@ log("Strings captured: " .. c)
 local output = table.concat(r, "\n")
 fs.writeFile(outFile, output)
 fs.writeFile(logFile, table.concat(_log, "\n"))
-
-print("Done. " .. c .. " strings captured.")
