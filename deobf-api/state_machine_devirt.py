@@ -1,9 +1,9 @@
 import re
 import luaparser.ast as lua_ast
 from luaparser.astnodes import (
-    While, If, ElseIf, Else, Assignment, Call, Function,
+    While, If, Assignment, Function,
     Block, LocalAssign, Index, Name, Number, String,
-    BinaryOp, UnaryOp, Table, Field, Vararg, TrueExpr, FalseExpr, Nil
+    BinaryOp, UnaryOp, Table, Field
 )
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -69,10 +69,18 @@ class StateMachineLifter:
             for stmt in block:
                 if isinstance(stmt, While):
                     return stmt
+                if hasattr(stmt, 'body'):
+                    inner = self._find_in_block(stmt.body)
+                    if inner:
+                        return inner
         elif isinstance(block, Block):
             for stmt in block.body:
                 if isinstance(stmt, While):
                     return stmt
+                if hasattr(stmt, 'body'):
+                    inner = self._find_in_block(stmt.body)
+                    if inner:
+                        return inner
         return None
 
     def _get_while_variable(self, node: While) -> Optional[str]:
@@ -81,9 +89,9 @@ class StateMachineLifter:
         return None
 
     def _extract_states(self, body: List[Any]) -> None:
-        self._walk_ifs(body, set(), [])
+        self._walk_ifs(body, [], [])
 
-    def _walk_ifs(self, body: List[Any], parent_conditions: set, prefix: list) -> None:
+    def _walk_ifs(self, body: List[Any], parent_conditions: list, prefix: list) -> None:
         statements = []
         for i, stmt in enumerate(body):
             if isinstance(stmt, If):
@@ -94,7 +102,7 @@ class StateMachineLifter:
                 statements.append(stmt)
         self._process_leaf(statements, parent_conditions)
 
-    def _handle_if(self, node: If, parent_conditions: set, prefix: list, remaining: list) -> None:
+    def _handle_if(self, node: If, parent_conditions: list, prefix: list, remaining: list) -> None:
         boundary = self._eval_boundary(node.test)
         if boundary is None:
             self._walk_ifs(node.body.body, parent_conditions, prefix)
@@ -102,21 +110,17 @@ class StateMachineLifter:
                 self._walk_ifs(node.else_body.body, parent_conditions, prefix)
             return
 
-        true_cond = parent_conditions | {f"{self.vm_state_var} < {boundary}"}
-        false_cond = parent_conditions | {f"{self.vm_state_var} >= {boundary}"}
+        true_cond = parent_conditions + [f"{self.vm_state_var} < {boundary}"]
+        false_cond = parent_conditions + [f"{self.vm_state_var} >= {boundary}"]
 
         self._walk_ifs(node.body.body, true_cond, prefix)
-
-        if node.elseif:
-            for elseif in node.elseif:
-                self._walk_ifs(elseif.body.body, false_cond, prefix)
 
         if node.else_body:
             self._walk_ifs(node.else_body.body, false_cond, prefix)
         else:
             self._walk_ifs(remaining, false_cond, prefix)
 
-    def _process_leaf(self, statements: list, conditions: set) -> None:
+    def _process_leaf(self, statements: list, conditions: list) -> None:
         last_assign = None
         state = None
         for stmt in reversed(statements):
@@ -194,7 +198,7 @@ class StateMachineLifter:
         lines = []
         lines.append("local state_handlers = {}")
         lines.append("")
-        for state, info in self.handlers.items():
+        for state, info in sorted(self.handlers.items()):
             lines.append(f"state_handlers[{state}] = function()")
             code_lines = info['code'].split('\n')
             if code_lines and code_lines[0] == '':
@@ -224,7 +228,7 @@ class StateMachineLifter:
         m = re.search(rf'{self.vm_state_var}\s*=\s*(-?\d+)', code)
         if m:
             return m.group(1)
-        cond_str = " or ".join(sorted(info.get('conditions', set())))
+        cond_str = " | ".join(info.get('conditions', []))
         if cond_str:
             return f"nil -- conditions: {cond_str}"
         return "nil"
