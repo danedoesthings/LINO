@@ -46,7 +46,7 @@ def safe_eval_int(expr: str) -> Optional[int]:
     except ValueError:
         return None
 
-_PAREN_EXPR = re.compile(r'\(([^()a-zA-Z_\'"]+)\)')
+_PAREN_EXPR = re.compile(r'(?<![a-zA-Z0-9_])\(([^()a-zA-Z_\'"]+)\)')
 _BINOP_EXPR = re.compile(r'\b(-?\d+)\s*([+\-*/%])\s*(-?\d+)\b')
 
 def _fold_once(code: str) -> str:
