@@ -1,11 +1,11 @@
 import re
 import luaparser.ast as lua_ast
 from luaparser.astnodes import (
-    While, If, Assignment, Function,
+    While, If, Assign, Function,
     Block, LocalAssign, Index, Name, Number, String,
     BinaryOp, UnaryOp, Table, Field
 )
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Dict, Any
 
 
 class StateMachineLifter:
@@ -124,7 +124,7 @@ class StateMachineLifter:
         last_assign = None
         state = None
         for stmt in reversed(statements):
-            if isinstance(stmt, Assignment) and self._is_state_assign(stmt):
+            if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
                 state = self._get_assigned_state(stmt)
                 last_assign = stmt
                 break
@@ -142,18 +142,32 @@ class StateMachineLifter:
         if self.entry_state is None:
             self.entry_state = state
 
-    def _is_state_assign(self, node: Assignment) -> bool:
-        if len(node.targets) != 1:
-            return False
-        target = node.targets[0]
-        if isinstance(target, Name) and target.id == self.vm_state_var:
-            return True
+    def _is_state_assign(self, node) -> bool:
+        if isinstance(node, Assign):
+            if len(node.targets) != 1:
+                return False
+            target = node.targets[0]
+            if isinstance(target, Name) and target.id == self.vm_state_var:
+                return True
+        elif isinstance(node, LocalAssign):
+            if len(node.targets) != 1:
+                return False
+            target = node.targets[0]
+            if isinstance(target, Name) and target.id == self.vm_state_var:
+                return True
         return False
 
-    def _get_assigned_state(self, node: Assignment) -> Optional[int]:
-        if len(node.values) != 1:
+    def _get_assigned_state(self, node) -> Optional[int]:
+        if isinstance(node, Assign):
+            if len(node.values) != 1:
+                return None
+            val = node.values[0]
+        elif isinstance(node, LocalAssign):
+            if len(node.values) != 1:
+                return None
+            val = node.values[0]
+        else:
             return None
-        val = node.values[0]
         if isinstance(val, Number):
             return int(val.n)
         if isinstance(val, UnaryOp) and val.op == '-' and isinstance(val.operand, Number):
