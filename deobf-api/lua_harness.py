@@ -7,6 +7,7 @@ import time
 
 LOG_LIMIT = 8000
 VM_INSTRUCTION_LIMIT = 2000000
+STRING_CAPTURE_MIN = 3
 
 ENV_BOOTSTRAP = r"""
 local ORIGINAL_LOADSTRING = rawget(_G, "loadstring")
@@ -14,9 +15,11 @@ local ORIGINAL_LOAD = rawget(_G, "load")
 local ORIGINAL_PCALL = pcall
 local ORIGINAL_CONCAT = table.concat
 local ORIGINAL_CHAR = string.char
-local ORIGINAL_UNPACK = unpack or table.unpack
+local ORIGINAL_TOSTRING = tostring
+local ORIGINAL_TONUMBER = tonumber
 local ORIGINAL_SETMETATABLE = setmetatable
 local ORIGINAL_GETMETATABLE = getmetatable
+local ORIGINAL_UNPACK = unpack or table.unpack
 
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
@@ -39,16 +42,11 @@ if not newproxy then
         _userdata_counter = _userdata_counter + 1
         local ud = {}
         local name = "userdata_" .. _userdata_counter
-        setmetatable(ud, {
-            __type = function() return "userdata" end,
-            __tostring = function() return name end,
-        })
+        setmetatable(ud, { __type = function() return "userdata" end, __tostring = function() return name end })
         if addmeta then
             setmetatable(ud, {
-                __index = function() return nil end,
-                __newindex = function() end,
-                __type = function() return "userdata" end,
-                __tostring = function() return name end,
+                __index = function() return nil end, __newindex = function() end,
+                __type = function() return "userdata" end, __tostring = function() return name end,
                 __metatable = "The metatable is locked",
             })
         end
@@ -65,6 +63,9 @@ if not unpack then unpack = table.unpack or function(t, i, j) j = j or #t; i = i
 local _log_file = nil
 local _log_count = 0
 local _log_limit = """ + str(LOG_LIMIT) + r"""
+local _captured_strings = {}
+local _captured_count = 0
+local _captured_limit = 500
 local _best_payload = ""
 local _best_score = 0
 
@@ -77,40 +78,49 @@ local function _log(msg)
 end
 
 local function _score_source(src)
-    if type(src) ~= "string" then return 0 end
+    if type(src) ~= "string" or #src < 10 then return 0 end
+    if src:sub(1, 4) == "\27Lua" then return -1000 end
+    if src:find("^[%w_]+$") then return -100 end
     local s = 0
-    if src:find("^[%w_]+$") then s = s - 100 end
     if src:find("function") then s = s + 10 end
     if src:find("local ") then s = s + 5 end
     if src:find("return") then s = s + 8 end
-    if src:find("for ") then s = s + 8 end
-    if src:find("while ") then s = s + 8 end
-    if src:find("if ") then s = s + 8 end
+    if src:find("for ") or src:find("while ") or src:find("if ") then s = s + 8 end
     if src:find("\nthen") or src:find(" then") then s = s + 5 end
     if src:find("\nend") or src:find(" end") then s = s + 5 end
     if src:find("game[%.:]") or src:find("game:") then s = s + 10 end
-    if src:find("print") then s = s + 1 end
     if #src > 1000 then s = s + 20 end
     if #src > 5000 then s = s + 30 end
     return s
 end
 
-local function _save_payload(src, tag)
-    local sc = _score_source(src)
-    _log("[PAYLOAD][" .. tag .. "] len=" .. #src .. " score=" .. sc)
+local function _capture_string(s, tag)
+    if type(s) ~= "string" or #s < STRING_CAPTURE_MIN then return end
+    _captured_count = _captured_count + 1
+    if _captured_count > _captured_limit then return end
+    _captured_strings[_captured_count] = {str = s, tag = tag or "unknown"}
+    _log("[CAPTURE][" .. tag .. "][" .. _captured_count .. "] len=" .. #s .. " first=" .. s:sub(1, 150))
+    local sc = _score_source(s)
     if sc > _best_score then
         _best_score = sc
-        _best_payload = src
+        _best_payload = s
         _log("NEW BEST PAYLOAD score=" .. sc)
         local f = io.open(_outpath, "w")
-        if f then f:write(src); f:close() end
+        if f then f:write(s); f:close() end
     end
+end
+
+local _25ms = function(var)
+    if type(var) == "string" and #var >= STRING_CAPTURE_MIN then
+        _capture_string(var, "_25ms")
+    end
+    return var
 end
 
 function loadstring(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _log("===== LOADSTRING CAPTURED len=" .. #chunk .. " =====")
-        _save_payload(chunk, "loadstring")
+        _log("===== LOADSTRING len=" .. #chunk .. " =====")
+        _capture_string(chunk, "loadstring")
     end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
     return ORIGINAL_LOAD(chunk, chunkname)
@@ -118,8 +128,8 @@ end
 
 function load(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _log("===== LOAD CAPTURED len=" .. #chunk .. " =====")
-        _save_payload(chunk, "load")
+        _log("===== LOAD len=" .. #chunk .. " =====")
+        _capture_string(chunk, "load")
     end
     if ORIGINAL_LOAD then return ORIGINAL_LOAD(chunk, chunkname) end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
@@ -127,27 +137,43 @@ end
 
 table.concat = function(t, sep, i, j)
     local r = ORIGINAL_CONCAT(t, sep, i, j)
-    if type(r) == "string" and #r > 100 then
-        _log("[CONCAT] len=" .. #r .. " first=" .. r:sub(1, 150))
-        _save_payload(r, "concat")
+    if type(r) == "string" and #r > STRING_CAPTURE_MIN then
+        _capture_string(r, "table.concat")
     end
     return r
 end
 
 string.char = function(...)
     local r = ORIGINAL_CHAR(...)
-    if select("#", ...) >= 4 and #r > 50 then
-        _log("[CHAR] len=" .. #r)
-        _save_payload(r, "char")
+    if select("#", ...) >= 3 and #r > STRING_CAPTURE_MIN then
+        _capture_string(r, "string.char")
     end
     return r
+end
+
+tostring = function(v)
+    local r = ORIGINAL_TOSTRING(v)
+    if type(r) == "string" and #r > 8 then
+        _capture_string(r, "tostring")
+    end
+    return r
+end
+
+tonumber = function(e, b)
+    local r = ORIGINAL_TONUMBER(e, b)
+    _log("[tonumber] " .. tostring(e):sub(1, 40) .. " -> " .. tostring(r))
+    return r
+end
+
+pcall = function(fn, ...)
+    _log("[pcall] " .. tostring(fn):sub(1, 80))
+    return ORIGINAL_PCALL(fn, ...)
 end
 
 getfenv = getfenv or function() return _G end
 setfenv = setfenv or function(f, e) return f end
 
 local Roblox = {}
-
 function Roblox.make_proxy(name)
     local proxy = newproxy(true)
     local mt = getmetatable(proxy)
@@ -294,12 +320,9 @@ mousemoveabs = function() end
 mousemoverel = function() end
 iswindowactive = function() return true end
 crypt = {
-    encrypt = function(d) return d end,
-    decrypt = function(d) return d end,
-    hash = function(d) return "hash" end,
-    generatekey = function() return "key" end,
-    base64encode = function(d) return d end,
-    base64decode = function(d) return d end,
+    encrypt = function(d) return d end, decrypt = function(d) return d end,
+    hash = function(d) return "hash" end, generatekey = function() return "key" end,
+    base64encode = function(d) return d end, base64decode = function(d) return d end,
     base64 = { encode = function(d) return d end, decode = function(d) return d end },
     custom = { encrypt = function(d) return d end, decrypt = function(d) return d end }
 }
@@ -342,7 +365,7 @@ if _hooked_sethook then
     _hooked_sethook(function(event)
         _instruction_count = _instruction_count + 1
         if _instruction_count > _vm_limit then
-            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions")
+            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions, " .. _captured_count .. " strings captured")
             error("VM LOOP LIMIT REACHED", 0)
         end
     end, "", 1000)
@@ -385,8 +408,10 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
+            "_log(\"Strings captured: \" .. _captured_count)\n"
+            "_log(\"Best payload score: \" .. _best_score)\n"
             "if _best_payload ~= \"\" then\n"
-            " _log(\"Best payload saved, score=\" .. _best_score)\n"
+            " _log(\"Best payload saved to captured.lua\")\n"
             "else\n"
             " local f = io.open(_outpath, \"w\")\n"
             " if f then\n"
@@ -452,8 +477,10 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
+            "_log(\"Strings captured: \" .. _captured_count)\n"
+            "_log(\"Best payload score: \" .. _best_score)\n"
             "if _best_payload ~= \"\" then\n"
-            " _log(\"Best payload saved, score=\" .. _best_score)\n"
+            " _log(\"Best payload saved to captured.lua\")\n"
             "else\n"
             " local f = io.open(_outpath, \"w\")\n"
             " if f then\n"
