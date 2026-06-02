@@ -77,44 +77,34 @@ class Unveiler:
             self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
+        self._log('devirtualise', True, 'attempting state-machine lifting via AST')
+        sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
+        lifted = sm_lifter.lift()
+        if lifted and self._is_valid_lua(lifted):
+            self._log('devirtualise_success', True, 'state machine lifted to dispatch table')
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            return lifted, 'state_machine_lifted', 'State machine lifted to dispatch table'
+
         self._log('devirtualise', True, 'attempting instruction-level VM lifting')
         vm_lifter = WeAreDevsVMLifter(decoder.strings)
         lifted = vm_lifter.lift(source)
-        if lifted:
-            if not self._is_valid_lua(lifted):
-                self._log('devirtualise', False, 'VM lifter produced invalid Lua, falling back')
-            else:
-                renamer = VarRenamer()
-                lifted = renamer.rename(lifted)
-                lifted = beautify(lifted)
-                if self._is_valid_lua(lifted):
-                    self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
-                    return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
-
-        self._log('devirtualise', True, 'attempting state machine unflattening')
-        devirt = Devirtualiser(decoder, annotate=False)
-        processed = devirt.process(source)
-        sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
-        lifted_result = sm_lifter.lift()
-        if lifted_result:
-            if not self._is_valid_lua(lifted_result):
-                self._log('devirtualise', False, 'state machine lifter produced invalid Lua')
-            else:
-                renamer = VarRenamer()
-                final_code = renamer.rename(lifted_result)
-                final_code = beautify(final_code)
-                if self._is_valid_lua(final_code):
-                    self._log('devirtualise_success', True, 'state machine unflattened')
-                    return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
+        if lifted and self._is_valid_lua(lifted):
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+            return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('devirtualise', True, 'falling back to static devirtualisation')
-        devirt_annotated = Devirtualiser(decoder, annotate=True)
-        processed_annotated = devirt_annotated.process(source)
-        if processed_annotated:
+        devirt = Devirtualiser(decoder, annotate=True)
+        processed = devirt.process(source)
+        if processed:
             renamer = VarRenamer()
-            result = renamer.rename(processed_annotated)
+            result = renamer.rename(processed)
             result = beautify(result)
-            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt_annotated.vm_detected else '-- Deobfuscated via static analysis\n\n'
+            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete'
 
         self._log('devirtualise', False, 'static analysis produced no meaningful output')
@@ -150,8 +140,6 @@ class DeobfEngine:
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method not in ('wearedevs_decode',):
-            pass
         if logger:
             for entry in self.unveiler.trace:
                 logger.add_trace(entry['stage'], entry['success'], entry['message'])
