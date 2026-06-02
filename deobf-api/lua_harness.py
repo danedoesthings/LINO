@@ -1,6 +1,8 @@
 import os
 import shutil
 import tempfile
+import subprocess
+import signal
 from typing import Optional, Dict
 
 
@@ -30,15 +32,29 @@ class LuaHarness:
         
         captured = []
         def _25ms(var):
-            if lua.type(var) == 'string':
-                s = str(var)
-                if len(s) > 3:
-                    captured.append(s)
+            try:
+                t = lua.type(var)
+                if t == 'string':
+                    s = str(var)
+                    if len(s) > 2:
+                        captured.append(s)
+            except:
+                pass
             return var
         
-        lua.globals()._25ms = _25ms
+        lua.globals().py = lua.globals()
+        lua.globals()._capture = _25ms
         
         lua.execute('''
+        local _orig_type = type
+        type = function(obj)
+            local mt = getmetatable(obj)
+            if mt and mt._is_proxy then
+                return "userdata"
+            end
+            return _orig_type(obj)
+        end
+        
         local bit32 = {
             bxor = function(a,b) local r,m=0,1; while a>0 or b>0 do if (a%2)~=(b%2) then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end,
             band = function(a,b) local r,m=0,1; while a>0 and b>0 do if (a%2)+(b%2)==2 then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end,
@@ -51,13 +67,14 @@ class LuaHarness:
         _G.bit = bit32
         
         local _spy_mt = {
+            _is_proxy = true,
             __index = function(t, k)
                 local new_t = {}
                 setmetatable(new_t, _spy_mt)
                 return new_t
             end,
             __newindex = function(t, k, v)
-                py._25ms(v)
+                py._capture(v)
             end,
             __call = function(t, ...)
                 local new_t = {}
@@ -66,6 +83,17 @@ class LuaHarness:
             end,
             __tostring = function() return "proxy" end,
             __len = function() return 2853638 end,
+            __gc = function() end,
+            __add = function() return 0 end,
+            __sub = function() return 0 end,
+            __mul = function() return 0 end,
+            __div = function() return 0 end,
+            __mod = function() return 0 end,
+            __unm = function() return 0 end,
+            __concat = function(a,b) return tostring(a)..tostring(b) end,
+            __lt = function() return false end,
+            __le = function() return false end,
+            __eq = function() return false end,
         }
         
         function _spy(name)
@@ -78,7 +106,7 @@ class LuaHarness:
         table.concat = function(t, sep, i, j)
             local r = orig_concat(t, sep, i, j)
             if type(r) == "string" and #r > 3 then
-                py._25ms(r)
+                py._capture(r)
             end
             return r
         end
@@ -87,15 +115,24 @@ class LuaHarness:
         string.char = function(...)
             local r = orig_char(...)
             if select("#", ...) >= 3 then
-                py._25ms(r)
+                py._capture(r)
             end
             return r
+        end
+        
+        local orig_gsub = string.gsub
+        string.gsub = function(s, p, r, n)
+            local res = orig_gsub(s, p, r, n)
+            if type(res) == "string" and #res > 10 then
+                py._capture(res)
+            end
+            return res
         end
         
         local orig_loadstring = loadstring or load
         loadstring = function(src, name)
             if type(src) == "string" and #src > 0 then
-                py._25ms(src)
+                py._capture(src)
             end
             return orig_loadstring(src, name)
         end
@@ -117,54 +154,103 @@ class LuaHarness:
         UDim2 = _spy("UDim2")
         Instance = _spy("Instance")
         Enum = _spy("Enum")
+        Drawing = _spy("Drawing")
+        Ray = _spy("Ray")
+        BrickColor = _spy("BrickColor")
+        Region3 = _spy("Region3")
+        TweenInfo = _spy("TweenInfo")
         getgenv = function() return _G end
         getrenv = function() return _G end
         checkcaller = function() return true end
         identifyexecutor = function() return "Synapse X", "2.0.0" end
         getrawmetatable = function(t) return getmetatable(t) end
+        gethui = function() return _spy("HUI") end
+        getnilinstances = function() return {} end
+        getinstances = function() return {} end
+        getgc = function() return {} end
+        getreg = function() return {} end
+        getloadedmodules = function() return {} end
+        getconnections = function() return {} end
+        firesignal = function() end
+        setreadonly = function() end
+        isreadonly = function() return false end
         hookfunction = function(f,h) return f end
+        hookmetamethod = function(o,m,f) return function() end end
         newcclosure = function(f) return f end
         islclosure = function() return true end
+        iscclosure = function() return false end
+        getsynasset = function() return "content" end
         request = function(o) return { StatusCode = 200, Body = "--PAYLOAD", Headers = {} } end
         http_request = request
         readfile = function() return "" end
         writefile = function() end
+        appendfile = function() end
         isfile = function() return false end
-        crypt = { encrypt = function(d) return d end, decrypt = function(d) return d end, base64encode = function(d) return d end, base64decode = function(d) return d end }
-        syn = { request = request, crypt = crypt, queue_on_teleport = function() end }
+        isfolder = function() return false end
+        makefolder = function() end
+        delfolder = function() end
+        delfile = function() end
+        listfiles = function() return {} end
+        rconsoleprint = function() end
+        rconsoleinfo = function() end
+        rconsolewarn = function() end
+        rconsoleerr = function() end
+        rconsoleclear = function() end
+        rconsolename = function() end
+        setclipboard = function(s) end
+        toclipboard = function(s) end
+        crypt = { encrypt = function(d) return d end, decrypt = function(d) return d end, hash = function(d) return "hash" end, generatekey = function() return "key" end, base64encode = function(d) return d end, base64decode = function(d) return d end, base64 = { encode = function(d) return d end, decode = function(d) return d end }, custom = { encrypt = function(d) return d end, decrypt = function(d) return d end } }
+        syn = { request = request, crypt = crypt, queue_on_teleport = function() end, protect_gui = function() end }
+        fluxus = syn
         debug = {
             getinfo = function() return {source="mock", short_src="mock", func=function() end} end,
             getconstants = function() return {} end,
+            getconstant = function() return nil end,
             getupvalues = function() return {} end,
+            getupvalue = function() return nil end,
             getprotos = function() return {} end,
+            getproto = function() return nil end,
+            getstack = function() return {} end,
+            setstack = function() end,
+            setconstant = function() end,
+            setupvalue = function() end,
             getregistry = function() return {} end,
+            getmetatable = function(t) return getmetatable(t) end,
+            setmetatable = function(t,m) return setmetatable(t,m) end,
+            profilebegin = function() end,
+            profileend = function() end,
+            traceback = function() return "mock" end,
         }
-        require = function() return _spy("module") end
+        require = function(id) return _spy("module") end
         newproxy = function(addmeta)
             local t = {}
-            if addmeta then setmetatable(t, {__index=function() return nil end, __newindex=function() end, __metatable="locked"}) end
+            local mt = { _is_proxy = true, __index = function() return nil end, __newindex = function() end, __metatable = "The metatable is locked" }
+            if addmeta then setmetatable(t, mt) end
             return t
         end
         setfenv = setfenv or function(f,e) return f end
         getfenv = getfenv or function() return _G end
         unpack = unpack or table.unpack
+        math.clamp = math.clamp or function(x,mn,mx) return math.max(mn, math.min(mx, x)) end
+        os.execute = nil
+        os.exit = nil
+        os.remove = nil
+        os.rename = nil
+        os.getenv = nil
+        package = nil
+        script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
         ''')
         
         try:
             lua.execute(source)
-        except Exception as e:
-            if captured:
-                return "\n".join(captured)
-            return None
+        except Exception:
+            pass
         
         if captured:
             return "\n".join(captured)
         return None
 
     def _run_subprocess_fallback(self, source: str, timeout: int = 30) -> Optional[str]:
-        import subprocess
-        import signal
-        
         lua_bin = None
         for candidate in ('lua5.1', 'lua5.2', 'lua', 'lua5.4', 'lua5.3'):
             if shutil.which(candidate):
