@@ -79,6 +79,18 @@ class Unveiler:
             self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
+        self._log('devirtualise', True, 'dumping instruction table from decoded strings')
+        try:
+            dumper = InstructionTableDumper(source, decoder.strings)
+            dumped = dumper.dump()
+            if dumped and looks_like_real_code(dumped):
+                self._log('devirtualise_success', True, 'instruction table dumped')
+                return dumped, 'instr_table_dump', 'Instruction table and all decoded strings dumped'
+            elif dumped:
+                self._log('devirtualise', False, 'instruction table dump is comment-only, continuing pipeline')
+        except Exception as e:
+            self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
+
         self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
         try:
             vm_devirt = VMDevirtualizer(source, decoder, wrapper_name="GetStr")
