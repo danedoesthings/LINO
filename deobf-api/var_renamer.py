@@ -18,6 +18,7 @@ def _is_obfuscated(name: str) -> bool:
 class VarRenamer:
     def __init__(self) -> None:
         self._counter = 0
+        self._renamed: set[str] = set()
 
     def _fresh_reg(self) -> str:
         self._counter += 1
@@ -47,26 +48,29 @@ class VarRenamer:
 
     def _apply_register_names(self, code: str) -> str:
         seen: dict[str, str] = {}
-
         def _repl(m: re.Match) -> str:
             name = m.group(0)
+            if name in PROTECTED_NAMES:
+                return name
+            if name in LUA_KEYWORDS:
+                return name
             if not _is_obfuscated(name):
                 return name
             if name not in seen:
                 seen[name] = self._fresh_reg()
             return seen[name]
-
         result = _rename_outside_strings(code, _IDENT, _repl)
         return result
 
     def rename(self, code: str) -> str:
         self._counter = 0
+        self._renamed = set()
         code = self._apply_semantic(code)
         code = self._apply_vm_letters(code)
         code = self._apply_register_names(code)
         return code
 
-_STR_LIT = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|--[^\n]*')
+_STR_LIT = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|--[^\n]*|--\[\[.*?\]\]')
 
 def _rename_outside_strings(code: str, pattern: re.Pattern, repl_fn) -> str:
     parts: list[str] = []
