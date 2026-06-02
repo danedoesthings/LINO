@@ -83,9 +83,11 @@ class Unveiler:
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
             dumped = dumper.dump()
-            if dumped:
+            if dumped and looks_like_real_code(dumped):
                 self._log('devirtualise_success', True, 'instruction table dumped')
                 return dumped, 'instr_table_dump', 'Instruction table and all decoded strings dumped'
+            elif dumped:
+                self._log('devirtualise', False, 'instruction table dump is comment-only, continuing pipeline')
         except Exception as e:
             self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
 
