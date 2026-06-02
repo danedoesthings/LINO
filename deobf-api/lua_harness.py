@@ -27,23 +27,22 @@ class LuaHarness:
     def _run_lupa(self, source: str, timeout: int = 30) -> Optional[str]:
         import lupa
         from lupa import LuaRuntime
-        
+
         lua = LuaRuntime(unpack_returned_tuples=True)
-        
         captured = []
-        
+
         def _capture_string(s):
             try:
                 if len(s) > 2:
                     captured.append(s)
             except:
                 pass
-        
+
         lua.globals()._py_capture = _capture_string
-        
+
         lua.execute(r'''
         local _orig_type = type
-        
+
         function _spy_make(name)
             local t = {}
             local mt = {
@@ -78,7 +77,7 @@ class LuaHarness:
             setmetatable(t, mt)
             return t
         end
-        
+
         type = function(obj)
             local mt = getmetatable(obj)
             if mt and mt._is_proxy then
@@ -86,7 +85,7 @@ class LuaHarness:
             end
             return _orig_type(obj)
         end
-        
+
         local bit32 = {
             bxor = function(a,b) local r,m=0,1; while a>0 or b>0 do if (a%2)~=(b%2) then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end,
             band = function(a,b) local r,m=0,1; while a>0 and b>0 do if (a%2)+(b%2)==2 then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end,
@@ -97,38 +96,38 @@ class LuaHarness:
         }
         _G.bit32 = bit32
         _G.bit = bit32
-        
+
         local _orig_concat = table.concat
         table.concat = function(t, sep, i, j)
             local r = _orig_concat(t, sep, i, j)
             if type(r) == "string" and #r > 3 then _py_capture(r) end
             return r
         end
-        
+
         local _orig_char = string.char
         string.char = function(...)
             local r = _orig_char(...)
             if select("#", ...) >= 3 then _py_capture(r) end
             return r
         end
-        
+
         local _orig_gsub = string.gsub
         string.gsub = function(s, p, r, n)
             local res = _orig_gsub(s, p, r, n)
             if type(res) == "string" and #res > 10 then _py_capture(res) end
             return res
         end
-        
+
         local _orig_sub = string.sub
         string.sub = function(s, i, j)
             local res = _orig_sub(s, i, j)
             if type(res) == "string" and #res > 20 then _py_capture(res) end
             return res
         end
-        
+
         local _orig_loadstring = loadstring or load
         local _orig_load = load or loadstring
-        
+
         loadstring = function(src, name)
             if type(src) == "string" and #src > 0 then
                 _py_capture(src)
@@ -137,7 +136,7 @@ class LuaHarness:
             end
             return _orig_loadstring(src, name)
         end
-        
+
         load = function(src, name)
             if type(src) == "string" and #src > 0 then
                 _py_capture(src)
@@ -146,7 +145,7 @@ class LuaHarness:
             end
             return _orig_load(src, name)
         end
-        
+
         game = _spy_make("game")
         workspace = _spy_make("workspace")
         script = _spy_make("script")
@@ -271,14 +270,14 @@ class LuaHarness:
         package = nil
         script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
         ''')
-        
+
         try:
             chunk = lua.eval(source)
             if chunk is not None:
                 pass
         except Exception:
             pass
-        
+
         if captured:
             return "\n".join(captured)
         return None
@@ -289,15 +288,15 @@ class LuaHarness:
             if shutil.which(candidate):
                 lua_bin = candidate
                 break
-        
+
         if not lua_bin:
             return None
-        
+
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
         output_path_fixed = output_path.replace('\\', '/')
-        
+
         harness_code = (
             'local _r = {}; local _c = 0;\n'
             'local function _25ms(var)\n'
@@ -313,11 +312,11 @@ class LuaHarness:
             '  if f then f:write(table.concat(_r, "\\n")); f:close() end\n'
             'end\n'
         )
-        
+
         try:
             with open(harness_path, "w", encoding="utf-8") as f:
                 f.write(harness_code)
-            
+
             proc = subprocess.Popen(
                 [lua_bin, harness_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -333,7 +332,7 @@ class LuaHarness:
                         proc.kill()
                 except Exception:
                     pass
-            
+
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
