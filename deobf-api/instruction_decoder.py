@@ -55,7 +55,6 @@ class WeAreDevsVMLifter:
             body = m.group(2).strip()
             opcode_name = self._classify_opcode(body)
             self.handlers[idx] = {'body': body, 'opcode': opcode_name}
-
         if not self.handlers:
             dispatch_match = re.search(r'local\s+\w+\s*=\s*\{([^}]+)\}', source)
             if dispatch_match:
@@ -129,14 +128,12 @@ class WeAreDevsVMLifter:
         inst_data = [int(n.strip()) for n in inst_match.group(1).split(',') if n.strip().lstrip('-').isdigit()]
         if not inst_data:
             return
-
         handler_keys = set(self.handlers.keys())
         pc = 0
         while pc < len(inst_data):
             val = inst_data[pc]
             handler_info = self.handlers.get(val, {'opcode': f'OP_{val}', 'body': ''})
             opcode = handler_info['opcode'] if isinstance(handler_info, dict) else 'UNKNOWN'
-
             operands = []
             temp_pc = pc + 1
             while temp_pc < len(inst_data) and len(operands) < 4:
@@ -145,7 +142,6 @@ class WeAreDevsVMLifter:
                     break
                 operands.append(next_val)
                 temp_pc += 1
-
             instr = Instruction(pc=pc, opcode=opcode, operands=operands, handler_body=handler_info.get('body', '') if isinstance(handler_info, dict) else '')
             self.instructions.append(instr)
             pc += 1 + len(operands)
@@ -157,12 +153,10 @@ class WeAreDevsVMLifter:
                 target = instr.operands[0]
                 if isinstance(target, int):
                     jump_targets.add(target)
-
         block_id = 0
         current_block = BasicBlock(id=block_id, start_pc=0, end_pc=0)
         block_starts = {0}
         block_starts.update(jump_targets)
-
         for instr in self.instructions:
             if instr.pc in block_starts and current_block.instructions:
                 current_block.end_pc = current_block.instructions[-1].pc
@@ -171,12 +165,10 @@ class WeAreDevsVMLifter:
                 block_id = len(self.blocks)
                 current_block = BasicBlock(id=block_id, start_pc=instr.pc, end_pc=instr.pc)
             current_block.instructions.append(instr)
-
         if current_block.instructions:
             current_block.end_pc = current_block.instructions[-1].pc
             self.blocks[current_block.id] = current_block
             self.block_map[current_block.start_pc] = current_block.id
-
         for bid, block in self.blocks.items():
             if not block.instructions:
                 continue
@@ -247,20 +239,21 @@ class WeAreDevsVMLifter:
 
         def emit_block(bid):
             if bid in visited:
+                if bid in self.loop_headers:
+                    self.output.append(' ' * self.indent_level + 'while true do')
+                    self.indent_level += 1
+                    return
                 return
             visited.add(bid)
             block = self.blocks.get(bid)
             if not block:
                 return
-
             if bid in self.loop_headers:
-                self.output.append('  ' * self.indent_level + 'while true do')
+                self.output.append(' ' * self.indent_level + 'while true do')
                 self.indent_level += 1
-
             for instr in block.instructions:
-                prefix = '  ' * self.indent_level
+                prefix = ' ' * self.indent_level
                 ops = instr.operands
-
                 if instr.opcode == 'LOADK' and len(ops) >= 2:
                     dest = ops[0]
                     const_idx = ops[1]
@@ -268,14 +261,12 @@ class WeAreDevsVMLifter:
                         val = self.strings[const_idx]
                         set_reg(dest, val)
                         self.output.append(f'{prefix}local reg_{dest} = {json.dumps(val)}')
-
                 elif instr.opcode == 'MOVE' and len(ops) >= 2:
                     dest = ops[0]
                     src = ops[1]
                     src_val = get_reg(src)
                     set_reg(dest, src_val)
                     self.output.append(f'{prefix}local reg_{dest} = {src_val}')
-
                 elif instr.opcode == 'ADD' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
@@ -283,7 +274,6 @@ class WeAreDevsVMLifter:
                     result = f'({left} + {right})'
                     set_reg(dest, result)
                     self.output.append(f'{prefix}local reg_{dest} = {result}')
-
                 elif instr.opcode == 'SUB' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
@@ -291,7 +281,6 @@ class WeAreDevsVMLifter:
                     result = f'({left} - {right})'
                     set_reg(dest, result)
                     self.output.append(f'{prefix}local reg_{dest} = {result}')
-
                 elif instr.opcode == 'MUL' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
@@ -299,7 +288,6 @@ class WeAreDevsVMLifter:
                     result = f'({left} * {right})'
                     set_reg(dest, result)
                     self.output.append(f'{prefix}local reg_{dest} = {result}')
-
                 elif instr.opcode == 'DIV' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
@@ -307,7 +295,6 @@ class WeAreDevsVMLifter:
                     result = f'({left} / {right})'
                     set_reg(dest, result)
                     self.output.append(f'{prefix}local reg_{dest} = {result}')
-
                 elif instr.opcode == 'CONCAT' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
@@ -315,7 +302,6 @@ class WeAreDevsVMLifter:
                     result = f'({left} .. {right})'
                     set_reg(dest, result)
                     self.output.append(f'{prefix}local reg_{dest} = {result}')
-
                 elif instr.opcode == 'CALL' and ops:
                     func_idx = ops[0]
                     if 0 <= func_idx < len(self.strings):
@@ -332,14 +318,11 @@ class WeAreDevsVMLifter:
                         self.output.append(f'{prefix}print({args[0] if args else ""})')
                     else:
                         self.output.append(f'{prefix}{func_name}({", ".join(args)})')
-
                 elif instr.opcode == 'JMP':
                     break
-
                 elif instr.opcode == 'CJMP' and ops:
                     cond = get_reg(ops[0])
                     self.output.append(f'{prefix}if {cond} then')
-
                 elif instr.opcode == 'RET':
                     if ops:
                         ret_vals = [get_reg(op) for op in ops]
@@ -347,70 +330,14 @@ class WeAreDevsVMLifter:
                     else:
                         self.output.append(f'{prefix}return')
                     break
-
                 elif instr.opcode == 'EQ' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
                     right = get_reg(ops[2])
                     self.output.append(f'{prefix}local reg_{dest} = ({left} == {right})')
-
                 elif instr.opcode == 'LT' and len(ops) >= 3:
                     dest = ops[0]
                     left = get_reg(ops[1])
                     right = get_reg(ops[2])
                     self.output.append(f'{prefix}local reg_{dest} = ({left} < {right})')
-
-                elif instr.opcode == 'LE' and len(ops) >= 3:
-                    dest = ops[0]
-                    left = get_reg(ops[1])
-                    right = get_reg(ops[2])
-                    self.output.append(f'{prefix}local reg_{dest} = ({left} <= {right})')
-
-                elif instr.opcode == 'LEN' and len(ops) >= 2:
-                    dest = ops[0]
-                    src = get_reg(ops[1])
-                    self.output.append(f'{prefix}local reg_{dest} = #{src}')
-
-                elif instr.opcode == 'NOT' and len(ops) >= 2:
-                    dest = ops[0]
-                    src = get_reg(ops[1])
-                    self.output.append(f'{prefix}local reg_{dest} = not {src}')
-
-                elif instr.opcode == 'SETMETA' and len(ops) >= 2:
-                    self.output.append(f'{prefix}setmetatable({get_reg(ops[0])}, {get_reg(ops[1])})')
-
-                elif instr.opcode == 'GETMETA' and len(ops) >= 2:
-                    self.output.append(f'{prefix}local reg_{ops[0]} = getmetatable({get_reg(ops[1])})')
-
-                elif instr.opcode == 'PCALL' and ops:
-                    func_name = self.strings[ops[0]] if ops[0] < len(self.strings) else get_reg(ops[0])
-                    self.output.append(f'{prefix}pcall({func_name})')
-
-                elif instr.opcode == 'STRCHAR' and ops:
-                    dest = ops[0]
-                    chars = ', '.join(str(o) for o in ops[1:]) if len(ops) > 1 else str(ops[0])
-                    self.output.append(f'{prefix}local reg_{dest} = string.char({chars})')
-
-                else:
-                    self.output.append(f'{prefix}-- {instr.opcode} {ops}')
-
-            if bid in self.loop_headers:
-                self.indent_level -= 1
-                self.output.append('  ' * self.indent_level + 'end')
-
-            for sid in block.successors:
-                if sid not in visited:
-                    emit_block(sid)
-
-        if self.blocks:
-            first_block = min(self.blocks.keys())
-            emit_block(first_block)
-
-        if not self.output:
-            self.output.append('local R = {')
-            for i, s in enumerate(self.strings):
-                if s:
-                    self.output.append(f'\t[{i}] = {json.dumps(s)},')
-            self.output.append('}')
-
-        return '\n'.join(self.output)
+                elif instr
