@@ -6,6 +6,7 @@ from string_decoder import StringTableDecoder
 from devirtualiser import Devirtualiser, strip_bootstrap
 from state_machine_devirt import StateMachineLifter
 from vm_devirtualizer import VMDevirtualizer
+from instruction_table_dumper import InstructionTableDumper
 from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
@@ -78,6 +79,16 @@ class Unveiler:
             self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
+        self._log('devirtualise', True, 'dumping instruction table from decoded strings')
+        try:
+            dumper = InstructionTableDumper(source, decoder.strings)
+            dumped = dumper.dump()
+            if dumped:
+                self._log('devirtualise_success', True, 'instruction table dumped')
+                return dumped, 'instr_table_dump', 'Instruction table and all decoded strings dumped'
+        except Exception as e:
+            self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
+
         self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
         try:
             vm_devirt = VMDevirtualizer(source, decoder, wrapper_name="GetStr")
@@ -148,6 +159,7 @@ class DeobfEngine:
             'state_machine_lifter': True,
             'vm_instruction_lifter': True,
             'vm_devirtualizer': True,
+            'instruction_table_dumper': True,
         }
 
     def _trace(self, stage: str, success: bool, message: str) -> None:
