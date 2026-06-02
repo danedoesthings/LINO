@@ -340,4 +340,50 @@ class WeAreDevsVMLifter:
                     left = get_reg(ops[1])
                     right = get_reg(ops[2])
                     self.output.append(f'{prefix}local reg_{dest} = ({left} < {right})')
-                elif instr
+                elif instr.opcode == 'LE' and len(ops) >= 3:
+                    dest = ops[0]
+                    left = get_reg(ops[1])
+                    right = get_reg(ops[2])
+                    self.output.append(f'{prefix}local reg_{dest} = ({left} <= {right})')
+                elif instr.opcode == 'LEN' and len(ops) >= 2:
+                    dest = ops[0]
+                    src = get_reg(ops[1])
+                    self.output.append(f'{prefix}local reg_{dest} = #{src}')
+                elif instr.opcode == 'NOT' and len(ops) >= 2:
+                    dest = ops[0]
+                    src = get_reg(ops[1])
+                    self.output.append(f'{prefix}local reg_{dest} = not {src}')
+                elif instr.opcode == 'SETMETA' and len(ops) >= 2:
+                    self.output.append(f'{prefix}setmetatable({get_reg(ops[0])}, {get_reg(ops[1])})')
+                elif instr.opcode == 'GETMETA' and len(ops) >= 2:
+                    self.output.append(f'{prefix}local reg_{ops[0]} = getmetatable({get_reg(ops[1])})')
+                elif instr.opcode == 'PCALL' and ops:
+                    func_name = self.strings[ops[0]] if ops[0] < len(self.strings) else get_reg(ops[0])
+                    self.output.append(f'{prefix}pcall({func_name})')
+                elif instr.opcode == 'STRCHAR' and ops:
+                    dest = ops[0]
+                    chars = ', '.join(str(o) for o in ops[1:]) if len(ops) > 1 else str(ops[0])
+                    self.output.append(f'{prefix}local reg_{dest} = string.char({chars})')
+                else:
+                    self.output.append(f'{prefix}-- {instr.opcode} {ops}')
+
+            if bid in self.loop_headers:
+                self.indent_level -= 1
+                self.output.append(' ' * self.indent_level + 'end')
+
+            for sid in block.successors:
+                if sid not in visited or sid in self.loop_headers:
+                    emit_block(sid)
+
+        if self.blocks:
+            first_block = min(self.blocks.keys())
+            emit_block(first_block)
+
+        if not self.output:
+            self.output.append('local R = {')
+            for i, s in enumerate(self.strings):
+                if s:
+                    self.output.append(f'\t[{i}] = {json.dumps(s)},')
+            self.output.append('}')
+
+        return '\n'.join(self.output)
