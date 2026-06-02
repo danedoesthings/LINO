@@ -6,16 +6,13 @@ import signal
 import time
 
 LOG_LIMIT = 8000
-VM_INSTRUCTION_LIMIT = 500000
+VM_INSTRUCTION_LIMIT = 2000000
 
 ENV_BOOTSTRAP = r"""
 local ORIGINAL_LOADSTRING = rawget(_G, "loadstring")
 local ORIGINAL_LOAD = rawget(_G, "load")
 local ORIGINAL_PCALL = pcall
-local ORIGINAL_SETMETATABLE = setmetatable
-local ORIGINAL_GETMETATABLE = getmetatable
-local ORIGINAL_RAWSET = rawset
-local ORIGINAL_RAWGET = rawget
+local ORIGINAL_UNPACK = unpack or table.unpack
 
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
@@ -75,97 +72,91 @@ local function _log(msg)
     end
 end
 
-local _vm_trace_enabled = false
-local _vm_state_log = {}
-local _vm_state_count = 0
-local _vm_state_limit = 2000
-local _vm_reg_log = {}
-local _vm_reg_count = 0
-local _vm_reg_limit = 5000
+local _generated_functions = {}
+local _generated_count = 0
+local _generated_limit = 500
 
-local function _log_vm_state(state, source)
-    if not _vm_trace_enabled then return end
-    _vm_state_count = _vm_state_count + 1
-    if _vm_state_count > _vm_state_limit then return end
-    _vm_state_log[_vm_state_count] = {state = state, source = source}
-end
+local _closure_factories = {}
+local _closure_factory_names = {
+    "funcWrap", "helperG", "tokenMap", "shuffleTbl",
+    "r5", "e", "regD", "cleanRef", "allocSlot",
+    "packArgs", "callEnvA", "callEnvB", "vmState"
+}
 
-local function _log_vm_reg(table_name, key, value)
-    if not _vm_trace_enabled then return end
-    _vm_reg_count = _vm_reg_count + 1
-    if _vm_reg_count > _vm_reg_limit then return end
-    local vtype = type(value)
-    local vstr
-    if vtype == "string" then
-        vstr = value:sub(1, 120)
-    elseif vtype == "number" then
-        vstr = tostring(value)
-    elseif vtype == "function" then
-        vstr = "function"
-    elseif vtype == "table" then
-        vstr = "table"
-    elseif vtype == "nil" then
-        vstr = "nil"
-    else
-        vstr = vtype
-    end
-    _vm_reg_log[_vm_reg_count] = {table_name = table_name, key = tostring(key), value = vstr, vtype = vtype}
-end
-
-local function _dump_vm_state()
-    _log("=== VM STATE TRANSITION LOG (" .. _vm_state_count .. " entries) ===")
-    local start = math.max(1, _vm_state_count - 200)
-    for i = start, _vm_state_count do
-        local entry = _vm_state_log[i]
-        _log("  STATE[" .. i .. "] -> " .. entry.state .. " (from " .. entry.source .. ")")
-    end
-end
-
-local function _dump_vm_registers()
-    _log("=== VM REGISTER WRITE LOG (" .. _vm_reg_count .. " entries) ===")
-    local start = math.max(1, _vm_reg_count - 300)
-    for i = start, _vm_reg_count do
-        local entry = _vm_reg_log[i]
-        _log("  REG[" .. entry.table_name .. "][" .. entry.key .. "] = " .. entry.value .. " (" .. entry.vtype .. ")")
-    end
-end
-
-local function _dump_vm_tables(instrTbl, vmStack, callEnvB)
-    if instrTbl then
-        _log("=== INSTRTBL DUMP ===")
-        local count = 0
-        for k, v in pairs(instrTbl) do
-            count = count + 1
-            if count <= 200 then
-                local vtype = type(v)
-                local vstr
-                if vtype == "string" then
-                    vstr = v:sub(1, 150)
-                elseif vtype == "function" then
-                    vstr = "function"
-                elseif vtype == "number" then
-                    vstr = tostring(v)
-                elseif vtype == "nil" then
-                    vstr = "nil"
-                else
-                    vstr = vtype
+local function _wrap_closure_factory(original, name)
+    if _closure_factories[name] then return _closure_factories[name] end
+    local wrapper = function(...)
+        _log("[FACTORY][" .. name .. "] called with " .. select("#", ...) .. " args")
+        local results = {original(...)}
+        for i, result in ipairs(results) do
+            if type(result) == "function" then
+                _generated_count = _generated_count + 1
+                if _generated_count <= _generated_limit then
+                    _generated_functions[_generated_count] = {
+                        factory = name,
+                        func = result,
+                        index = _generated_count,
+                    }
+                    _log("[CLOSURE][" .. name .. "][" .. _generated_count .. "] created")
                 end
-                _log("  instrTbl[" .. tostring(k) .. "] = " .. vstr .. " (" .. vtype .. ")")
+                results[i] = _wrap_generated_function(result, name, _generated_count)
+            elseif type(result) == "table" then
+                _log("[TABLE][" .. name .. "] returned table")
+                results[i] = _wrap_vm_table(result, name)
             end
         end
-        _log("  instrTbl total entries: " .. count)
+        return ORIGINAL_UNPACK(results, 1, #results)
     end
-    if vmStack then
-        _log("=== VMSTACK DUMP ===")
-        local count = 0
-        for k, v in pairs(vmStack) do
-            count = count + 1
-            if count <= 100 then
-                _log("  vmStack[" .. tostring(k) .. "] = " .. tostring(v))
+    _closure_factories[name] = wrapper
+    return wrapper
+end
+
+local function _wrap_generated_function(fn, factory_name, index)
+    local wrapper = function(...)
+        local args = {...}
+        _log("[CALL][" .. factory_name .. "_" .. index .. "] called with " .. select("#", ...) .. " args")
+        for i, arg in ipairs(args) do
+            if type(arg) == "string" and #arg > 0 then
+                _log("  arg[" .. i .. "]: " .. arg:sub(1, 200))
+            elseif type(arg) == "table" then
+                _log("  arg[" .. i .. "]: table")
+            elseif type(arg) == "function" then
+                _log("  arg[" .. i .. "]: function")
+            elseif type(arg) == "number" then
+                _log("  arg[" .. i .. "]: " .. tostring(arg))
             end
         end
-        _log("  vmStack total entries: " .. count)
+        local results = {fn(...)}
+        for i, result in ipairs(results) do
+            if type(result) == "string" and #result > 20 then
+                _log("[RESULT][" .. factory_name .. "_" .. index .. "] string len=" .. #result)
+                _log(result:sub(1, 1000))
+                local f = io.open(_outpath, "w")
+                if f then f:write(result); f:close() end
+            elseif type(result) == "function" then
+                _log("[RESULT][" .. factory_name .. "_" .. index .. "] returned a function")
+            end
+        end
+        return ORIGINAL_UNPACK(results, 1, #results)
     end
+    return wrapper
+end
+
+local function _wrap_vm_table(t, name)
+    local proxy = {}
+    local mt = {
+        __index = function(tbl, k)
+            _log("[VM_TABLE][" .. name .. "] index: " .. tostring(k))
+            return rawget(proxy, "_data")[k]
+        end,
+        __newindex = function(tbl, k, v)
+            _log("[VM_TABLE][" .. name .. "] store: [" .. tostring(k) .. "] = " .. tostring(v):sub(1, 150))
+            rawset(proxy, "_data")[k] = v
+        end,
+    }
+    proxy._data = t
+    setmetatable(proxy, mt)
+    return proxy
 end
 
 function loadstring(chunk, chunkname)
@@ -406,34 +397,10 @@ debug.sethook(function(event)
     _instruction_count = _instruction_count + 1
     if _instruction_count > _vm_limit then
         _log("VM_LOOP_LIMIT reached: " .. _instruction_count .. " instructions")
-        _dump_vm_state()
-        _dump_vm_registers()
-        _dump_vm_tables(_captured_instrTbl, _captured_vmStack, _captured_callEnvB)
+        _log("Generated functions: " .. _generated_count)
         error("VM LOOP LIMIT REACHED", 0)
     end
 end, "", 1000)
-
-_G._captured_instrTbl = nil
-_G._captured_vmStack = nil
-_G._captured_callEnvB = nil
-
-local _original_setmetatable = setmetatable
-_G.setmetatable = function(t, mt)
-    if type(t) == "table" and type(mt) == "table" then
-        if mt.__newindex and not mt._vm_hooked then
-            local original_newindex = mt.__newindex
-            mt.__newindex = function(tbl, k, v)
-                _log_vm_reg("instrTbl", k, v)
-                if type(v) == "string" and #v > 20 then
-                    _log("VM STRING WRITE: instrTbl[" .. tostring(k) .. "] = " .. v:sub(1, 200))
-                end
-                return original_newindex(tbl, k, v)
-            end
-            mt._vm_hooked = true
-        end
-    end
-    return _original_setmetatable(t, mt)
-end
 """
 
 
@@ -462,9 +429,12 @@ class LuaHarness:
         harness_code = (
             'local _outpath = "' + output_path_fixed + '"\n'
             + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
-            + '_vm_trace_enabled = true\n'
             + ENV_BOOTSTRAP
             + "\n"
+            "local _temp_funcWrap, _temp_helperG, _temp_tokenMap, _temp_shuffleTbl\n"
+            "local _temp_r5, _temp_e, _temp_regD, _temp_cleanRef, _temp_allocSlot\n"
+            "local _temp_packArgs, _temp_callEnvA, _temp_callEnvB, _temp_vmState\n"
+            "\n"
             "local ok, err = ORIGINAL_PCALL(function()\n"
             + source +
             "\nend)\n"
@@ -473,9 +443,7 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
-            "_dump_vm_state()\n"
-            "_dump_vm_registers()\n"
-            "_dump_vm_tables(_captured_instrTbl, _captured_vmStack, _captured_callEnvB)\n"
+            "_log(\"Generated functions: \" .. _generated_count)\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
@@ -524,7 +492,6 @@ class LuaHarness:
         harness_code = (
             'local _outpath = "' + output_path_fixed + '"\n'
             + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
-            + '_vm_trace_enabled = true\n'
             + ENV_BOOTSTRAP
             + "\n"
             "local ok, err = ORIGINAL_PCALL(function()\n"
@@ -535,9 +502,7 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
-            "_dump_vm_state()\n"
-            "_dump_vm_registers()\n"
-            "_dump_vm_tables(_captured_instrTbl, _captured_vmStack, _captured_callEnvB)\n"
+            "_log(\"Generated functions: \" .. _generated_count)\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
