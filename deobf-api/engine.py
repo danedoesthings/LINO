@@ -11,6 +11,7 @@ from env_logger import JobLogger
 from lua_harness import LuaHarness
 from lune_pipeline import run_lune_darklua_pipeline
 from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
+from instruction_decoder import WeAreDevsVMLifter
 
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
@@ -40,7 +41,6 @@ class Unveiler:
 
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
-
         decoder = StringTableDecoder(source)
         if not decoder.ok:
             self._log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
@@ -62,12 +62,21 @@ class Unveiler:
             self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
+        self._log('devirtualise', True, 'attempting instruction-level VM lifting')
+        vm_lifter = WeAreDevsVMLifter(decoder.strings)
+        lifted = vm_lifter.lift(source)
+        if lifted:
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+            return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
+
         self._log('devirtualise', True, 'attempting state machine unflattening')
         devirt = Devirtualiser(decoder)
         processed = devirt.process(source)
         sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
         lifted_result = sm_lifter.lift()
-
         if lifted_result:
             renamer = VarRenamer()
             final_code = renamer.rename(lifted_result)
@@ -105,6 +114,7 @@ class DeobfEngine:
             'unluac': self._java_available and os.path.isfile(self.unluac_path),
             'var_renamer': True,
             'state_machine_lifter': True,
+            'vm_instruction_lifter': True,
         }
 
     def _trace(self, stage: str, success: bool, message: str) -> None:
@@ -115,7 +125,7 @@ class DeobfEngine:
         result, method, diagnostic = self.unveiler.unveil(source)
         for entry in self.unveiler.trace:
             self._trace(entry['stage'], entry['success'], entry['message'])
-        if result and method in ('lune_darklua', 'state_machine_lifted', 'static_analysis', 'lua_harness'):
+        if result and method in ('lune_darklua', 'state_machine_lifted', 'static_analysis', 'lua_harness', 'vm_lifted'):
             result = self.var_renamer.rename(result)
         if logger:
             for entry in self.unveiler.trace:
@@ -151,7 +161,7 @@ def _cleanup_old_jobs() -> None:
                 old = [k for k, v in job_store.items() if now - v.get('created', 0) > 86400]
                 for k in old:
                     del job_store[k]
-            _save_jobs()
+                _save_jobs()
         except Exception:
             pass
 
@@ -194,7 +204,6 @@ def submit_job(source: str) -> str:
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
-    _save_jobs()
     threading.Thread(target=_run_job, args=(job_id, source), daemon=True).start()
     return job_id
 
