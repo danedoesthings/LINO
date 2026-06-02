@@ -80,12 +80,18 @@ class Unveiler:
         self._log('devirtualise', True, 'attempting state-machine lifting via AST')
         sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
         lifted = sm_lifter.lift()
-        if lifted and self._is_valid_lua(lifted):
-            self._log('devirtualise_success', True, 'state machine lifted to dispatch table')
-            renamer = VarRenamer()
-            lifted = renamer.rename(lifted)
-            lifted = beautify(lifted)
-            return lifted, 'state_machine_lifted', 'State machine lifted to dispatch table'
+        if lifted:
+            if self._is_valid_lua(lifted):
+                self._log('devirtualise_success', True, 'state machine lifted to dispatch table')
+                renamer = VarRenamer()
+                lifted = renamer.rename(lifted)
+                lifted = beautify(lifted)
+                return lifted, 'state_machine_lifted', 'State machine lifted to dispatch table'
+            else:
+                self._log('devirtualise', False, 'lifter produced invalid Lua')
+        else:
+            diag_msg = '; '.join(sm_lifter.diagnostics) if sm_lifter.diagnostics else 'no diagnostics'
+            self._log('devirtualise', False, f'AST lifter returned None: {diag_msg}')
 
         self._log('devirtualise', True, 'attempting instruction-level VM lifting')
         vm_lifter = WeAreDevsVMLifter(decoder.strings)
