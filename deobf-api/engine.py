@@ -1,368 +1,241 @@
-import re
-import luaparser.ast as lua_ast
-from luaparser.astnodes import (
-    While, If, Assign, Function, Call, Invoke,
-    Block, LocalAssign, Index, Name, Number, String,
-    BinaryOp, UnaryOp, Table, Field
-)
-from typing import Optional, List, Dict, Any, Tuple
+import os, re, shutil, time, uuid, threading, json, traceback, subprocess, tempfile, base64, urllib.request
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Optional, Any
+
 from string_decoder import StringTableDecoder
+from devirtualiser import Devirtualiser, strip_bootstrap
+from state_machine_devirt import StateMachineLifter
+from vm_devirtualizer import VMDevirtualizer
+from var_renamer import VarRenamer
+from beautifier import beautify
+from env_logger import JobLogger
+from lua_harness import LuaHarness
+from lune_pipeline import run_lune_darklua_pipeline
+from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
+from instruction_decoder import WeAreDevsVMLifter
 
+try:
+    from luaparser import ast as lua_ast
+    HAS_LUAPARSER = True
+except ImportError:
+    HAS_LUAPARSER = False
 
-class VMDevirtualizer:
-    def __init__(self, source: str, decoder: StringTableDecoder):
-        self.source = source
-        self.decoder = decoder
-        self.strings = decoder.strings
-        self.offset = decoder.offset
-        self.vm_state_var: str = "vmState"
-        self.states: Dict[str, dict] = {}
-        self.entry_state: Optional[str] = None
-        self.transitions: Dict[str, List[str]] = {}
-        self.lifted_code: List[str] = []
-        self.diagnostics: List[str] = []
-        self._state_counter: int = 0
+UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
+UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
-    def devirtualize(self) -> Optional[str]:
-        self.diagnostics = []
-        code = self._resolve_all_strings(self.source)
-        code = self._sanitize_code(code)
-        self.diagnostics.append("Strings resolved and code sanitized")
+JOB_STORAGE_DIR = '/data'
+JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
+os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
 
+@dataclass
+class DiagnosticEvent:
+    stage: str
+    success: bool
+    message: str
+    line: Optional[int] = None
+    column: Optional[int] = None
+    snippet: Optional[str] = None
+    exception_type: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
+
+class Unveiler:
+    def __init__(self, harness: LuaHarness) -> None:
+        self.harness = harness
+        self.trace: List[Dict] = []
+
+    def _log(self, stage: str, success: bool, message: str) -> None:
+        self.trace.append({'stage': stage, 'success': success, 'message': message, 'timestamp': time.time()})
+
+    def _is_valid_lua(self, code: str) -> bool:
+        if not HAS_LUAPARSER:
+            return True
         try:
-            tree = lua_ast.parse(code)
-        except Exception as e:
-            self.diagnostics.append(f"Parse error after sanitize: {e}")
-            return None
+            lua_ast.parse(code)
+            return True
+        except Exception:
+            return False
 
-        while_node = self._find_dispatcher(tree)
-        if while_node is None:
-            self.diagnostics.append("No dispatcher while loop found")
-            return None
+    def unveil(self, source: str) -> Tuple[str, str, str]:
+        self.trace = []
+        decoder = StringTableDecoder(source)
+        if not decoder.ok:
+            self._log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
+            return '', 'unable', 'String decode failed'
+        self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
-        self.vm_state_var = self._get_while_variable(while_node)
-        if not self.vm_state_var:
-            self.diagnostics.append("Could not determine VM state variable")
-            return None
+        self._log('harness', True, 'executing Lua harness')
+        harness_result = self.harness.run(source)
+        if harness_result and looks_like_real_code(harness_result):
+            self._log('harness_success', True, f'captured {len(harness_result)} chars')
+            return harness_result, 'lua_harness', 'Harness captured original source'
 
-        self.diagnostics.append(f"Found dispatcher, state var = {self.vm_state_var}")
+        self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
+        lune_result = run_lune_darklua_pipeline(source)
+        if lune_result and looks_like_real_code(lune_result):
+            renamer = VarRenamer()
+            lune_result = renamer.rename(lune_result)
+            lune_result = beautify(lune_result)
+            self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
+            return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
-        self._extract_state_blocks(while_node.body)
-        if not self.states:
-            self.diagnostics.append("No state blocks extracted")
-            return None
-
-        self.diagnostics.append(f"Extracted {len(self.states)} states, entry = {self.entry_state}")
-
-        self._build_transitions()
-        self._lift_to_code()
-
-        if not self.lifted_code:
-            self.diagnostics.append("Lifting produced no code")
-            return None
-
-        return "\n".join(self.lifted_code)
-
-    def _resolve_all_strings(self, code: str) -> str:
-        offset_constant = self.offset
-        if not offset_constant:
-            m_offset = re.search(r'GetStr\s*\+\s*\(?\s*(\d+)\s*\)?', code)
-            if m_offset:
-                offset_constant = int(m_offset.group(1))
-
-        def repl(m):
-            try:
-                n = int(m.group(1))
-                idx = n + offset_constant - 1
-                if 0 <= idx < len(self.strings):
-                    s = self.strings[idx]
-                    if s is not None:
-                        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                        return f'"{escaped}"'
-                return f'({n})'
-            except Exception:
-                return m.group(0)
-
-        code = re.sub(r'GetStr\s*\(\s*(-?\d+)\s*\)', repl, code)
-        return code
-
-    def _sanitize_code(self, code: str) -> str:
-        code = re.sub(r'(\b[a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*([,})])', r'\1, \2\3', code)
-        code = re.sub(r'(\b[a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*$', r'\1, \2', code, flags=re.MULTILINE)
-        code = re.sub(r'\)\s*\)', '))', code)
-        code = re.sub(r'(\w+)\s*\(\s*(\w+)\s*\)\s*(\w+)', r'\1(\2)\3', code)
-        code = re.sub(r'\bnil\s*\)', 'nil)', code)
-        return code
-
-    def _find_dispatcher(self, tree: lua_ast.Chunk) -> Optional[While]:
-        for node in tree.body.body:
-            if isinstance(node, While):
-                return node
-            if hasattr(node, 'body'):
-                inner = self._find_in_block(node.body)
-                if inner:
-                    return inner
-        return None
-
-    def _find_in_block(self, block) -> Optional[While]:
-        if isinstance(block, list):
-            for stmt in block:
-                if isinstance(stmt, While):
-                    return stmt
-                if hasattr(stmt, 'body'):
-                    inner = self._find_in_block(stmt.body)
-                    if inner:
-                        return inner
-        elif isinstance(block, Block):
-            for stmt in block.body:
-                if isinstance(stmt, While):
-                    return stmt
-                if hasattr(stmt, 'body'):
-                    inner = self._find_in_block(stmt.body)
-                    if inner:
-                        return inner
-        return None
-
-    def _get_while_variable(self, node: While) -> Optional[str]:
-        if isinstance(node.test, Name):
-            return node.test.id
-        return None
-
-    def _extract_state_blocks(self, body) -> None:
-        for stmt in body.body:
-            if isinstance(stmt, If):
-                self._walk_if_tree(stmt, [], "")
-
-    def _walk_if_tree(self, node: If, conditions: list, prefix: str) -> None:
-        boundary = self._eval_boundary(node.test)
-        if boundary is not None:
-            true_cond = conditions + [f"{self.vm_state_var} < {boundary}"]
-            false_cond = conditions + [f"{self.vm_state_var} >= {boundary}"]
-
-            if len(node.body.body) == 1 and isinstance(node.body.body[0], If):
-                self._walk_if_tree(node.body.body[0], true_cond, prefix)
-            else:
-                self._process_block(node.body.body, true_cond, prefix)
-
-            if node.else_body:
-                if len(node.else_body.body) == 1 and isinstance(node.else_body.body[0], If):
-                    self._walk_if_tree(node.else_body.body[0], false_cond, prefix)
-                else:
-                    self._process_block(node.else_body.body, false_cond, prefix)
+        self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
+        vm_devirt = VMDevirtualizer(source, decoder, wrapper_name="GetStr")
+        lifted = vm_devirt.devirtualize()
+        if lifted and self._is_valid_lua(lifted):
+            self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
         else:
-            self._process_block(node.body.body, conditions, prefix)
+            diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'no diagnostics'
+            self._log('devirtualise', False, f'VM devirtualizer failed: {diag_msg}')
 
-    def _process_block(self, stmts: list, conditions: list, prefix: str) -> None:
-        next_state = None
-        last_assign = None
-        all_targets = []
+        self._log('devirtualise', True, 'attempting state-machine lifting via regex')
+        sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
+        lifted = sm_lifter.lift()
+        if lifted and self._is_valid_lua(lifted):
+            self._log('devirtualise_success', True, 'state machine lifted')
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            return lifted, 'state_machine_lifted', 'State machine lifted'
 
-        for stmt in reversed(stmts):
-            if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
-                if next_state is None:
-                    next_state = self._get_assigned_state(stmt)
-                    last_assign = stmt
-                all_targets.append(self._get_assigned_state(stmt))
-            elif isinstance(stmt, If):
-                self._extract_all_state_assigns(stmt, all_targets)
+        self._log('devirtualise', True, 'attempting instruction-level VM lifting')
+        vm_lifter = WeAreDevsVMLifter(decoder.strings)
+        lifted = vm_lifter.lift(source)
+        if lifted and self._is_valid_lua(lifted):
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+            return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
-        block_id = self._derive_state_id_from_conditions(conditions)
+        self._log('devirtualise', True, 'falling back to static devirtualisation')
+        devirt = Devirtualiser(decoder, annotate=True)
+        processed = devirt.process(source)
+        if processed:
+            renamer = VarRenamer()
+            result = renamer.rename(processed)
+            result = beautify(result)
+            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
+            return header + result, 'static_analysis', 'Static devirtualisation complete'
 
-        clean_stmts = [s for s in stmts if s != last_assign]
-        code = self._stmts_to_source(clean_stmts)
+        self._log('devirtualise', False, 'static analysis produced no meaningful output')
+        lines = [f'-- [{i}] {json.dumps(str(s))}' for i, s in enumerate(decoder.strings) if s]
+        return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
 
-        self.states[block_id] = {
-            'code': code,
-            'conditions': conditions,
-            'next': next_state,
-            'all_targets': all_targets,
+class DeobfEngine:
+    def __init__(self) -> None:
+        self.unluac_path = UNLUAC_LOCAL_PATH
+        self._java_available = shutil.which('java') is not None
+        self.harness = LuaHarness(unluac_path=self.unluac_path)
+        self.unveiler = Unveiler(harness=self.harness)
+        self.var_renamer = VarRenamer()
+        self.trace: List[DiagnosticEvent] = []
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return {
+            'wearedevs_decode': True,
+            'static_analysis': True,
+            'lua_harness': self.harness.available,
+            'lune_darklua': True,
+            'unluac': self._java_available and os.path.isfile(self.unluac_path),
+            'var_renamer': True,
+            'state_machine_lifter': True,
+            'vm_instruction_lifter': True,
+            'vm_devirtualizer': True,
         }
 
-        if self.entry_state is None:
-            self.entry_state = block_id
+    def _trace(self, stage: str, success: bool, message: str) -> None:
+        self.trace.append(DiagnosticEvent(stage=stage, success=success, message=message))
 
-    def _extract_all_state_assigns(self, node: If, targets: list) -> None:
-        for stmt in node.body.body:
-            if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
-                targets.append(self._get_assigned_state(stmt))
-            elif isinstance(stmt, If):
-                self._extract_all_state_assigns(stmt, targets)
-        if node.else_body:
-            for stmt in node.else_body.body:
-                if isinstance(stmt, (Assign, LocalAssign)) and self._is_state_assign(stmt):
-                    targets.append(self._get_assigned_state(stmt))
-                elif isinstance(stmt, If):
-                    self._extract_all_state_assigns(stmt, targets)
+    def process(self, source: str, logger: Optional[JobLogger] = None) -> Tuple[str, str, str, list]:
+        self.trace = []
+        result, method, diagnostic = self.unveiler.unveil(source)
+        for entry in self.unveiler.trace:
+            self._trace(entry['stage'], entry['success'], entry['message'])
+        if logger:
+            for entry in self.unveiler.trace:
+                logger.add_trace(entry['stage'], entry['success'], entry['message'])
+            logger.finish(result, method, diagnostic)
+        return result, method, diagnostic, [vars(t) for t in self.trace]
 
-    def _derive_state_id_from_conditions(self, conditions: list) -> str:
-        if not conditions:
-            self._state_counter += 1
-            return f"entry_{self._state_counter}"
-        return " & ".join(conditions)
+job_store: Dict[str, Any] = {}
+job_lock = threading.Lock()
 
-    def _is_state_assign(self, node) -> bool:
-        if isinstance(node, Assign):
-            if len(node.targets) != 1:
-                return False
-            target = node.targets[0]
-            if isinstance(target, Name) and target.id == self.vm_state_var:
-                return True
-        elif isinstance(node, LocalAssign):
-            if len(node.targets) != 1:
-                return False
-            target = node.targets[0]
-            if isinstance(target, Name) and target.id == self.vm_state_var:
-                return True
-        return False
+def _save_jobs() -> None:
+    try:
+        completed = {k: v for k, v in job_store.items() if v.get('status') != 'processing'}
+        with open(JOB_STORAGE_FILE, 'w') as f:
+            json.dump(completed, f)
+    except Exception:
+        pass
 
-    def _get_assigned_state(self, node) -> Optional[int]:
-        if isinstance(node, Assign):
-            if len(node.values) != 1:
-                return None
-            val = node.values[0]
-        elif isinstance(node, LocalAssign):
-            if len(node.values) != 1:
-                return None
-            val = node.values[0]
-        else:
-            return None
-        if isinstance(val, Number):
-            return int(val.n)
-        if isinstance(val, UnaryOp) and val.op == '-' and isinstance(val.operand, Number):
-            return -int(val.operand.n)
-        return None
+def _load_jobs() -> None:
+    try:
+        if os.path.exists(JOB_STORAGE_FILE):
+            with open(JOB_STORAGE_FILE) as f:
+                job_store.update(json.load(f))
+    except Exception:
+        pass
 
-    def _eval_boundary(self, node) -> Optional[int]:
-        if isinstance(node, BinaryOp) and node.op == '<':
-            if isinstance(node.right, Number):
-                return int(node.right.n)
-            if isinstance(node.right, UnaryOp) and node.right.op == '-' and isinstance(node.right.operand, Number):
-                return -int(node.right.operand.n)
-        return None
+def _cleanup_old_jobs() -> None:
+    while True:
+        try:
+            time.sleep(3600)
+            now = time.time()
+            with job_lock:
+                old = [k for k, v in job_store.items() if now - v.get('created', 0) > 86400]
+                for k in old:
+                    del job_store[k]
+                _save_jobs()
+        except Exception:
+            pass
 
-    def _stmts_to_source(self, stmts: list) -> str:
-        if not stmts:
-            return ""
-        lines = []
-        for stmt in stmts:
-            if hasattr(stmt, 'to_lua'):
-                lines.append(stmt.to_lua())
-            else:
-                lines.append(str(stmt))
-        return "\n".join(lines)
+_load_jobs()
+_cleanup_thread = threading.Thread(target=_cleanup_old_jobs, daemon=True)
+_cleanup_thread.start()
 
-    def _build_transitions(self) -> None:
-        for state_id, info in self.states.items():
-            self.transitions[state_id] = []
-            for target in info.get('all_targets', []):
-                if target is not None:
-                    for other_id, other_info in self.states.items():
-                        if other_info.get('conditions') and self._state_matches_conditions(target, other_info['conditions']):
-                            self.transitions[state_id].append(other_id)
-                            break
+def _run_job(job_id: str, source: str) -> None:
+    engine = DeobfEngine()
+    logger = JobLogger()
+    logger.start_job(job_id, engine.get_capabilities())
+    try:
+        result, method, diagnostic, trace = engine.process(source, logger)
+        with job_lock:
+            job_store[job_id] = {
+                'status': 'complete',
+                'result': result,
+                'detected': method,
+                'diagnostic': diagnostic,
+                'trace': trace,
+                'result_length': len(result) if result else 0,
+                'created': job_store.get(job_id, {}).get('created', time.time()),
+                'log_json': logger.to_json(),
+            }
+        _save_jobs()
+    except Exception as e:
+        logger.add_error(str(e), e)
+        logger.finish()
+        with job_lock:
+            job_store[job_id] = {
+                'status': 'error',
+                'error': str(e),
+                'traceback': traceback.format_exc()[:4000],
+                'created': job_store.get(job_id, {}).get('created', time.time()),
+                'log_json': logger.to_json(),
+            }
+        _save_jobs()
 
-    def _state_matches_conditions(self, state_num: int, conditions: list) -> bool:
-        if not conditions:
-            return False
-        for cond in conditions:
-            m = re.match(rf'{self.vm_state_var}\s*<\s*(-?\d+)', cond)
-            if m:
-                boundary = int(m.group(1))
-                if state_num >= boundary:
-                    return False
-            m = re.match(rf'{self.vm_state_var}\s*>=\s*(-?\d+)', cond)
-            if m:
-                boundary = int(m.group(1))
-                if state_num < boundary:
-                    return False
-        return True
+def submit_job(source: str) -> str:
+    job_id = str(uuid.uuid4())
+    with job_lock:
+        job_store[job_id] = {'status': 'processing', 'created': time.time()}
+    threading.Thread(target=_run_job, args=(job_id, source), daemon=True).start()
+    return job_id
 
-    def _lift_to_code(self) -> None:
-        self.lifted_code = []
-        self.lifted_code.append("-- VM Devirtualized Output")
-        self.lifted_code.append(f"-- {len(self.states)} states, entry = {self.entry_state}")
-        self.lifted_code.append("")
-
-        visited = set()
-        self._emit_state(self.entry_state, visited, 0)
-
-    def _emit_state(self, state_id: str, visited: set, depth: int) -> None:
-        if state_id is None or state_id in visited:
-            if state_id in visited:
-                self.lifted_code.append("  " * depth + f"-- loop back to state {state_id}")
-            return
-        visited.add(state_id)
-        info = self.states.get(state_id)
-        if not info:
-            self.lifted_code.append("  " * depth + f"-- unknown state {state_id}")
-            return
-
-        code = info['code']
-        lifted = self._classify_and_lift(code)
-        indent = "  " * depth
-
-        if lifted:
-            self.lifted_code.append(indent + f"-- state {state_id}")
-            for line in lifted.split("\n"):
-                if line.strip():
-                    self.lifted_code.append(indent + line)
-        else:
-            self.lifted_code.append(indent + f"-- state {state_id}: raw code follows")
-            for line in code.split("\n"):
-                if line.strip():
-                    self.lifted_code.append(indent + "-- " + line.strip())
-
-        for next_id in self.transitions.get(state_id, []):
-            self._emit_state(next_id, visited, depth + 1)
-
-        next_state = info.get('next')
-        if next_state is not None:
-            for other_id, other_info in self.states.items():
-                if other_info.get('conditions') and self._state_matches_conditions(next_state, other_info['conditions']):
-                    self._emit_state(other_id, visited, depth)
-                    break
-
-    def _classify_and_lift(self, code: str) -> Optional[str]:
-        lines = []
-        for line in code.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            lifted = self._lift_single_line(line)
-            if lifted:
-                lines.append(lifted)
-            else:
-                lines.append(f"-- {line}")
-        return "\n".join(lines) if lines else None
-
-    def _lift_single_line(self, line: str) -> Optional[str]:
-        m_move = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*(\w+)\s*\[\s*(\w+)\s*\]$', line)
-        if m_move:
-            dest_tbl, dest_idx, src_tbl, src_idx = m_move.groups()
-            return f"local {dest_idx} = {src_idx}  -- MOVE"
-
-        m_loadk = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*"([^"]*)"$', line)
-        if m_loadk:
-            tbl, idx, val = m_loadk.groups()
-            return f"local {idx} = \"{val}\"  -- LOADK"
-
-        m_loadk_num = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*(-?\d+)$', line)
-        if m_loadk_num:
-            tbl, idx, val = m_loadk_num.groups()
-            return f"local {idx} = {val}  -- LOADK_NUM"
-
-        m_call = re.match(r'\{?(\w+)\s*\(\s*(\w+)\s*\)\}?$', line)
-        if m_call:
-            func, arg = m_call.groups()
-            return f"{func}({arg})  -- CALL"
-
-        m_closure = re.match(r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*(\w+)\s*\(', line)
-        if m_closure:
-            tbl, idx, factory = m_closure.groups()
-            return f"local {idx} = {factory}(...)  -- CLOSURE"
-
-        m_state = re.match(rf'{self.vm_state_var}\s*=\s*(-?\d+)$', line)
-        if m_state:
-            return f"goto state {m_state.group(1)}"
-
-        return None
+def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with job_lock:
+        _load_jobs()
+        return job_store.get(job_id)
