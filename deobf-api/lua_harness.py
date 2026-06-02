@@ -30,6 +30,7 @@ class LuaHarness:
 
         lua = LuaRuntime(unpack_returned_tuples=True)
         captured = []
+        errors = []
 
         def _capture_string(s):
             try:
@@ -39,6 +40,7 @@ class LuaHarness:
                 pass
 
         lua.globals()._py_capture = _capture_string
+        lua.globals()._py_error = lambda msg: errors.append(str(msg))
 
         lua.execute(r'''
         local _orig_type = type
@@ -118,21 +120,12 @@ class LuaHarness:
             return res
         end
 
-        local _orig_sub = string.sub
-        string.sub = function(s, i, j)
-            local res = _orig_sub(s, i, j)
-            if type(res) == "string" and #res > 20 then _py_capture(res) end
-            return res
-        end
-
         local _orig_loadstring = loadstring or load
         local _orig_load = load or loadstring
 
         loadstring = function(src, name)
             if type(src) == "string" and #src > 0 then
                 _py_capture(src)
-                local f = _orig_loadstring(src, name)
-                return f
             end
             return _orig_loadstring(src, name)
         end
@@ -140,8 +133,6 @@ class LuaHarness:
         load = function(src, name)
             if type(src) == "string" and #src > 0 then
                 _py_capture(src)
-                local f = _orig_load(src, name)
-                return f
             end
             return _orig_load(src, name)
         end
@@ -271,15 +262,15 @@ class LuaHarness:
         script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
         ''')
 
-        wrapped_source = 'return pcall(function() ' + source + ' end)'
-        
         try:
-            result = lua.execute(wrapped_source)
-        except Exception:
-            pass
+            result = lua.execute(source)
+        except Exception as e:
+            errors.append("Lua execution error: " + str(e))
 
         if captured:
             return "\n".join(captured)
+        if errors:
+            return "ERROR:\n" + "\n".join(errors)
         return None
 
     def _run_subprocess_fallback(self, source: str, timeout: int = 30) -> Optional[str]:
