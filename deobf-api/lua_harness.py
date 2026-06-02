@@ -5,21 +5,9 @@ import shutil
 import signal
 import time
 
-LOG_LIMIT = 8000
-VM_INSTRUCTION_LIMIT = 2000000
-STRING_CAPTURE_MIN = 3
-
 ENV_BOOTSTRAP = r"""
-local ORIGINAL_LOADSTRING = rawget(_G, "loadstring")
-local ORIGINAL_LOAD = rawget(_G, "load")
 local ORIGINAL_PCALL = pcall
-local ORIGINAL_CONCAT = table.concat
-local ORIGINAL_CHAR = string.char
-local ORIGINAL_TOSTRING = tostring
-local ORIGINAL_TONUMBER = tonumber
 local ORIGINAL_SETMETATABLE = setmetatable
-local ORIGINAL_GETMETATABLE = getmetatable
-local ORIGINAL_UNPACK = unpack or table.unpack
 
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
@@ -62,12 +50,7 @@ if not unpack then unpack = table.unpack or function(t, i, j) j = j or #t; i = i
 
 local _log_file = nil
 local _log_count = 0
-local _log_limit = """ + str(LOG_LIMIT) + r"""
-local _captured_strings = {}
-local _captured_count = 0
-local _captured_limit = 500
-local _best_payload = ""
-local _best_score = 0
+local _log_limit = 10000
 
 local function _log(msg)
     if _log_file and _log_count < _log_limit then
@@ -77,97 +60,46 @@ local function _log(msg)
     end
 end
 
-local function _score_source(src)
-    if type(src) ~= "string" or #src < 10 then return 0 end
-    if src:sub(1, 4) == "\27Lua" then return -1000 end
-    if src:find("^[%w_]+$") then return -100 end
-    local s = 0
-    if src:find("function") then s = s + 10 end
-    if src:find("local ") then s = s + 5 end
-    if src:find("return") then s = s + 8 end
-    if src:find("for ") or src:find("while ") or src:find("if ") then s = s + 8 end
-    if src:find("\nthen") or src:find(" then") then s = s + 5 end
-    if src:find("\nend") or src:find(" end") then s = s + 5 end
-    if src:find("game[%.:]") or src:find("game:") then s = s + 10 end
-    if #src > 1000 then s = s + 20 end
-    if #src > 5000 then s = s + 30 end
-    return s
-end
-
-local function _capture_string(s, tag)
-    if type(s) ~= "string" or #s < STRING_CAPTURE_MIN then return end
-    _captured_count = _captured_count + 1
-    if _captured_count > _captured_limit then return end
-    _captured_strings[_captured_count] = {str = s, tag = tag or "unknown"}
-    _log("[CAPTURE][" .. tag .. "][" .. _captured_count .. "] len=" .. #s .. " first=" .. s:sub(1, 150))
-    local sc = _score_source(s)
-    if sc > _best_score then
-        _best_score = sc
-        _best_payload = s
-        _log("NEW BEST PAYLOAD score=" .. sc)
-        local f = io.open(_outpath, "w")
-        if f then f:write(s); f:close() end
+local function _dump_table(t, name, depth)
+    if depth > 3 then return end
+    local count = 0
+    for k, v in pairs(t) do
+        count = count + 1
+        if count <= 500 then
+            local vtype = type(v)
+            if vtype == "string" then
+                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = \"" .. v:sub(1, 200) .. "\"")
+            elseif vtype == "table" then
+                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = {table}")
+                _dump_table(v, name .. "." .. tostring(k), depth + 1)
+            elseif vtype == "function" then
+                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = function")
+            elseif vtype == "number" then
+                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = " .. tostring(v))
+            end
+        end
     end
+    _log("[TABLE][" .. name .. "] total entries: " .. count)
 end
 
-local _25ms = function(var)
-    if type(var) == "string" and #var >= STRING_CAPTURE_MIN then
-        _capture_string(var, "_25ms")
+local _hooked_setmetatable = false
+local _original_setmetatable = ORIGINAL_SETMETATABLE
+_G.setmetatable = function(t, mt)
+    if not _hooked_setmetatable and type(t) == "table" and type(mt) == "table" then
+        if mt.__newindex and not mt.__call then
+            _hooked_setmetatable = true
+            _log("[HOOK] setmetatable with __newindex detected — wrapping for logging")
+            local orig_newindex = mt.__newindex
+            mt.__newindex = function(tbl, k, v)
+                _log("[REG_WRITE][" .. tostring(k) .. "] = " .. tostring(v):sub(1, 150))
+                return orig_newindex(tbl, k, v)
+            end
+        end
+        if mt.__call then
+            _log("[HOOK] setmetatable with __call detected")
+        end
     end
-    return var
-end
-
-function loadstring(chunk, chunkname)
-    if type(chunk) == "string" and #chunk > 0 then
-        _log("===== LOADSTRING len=" .. #chunk .. " =====")
-        _capture_string(chunk, "loadstring")
-    end
-    if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
-    return ORIGINAL_LOAD(chunk, chunkname)
-end
-
-function load(chunk, chunkname)
-    if type(chunk) == "string" and #chunk > 0 then
-        _log("===== LOAD len=" .. #chunk .. " =====")
-        _capture_string(chunk, "load")
-    end
-    if ORIGINAL_LOAD then return ORIGINAL_LOAD(chunk, chunkname) end
-    if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
-end
-
-table.concat = function(t, sep, i, j)
-    local r = ORIGINAL_CONCAT(t, sep, i, j)
-    if type(r) == "string" and #r > STRING_CAPTURE_MIN then
-        _capture_string(r, "table.concat")
-    end
-    return r
-end
-
-string.char = function(...)
-    local r = ORIGINAL_CHAR(...)
-    if select("#", ...) >= 3 and #r > STRING_CAPTURE_MIN then
-        _capture_string(r, "string.char")
-    end
-    return r
-end
-
-tostring = function(v)
-    local r = ORIGINAL_TOSTRING(v)
-    if type(r) == "string" and #r > 8 then
-        _capture_string(r, "tostring")
-    end
-    return r
-end
-
-tonumber = function(e, b)
-    local r = ORIGINAL_TONUMBER(e, b)
-    _log("[tonumber] " .. tostring(e):sub(1, 40) .. " -> " .. tostring(r))
-    return r
-end
-
-pcall = function(fn, ...)
-    _log("[pcall] " .. tostring(fn):sub(1, 80))
-    return ORIGINAL_PCALL(fn, ...)
+    return _original_setmetatable(t, mt)
 end
 
 getfenv = getfenv or function() return _G end
@@ -184,18 +116,12 @@ function Roblox.make_proxy(name)
             if k == "JobId" then return "deadbeef-1234-5678-9abc-def012345678" end
             if k == "Players" then return Roblox.make_proxy("Players") end
             if k == "Workspace" then return Roblox.make_proxy("Workspace") end
-            if k == "ReplicatedStorage" then return Roblox.make_proxy("ReplicatedStorage") end
-            if k == "ServerStorage" then return Roblox.make_proxy("ServerStorage") end
-            if k == "ServerScriptService" then return Roblox.make_proxy("ServerScriptService") end
-            if k == "Lighting" then return Roblox.make_proxy("Lighting") end
-            if k == "StarterGui" then return Roblox.make_proxy("StarterGui") end
-            if k == "CoreGui" then return Roblox.make_proxy("CoreGui") end
             if k == "GetService" then return function(self, sn)
                 if sn == "Players" then return Roblox.make_proxy("Players") end
                 if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
                 return Roblox.make_proxy(sn)
             end end
-            if k == "HttpGet" or k == "HttpGetAsync" then return function(self, url) return "--REMOTE_PAYLOAD" end end
+            if k == "HttpGet" then return function() return "--PAYLOAD" end end
             if k == "SetCore" then return function() end end
         end
         if k == "LocalPlayer" then
@@ -204,14 +130,10 @@ function Roblox.make_proxy(name)
             lmt.__index = function(_, pk)
                 if pk == "Name" then return "LocalPlayer" end
                 if pk == "UserId" then return 1 end
-                if pk == "Character" then return Roblox.make_proxy("Character") end
                 return Roblox.make_proxy(pk)
             end
             return lp
         end
-        if k == "Connect" or k == "connect" then return function(self, cb)
-            if string.find(newPath, "Button") or string.find(newPath, "Click") then pcall(cb) end
-        end end
         return Roblox.make_proxy(newPath)
     end
     mt.__newindex = function() end
@@ -253,103 +175,40 @@ delay = function(t, f) pcall(f) end
 tick = function() return 0 end
 time = function() return 0 end
 os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "" end }
-
 CFrame = {} function CFrame.new(...) return Roblox.make_proxy("CFrame") end
 Vector3 = {} function Vector3.new(...) return Roblox.make_proxy("Vector3") end
 Vector2 = {} function Vector2.new(...) return Roblox.make_proxy("Vector2") end
 Color3 = {} function Color3.new(...) return Roblox.make_proxy("Color3") end
-function Color3.fromRGB(...) return Color3.new(...) end
-function Color3.fromHSV(...) return Color3.new(...) end
 UDim2 = {} function UDim2.new(...) return Roblox.make_proxy("UDim2") end
-function UDim2.fromScale(...) return UDim2.new(...) end
-function UDim2.fromOffset(...) return UDim2.new(...) end
-UDim = {} function UDim.new(...) return Roblox.make_proxy("UDim") end
-Ray = {} function Ray.new(...) return Roblox.make_proxy("Ray") end
-BrickColor = {} function BrickColor.new(...) return Roblox.make_proxy("BrickColor") end
-function BrickColor.random() return Roblox.make_proxy("BrickColor") end
-Region3 = {} function Region3.new(...) return Roblox.make_proxy("Region3") end
-TweenInfo = {} function TweenInfo.new(...) return Roblox.make_proxy("TweenInfo") end
-Drawing = {} function Drawing.new(...) return Roblox.make_proxy("Drawing") end
 Instance = {} function Instance.new(className) return Roblox.make_proxy("Instance." .. className) end
 Enum = Roblox.make_proxy("Enum")
-
 getgenv = function() return _G end
 getrenv = function() return _G end
 checkcaller = function() return true end
 identifyexecutor = function() return "Synapse X", "2.0.0" end
 getrawmetatable = function(t) return getmetatable(t) end
-gethui = function() return Roblox.make_proxy("HUI") end
-getnilinstances = function() return {} end
-getinstances = function() return {} end
-getgc = function() return {} end
-getreg = function() return {} end
-getloadedmodules = function() return {} end
-getconnections = function() return {} end
-firesignal = function() end
-setreadonly = function() end
-isreadonly = function() return false end
 hookfunction = function(f, h) return f end
-hookmetamethod = function(o, m, f) return function() end end
 newcclosure = function(f) return f end
 islclosure = function() return true end
 iscclosure = function() return false end
-getsynasset = function() return "content" end
-request = function(o) return { StatusCode = 200, Body = "--REMOTE_PAYLOAD", Headers = {} } end
+request = function(o) return { StatusCode = 200, Body = "--PAYLOAD", Headers = {} } end
 http_request = request
-readfile = function(f) return "" end
-writefile = function(f, c) end
-appendfile = function(f, c) end
+readfile = function() return "" end
+writefile = function() end
 isfile = function() return false end
 isfolder = function() return false end
-makefolder = function() end
-delfolder = function() end
-delfile = function() end
-listfiles = function() return {} end
-rconsoleprint = function() end
-rconsoleinfo = function() end
-rconsolewarn = function() end
-rconsoleerr = function() end
-rconsoleclear = function() end
-rconsolename = function() end
-mouse1click = function() end
-mouse1press = function() end
-mouse1release = function() end
-keypress = function() end
-keyrelease = function() end
-mousemoveabs = function() end
-mousemoverel = function() end
-iswindowactive = function() return true end
 crypt = {
     encrypt = function(d) return d end, decrypt = function(d) return d end,
-    hash = function(d) return "hash" end, generatekey = function() return "key" end,
     base64encode = function(d) return d end, base64decode = function(d) return d end,
-    base64 = { encode = function(d) return d end, decode = function(d) return d end },
-    custom = { encrypt = function(d) return d end, decrypt = function(d) return d end }
 }
-syn = { request = request, crypt = crypt, queue_on_teleport = function() end, protect_gui = function() end }
-fluxus = syn
-
+syn = { request = request, crypt = crypt, queue_on_teleport = function() end }
 debug = rawget(_G, "debug") or {}
 debug.getinfo = debug.getinfo or function() return {source="mock", short_src="mock", func=function() end} end
 debug.getconstants = debug.getconstants or function() return {} end
-debug.getconstant = debug.getconstant or function() return nil end
 debug.getupvalues = debug.getupvalues or function() return {} end
-debug.getupvalue = debug.getupvalue or function() return nil end
 debug.getprotos = debug.getprotos or function() return {} end
-debug.getproto = debug.getproto or function() return nil end
-debug.getstack = debug.getstack or function() return {} end
-debug.setstack = debug.setstack or function() end
-debug.setconstant = debug.setconstant or function() end
-debug.setupvalue = debug.setupvalue or function() end
 debug.getregistry = debug.getregistry or function() return {} end
-debug.getmetatable = debug.getmetatable or function(t) return getmetatable(t) end
-debug.setmetatable = debug.setmetatable or function(t, m) return setmetatable(t, m) end
-debug.profilebegin = debug.profilebegin or function() end
-debug.profileend = debug.profileend or function() end
-debug.traceback = debug.traceback or function() return "mock traceback" end
-
 math.clamp = math.clamp or function(x, mn, mx) return math.max(mn, math.min(mx, x)) end
-
 os.execute = nil
 os.exit = nil
 os.remove = nil
@@ -359,16 +218,48 @@ package = nil
 require = function(id) return setmetatable({}, { __index = function() return function() end end, __call = function() return nil end }) end
 
 local _instruction_count = 0
-local _vm_limit = """ + str(VM_INSTRUCTION_LIMIT) + r"""
+local _vm_limit = 2000000
 local _hooked_sethook = rawget(debug, "sethook") or (rawget(_G, "debug") and rawget(_G, "debug").sethook)
 if _hooked_sethook then
     _hooked_sethook(function(event)
         _instruction_count = _instruction_count + 1
         if _instruction_count > _vm_limit then
-            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions, " .. _captured_count .. " strings captured")
+            _log("VM_LOOP_LIMIT: " .. _instruction_count)
             error("VM LOOP LIMIT REACHED", 0)
         end
     end, "", 1000)
+end
+
+local _patched_pcall = false
+local _original_pcall = ORIGINAL_PCALL
+_G.pcall = function(fn, ...)
+    if not _patched_pcall then
+        _patched_pcall = true
+        _log("[PCALL] intercepted — will dump instrTbl after execution")
+        local results = {_original_pcall(fn, ...)}
+        local ok = results[1]
+        _log("[PCALL] finished, ok=" .. tostring(ok))
+        if not ok then
+            _log("[PCALL] error: " .. tostring(results[2]))
+        end
+        _log("[DUMP] instrTbl:")
+        _dump_table(_G.instrTbl or rawget(_G, "instrTbl") or {}, "instrTbl", 0)
+        _log("[DUMP] vmStack:")
+        _dump_table(_G.vmStack or rawget(_G, "vmStack") or {}, "vmStack", 0)
+        local f = io.open(_outpath, "w")
+        if f then
+            f:write("-- instrTbl dump\n")
+            local instrTbl = _G.instrTbl or rawget(_G, "instrTbl") or {}
+            for k, v in pairs(instrTbl) do
+                if type(v) == "string" and #v > 5 then
+                    f:write(v .. "\n")
+                end
+            end
+            f:close()
+        end
+        return unpack(results)
+    end
+    return _original_pcall(fn, ...)
 end
 """
 
@@ -400,6 +291,7 @@ class LuaHarness:
             + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
             + ENV_BOOTSTRAP
             + "\n"
+            "_log(\"EXECUTION_START\")\n"
             "local ok, err = ORIGINAL_PCALL(function()\n"
             + source +
             "\nend)\n"
@@ -407,17 +299,6 @@ class LuaHarness:
             "_log(\"EXECUTION_FINISHED ok=\" .. tostring(ok))\n"
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
-            "end\n"
-            "_log(\"Strings captured: \" .. _captured_count)\n"
-            "_log(\"Best payload score: \" .. _best_score)\n"
-            "if _best_payload ~= \"\" then\n"
-            " _log(\"Best payload saved to captured.lua\")\n"
-            "else\n"
-            " local f = io.open(_outpath, \"w\")\n"
-            " if f then\n"
-            '  f:write("-- [HARNESS] No payload captured\\n-- Error: " .. tostring(err or "none") .. "\\n")\n'
-            "  f:close()\n"
-            " end\n"
             "end\n"
             "if _log_file then\n"
             " _log_file:close()\n"
@@ -469,6 +350,7 @@ class LuaHarness:
             + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
             + ENV_BOOTSTRAP
             + "\n"
+            "_log(\"EXECUTION_START\")\n"
             "local ok, err = ORIGINAL_PCALL(function()\n"
             + source +
             "\nend)\n"
@@ -476,17 +358,6 @@ class LuaHarness:
             "_log(\"EXECUTION_FINISHED ok=\" .. tostring(ok))\n"
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
-            "end\n"
-            "_log(\"Strings captured: \" .. _captured_count)\n"
-            "_log(\"Best payload score: \" .. _best_score)\n"
-            "if _best_payload ~= \"\" then\n"
-            " _log(\"Best payload saved to captured.lua\")\n"
-            "else\n"
-            " local f = io.open(_outpath, \"w\")\n"
-            " if f then\n"
-            '  f:write("-- [HARNESS] No payload captured\\n-- Error: " .. tostring(err or "none") .. "\\n")\n'
-            "  f:close()\n"
-            " end\n"
             "end\n"
             "if _log_file then\n"
             " _log_file:close()\n"
