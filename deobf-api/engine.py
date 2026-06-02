@@ -3,8 +3,9 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 
 from string_decoder import StringTableDecoder
-from devirtualiser import Devirtualiser, strip_bootstrap, substitute_string_calls, substitute_table_indices
+from devirtualiser import Devirtualiser, strip_bootstrap
 from state_machine_devirt import StateMachineLifter
+from vm_devirtualizer import VMDevirtualizer
 from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
@@ -77,29 +78,32 @@ class Unveiler:
             self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
-        self._log('devirtualise', True, 'preparing source with string resolution only')
-        resolved_source = substitute_string_calls(source, decoder)
-        resolved_source = substitute_table_indices(resolved_source, decoder)
+        self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
+        vm_devirt = VMDevirtualizer(source, decoder)
+        lifted = vm_devirt.devirtualize()
+        if lifted and self._is_valid_lua(lifted):
+            self._log('devirtualise_success', True, f'VM lifted, {len(vm_devirt.states)} states processed')
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            return lifted, 'vm_lifted', 'VM successfully devirtualized to structured code'
+        else:
+            diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'no diagnostics'
+            self._log('devirtualise', False, f'VM devirtualizer failed: {diag_msg}')
 
         self._log('devirtualise', True, 'attempting state-machine lifting via regex')
-        sm_lifter = StateMachineLifter(resolved_source, decoder.strings, offset=decoder.offset)
+        sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
         lifted = sm_lifter.lift()
-        if lifted:
-            if self._is_valid_lua(lifted):
-                self._log('devirtualise_success', True, 'state machine lifted to dispatch table')
-                renamer = VarRenamer()
-                lifted = renamer.rename(lifted)
-                lifted = beautify(lifted)
-                return lifted, 'state_machine_lifted', 'State machine lifted to dispatch table'
-            else:
-                self._log('devirtualise', False, 'lifter produced invalid Lua')
-        else:
-            diag_msg = '; '.join(sm_lifter.diagnostics) if sm_lifter.diagnostics else 'no diagnostics'
-            self._log('devirtualise', False, f'AST lifter failed: {diag_msg}')
+        if lifted and self._is_valid_lua(lifted):
+            self._log('devirtualise_success', True, 'state machine lifted')
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            return lifted, 'state_machine_lifted', 'State machine lifted'
 
         self._log('devirtualise', True, 'attempting instruction-level VM lifting')
         vm_lifter = WeAreDevsVMLifter(decoder.strings)
-        lifted = vm_lifter.lift(resolved_source)
+        lifted = vm_lifter.lift(source)
         if lifted and self._is_valid_lua(lifted):
             renamer = VarRenamer()
             lifted = renamer.rename(lifted)
@@ -140,6 +144,7 @@ class DeobfEngine:
             'var_renamer': True,
             'state_machine_lifter': True,
             'vm_instruction_lifter': True,
+            'vm_devirtualizer': True,
         }
 
     def _trace(self, stage: str, success: bool, message: str) -> None:
