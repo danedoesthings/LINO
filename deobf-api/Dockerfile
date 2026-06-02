@@ -26,11 +26,8 @@ RUN curl -L https://github.com/seaofvoices/darklua/releases/download/v0.14.0/dar
 
 WORKDIR /app
 COPY . /app/
-
 RUN pip install --no-cache-dir -r requirements.txt
-
 RUN git clone https://github.com/Renbex0/Virtual-Machine.git /app/renbex0
-
 ADD https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar /opt/unluac.jar
 ENV UNLUAC_PATH=/opt/unluac.jar
 
