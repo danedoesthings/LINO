@@ -31,22 +31,54 @@ class LuaHarness:
         lua = LuaRuntime(unpack_returned_tuples=True)
         
         captured = []
-        def _25ms(var):
+        
+        def _capture_string(s):
             try:
-                t = lua.type(var)
-                if t == 'string':
-                    s = str(var)
-                    if len(s) > 2:
-                        captured.append(s)
+                if len(s) > 2:
+                    captured.append(s)
             except:
                 pass
-            return var
         
-        lua.globals().py = lua.globals()
-        lua.globals()._capture = _25ms
+        lua.globals()._py_capture = _capture_string
         
-        lua.execute('''
+        lua.execute(r'''
         local _orig_type = type
+        
+        function _spy_make(name)
+            local t = {}
+            local mt = {
+                _is_proxy = true,
+                __type = function() return "userdata" end,
+                __tostring = function() return name end,
+                __len = function() return 2853638 end,
+                __gc = function() end,
+                __index = function(self, k)
+                    return _spy_make(name .. "." .. tostring(k))
+                end,
+                __newindex = function(self, k, v)
+                    if type(v) == "string" and #v > 2 then
+                        _py_capture(v)
+                    end
+                end,
+                __call = function(self, ...)
+                    return _spy_make(name .. "(...)")
+                end,
+                __add = function() return 0 end,
+                __sub = function() return 0 end,
+                __mul = function() return 0 end,
+                __div = function() return 0 end,
+                __mod = function() return 0 end,
+                __unm = function() return 0 end,
+                __concat = function(a, b) return tostring(a) .. tostring(b) end,
+                __lt = function() return false end,
+                __le = function() return false end,
+                __eq = function() return false end,
+                __metatable = "The metatable is locked",
+            }
+            setmetatable(t, mt)
+            return t
+        end
+        
         type = function(obj)
             local mt = getmetatable(obj)
             if mt and mt._is_proxy then
@@ -66,105 +98,85 @@ class LuaHarness:
         _G.bit32 = bit32
         _G.bit = bit32
         
-        local _spy_mt = {
-            _is_proxy = true,
-            __index = function(t, k)
-                local new_t = {}
-                setmetatable(new_t, _spy_mt)
-                return new_t
-            end,
-            __newindex = function(t, k, v)
-                py._capture(v)
-            end,
-            __call = function(t, ...)
-                local new_t = {}
-                setmetatable(new_t, _spy_mt)
-                return new_t
-            end,
-            __tostring = function() return "proxy" end,
-            __len = function() return 2853638 end,
-            __gc = function() end,
-            __add = function() return 0 end,
-            __sub = function() return 0 end,
-            __mul = function() return 0 end,
-            __div = function() return 0 end,
-            __mod = function() return 0 end,
-            __unm = function() return 0 end,
-            __concat = function(a,b) return tostring(a)..tostring(b) end,
-            __lt = function() return false end,
-            __le = function() return false end,
-            __eq = function() return false end,
-        }
-        
-        function _spy(name)
-            local t = {}
-            setmetatable(t, _spy_mt)
-            return t
-        end
-        
-        local orig_concat = table.concat
+        local _orig_concat = table.concat
         table.concat = function(t, sep, i, j)
-            local r = orig_concat(t, sep, i, j)
-            if type(r) == "string" and #r > 3 then
-                py._capture(r)
-            end
+            local r = _orig_concat(t, sep, i, j)
+            if type(r) == "string" and #r > 3 then _py_capture(r) end
             return r
         end
         
-        local orig_char = string.char
+        local _orig_char = string.char
         string.char = function(...)
-            local r = orig_char(...)
-            if select("#", ...) >= 3 then
-                py._capture(r)
-            end
+            local r = _orig_char(...)
+            if select("#", ...) >= 3 then _py_capture(r) end
             return r
         end
         
-        local orig_gsub = string.gsub
+        local _orig_gsub = string.gsub
         string.gsub = function(s, p, r, n)
-            local res = orig_gsub(s, p, r, n)
-            if type(res) == "string" and #res > 10 then
-                py._capture(res)
-            end
+            local res = _orig_gsub(s, p, r, n)
+            if type(res) == "string" and #res > 10 then _py_capture(res) end
             return res
         end
         
-        local orig_loadstring = loadstring or load
+        local _orig_sub = string.sub
+        string.sub = function(s, i, j)
+            local res = _orig_sub(s, i, j)
+            if type(res) == "string" and #res > 20 then _py_capture(res) end
+            return res
+        end
+        
+        local _orig_loadstring = loadstring or load
+        local _orig_load = load or loadstring
+        
         loadstring = function(src, name)
             if type(src) == "string" and #src > 0 then
-                py._capture(src)
+                _py_capture(src)
+                local f = _orig_loadstring(src, name)
+                return f
             end
-            return orig_loadstring(src, name)
+            return _orig_loadstring(src, name)
         end
-        load = loadstring
         
-        game = _spy("game")
-        workspace = _spy("workspace")
-        script = _spy("script")
+        load = function(src, name)
+            if type(src) == "string" and #src > 0 then
+                _py_capture(src)
+                local f = _orig_load(src, name)
+                return f
+            end
+            return _orig_load(src, name)
+        end
+        
+        game = _spy_make("game")
+        workspace = _spy_make("workspace")
+        script = _spy_make("script")
         shared = {}
-        task = { wait = function() return 1 end, spawn = function(f) pcall(f) end }
+        task = { wait = function() return 1 end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }
         wait = function() return 1 end
         spawn = function(f) pcall(f) end
-        delay = function(t,f) pcall(f) end
+        delay = function(t, f) pcall(f) end
+        tick = function() return 0 end
+        time = function() return 0 end
         os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "" end }
-        CFrame = _spy("CFrame")
-        Vector3 = _spy("Vector3")
-        Vector2 = _spy("Vector2")
-        Color3 = _spy("Color3")
-        UDim2 = _spy("UDim2")
-        Instance = _spy("Instance")
-        Enum = _spy("Enum")
-        Drawing = _spy("Drawing")
-        Ray = _spy("Ray")
-        BrickColor = _spy("BrickColor")
-        Region3 = _spy("Region3")
-        TweenInfo = _spy("TweenInfo")
+        CFrame = _spy_make("CFrame")
+        Vector3 = _spy_make("Vector3")
+        Vector2 = _spy_make("Vector2")
+        Color3 = _spy_make("Color3")
+        UDim2 = _spy_make("UDim2")
+        UDim = _spy_make("UDim")
+        Instance = _spy_make("Instance")
+        Enum = _spy_make("Enum")
+        Drawing = _spy_make("Drawing")
+        Ray = _spy_make("Ray")
+        BrickColor = _spy_make("BrickColor")
+        Region3 = _spy_make("Region3")
+        TweenInfo = _spy_make("TweenInfo")
         getgenv = function() return _G end
         getrenv = function() return _G end
         checkcaller = function() return true end
         identifyexecutor = function() return "Synapse X", "2.0.0" end
         getrawmetatable = function(t) return getmetatable(t) end
-        gethui = function() return _spy("HUI") end
+        gethui = function() return _spy_make("HUI") end
         getnilinstances = function() return {} end
         getinstances = function() return {} end
         getgc = function() return {} end
@@ -174,13 +186,13 @@ class LuaHarness:
         firesignal = function() end
         setreadonly = function() end
         isreadonly = function() return false end
-        hookfunction = function(f,h) return f end
-        hookmetamethod = function(o,m,f) return function() end end
+        hookfunction = function(f, h) return f end
+        hookmetamethod = function(o, m, f) return function() end end
         newcclosure = function(f) return f end
         islclosure = function() return true end
         iscclosure = function() return false end
         getsynasset = function() return "content" end
-        request = function(o) return { StatusCode = 200, Body = "--PAYLOAD", Headers = {} } end
+        request = function(o) return { StatusCode = 200, Body = "--REMOTE_PAYLOAD", Headers = {} } end
         http_request = request
         readfile = function() return "" end
         writefile = function() end
@@ -197,13 +209,35 @@ class LuaHarness:
         rconsoleerr = function() end
         rconsoleclear = function() end
         rconsolename = function() end
-        setclipboard = function(s) end
-        toclipboard = function(s) end
-        crypt = { encrypt = function(d) return d end, decrypt = function(d) return d end, hash = function(d) return "hash" end, generatekey = function() return "key" end, base64encode = function(d) return d end, base64decode = function(d) return d end, base64 = { encode = function(d) return d end, decode = function(d) return d end }, custom = { encrypt = function(d) return d end, decrypt = function(d) return d end } }
-        syn = { request = request, crypt = crypt, queue_on_teleport = function() end, protect_gui = function() end }
+        mouse1click = function() end
+        mouse1press = function() end
+        mouse1release = function() end
+        keypress = function() end
+        keyrelease = function() end
+        mousemoveabs = function() end
+        mousemoverel = function() end
+        iswindowactive = function() return true end
+        setclipboard = function() end
+        toclipboard = function() end
+        crypt = {
+            encrypt = function(d) return d end,
+            decrypt = function(d) return d end,
+            hash = function(d) return "hash" end,
+            generatekey = function() return "key" end,
+            base64encode = function(d) return d end,
+            base64decode = function(d) return d end,
+            base64 = { encode = function(d) return d end, decode = function(d) return d end },
+            custom = { encrypt = function(d) return d end, decrypt = function(d) return d end },
+        }
+        syn = {
+            request = request,
+            crypt = crypt,
+            queue_on_teleport = function() end,
+            protect_gui = function() end,
+        }
         fluxus = syn
         debug = {
-            getinfo = function() return {source="mock", short_src="mock", func=function() end} end,
+            getinfo = function() return { source = "mock", short_src = "mock", func = function() end } end,
             getconstants = function() return {} end,
             getconstant = function() return nil end,
             getupvalues = function() return {} end,
@@ -216,22 +250,19 @@ class LuaHarness:
             setupvalue = function() end,
             getregistry = function() return {} end,
             getmetatable = function(t) return getmetatable(t) end,
-            setmetatable = function(t,m) return setmetatable(t,m) end,
+            setmetatable = function(t, m) return setmetatable(t, m) end,
             profilebegin = function() end,
             profileend = function() end,
-            traceback = function() return "mock" end,
+            traceback = function() return "mock traceback" end,
         }
-        require = function(id) return _spy("module") end
+        math.clamp = math.clamp or function(x, mn, mx) return math.max(mn, math.min(mx, x)) end
+        require = function(id) return _spy_make("module") end
         newproxy = function(addmeta)
-            local t = {}
-            local mt = { _is_proxy = true, __index = function() return nil end, __newindex = function() end, __metatable = "The metatable is locked" }
-            if addmeta then setmetatable(t, mt) end
-            return t
+            return _spy_make("newproxy_result")
         end
-        setfenv = setfenv or function(f,e) return f end
+        setfenv = setfenv or function(f, e) return f end
         getfenv = getfenv or function() return _G end
         unpack = unpack or table.unpack
-        math.clamp = math.clamp or function(x,mn,mx) return math.max(mn, math.min(mx, x)) end
         os.execute = nil
         os.exit = nil
         os.remove = nil
@@ -242,7 +273,9 @@ class LuaHarness:
         ''')
         
         try:
-            lua.execute(source)
+            chunk = lua.eval(source)
+            if chunk is not None:
+                pass
         except Exception:
             pass
         
