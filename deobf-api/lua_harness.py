@@ -5,269 +5,14 @@ import shutil
 import signal
 import time
 
-ENV_BOOTSTRAP = r"""
-local ORIGINAL_PCALL = pcall
-local ORIGINAL_SETMETATABLE = setmetatable
-
-local bit32 = rawget(_G, "bit32")
-if not bit32 then
-    local function bxor(a,b) local r,m=0,1; while a>0 or b>0 do local ab,bb=a%2,b%2; if ab~=bb then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end
-    local function band(a,b) local r,m=0,1; while a>0 and b>0 do if a%2+b%2==2 then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end
-    local function bor(a,b) local r,m=0,1; while a>0 or b>0 do if a%2+b%2>0 then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end
-    bit32 = {
-        bxor = bxor, band = band, bor = bor,
-        lshift = function(v,n) return math.floor(v*(2^n))%4294967296 end,
-        rshift = function(v,n) return math.floor(v/(2^n)) end,
-        arshift = function(v,n) return math.floor(v/(2^n)) end
-    }
-end
-_G.bit32 = bit32
-_G.bit = bit32
-
-if not newproxy then
-    local _userdata_counter = 0
-    newproxy = function(addmeta)
-        _userdata_counter = _userdata_counter + 1
-        local ud = {}
-        local name = "userdata_" .. _userdata_counter
-        setmetatable(ud, { __type = function() return "userdata" end, __tostring = function() return name end })
-        if addmeta then
-            setmetatable(ud, {
-                __index = function() return nil end, __newindex = function() end,
-                __type = function() return "userdata" end, __tostring = function() return name end,
-                __metatable = "The metatable is locked",
-            })
-        end
-        return ud
-    end
-    type = function(obj)
-        local mt = getmetatable(obj)
-        if mt and mt.__type then return mt.__type() end
-        return _G.type(obj)
-    end
-end
-if not unpack then unpack = table.unpack or function(t, i, j) j = j or #t; i = i or 1; if i > j then return end; return t[i], unpack(t, i+1, j) end end
-
-local _log_file = nil
-local _log_count = 0
-local _log_limit = 10000
-
-local function _log(msg)
-    if _log_file and _log_count < _log_limit then
-        _log_file:write(msg .. "\n")
-        _log_file:flush()
-        _log_count = _log_count + 1
-    end
-end
-
-local function _dump_table(t, name, depth)
-    if depth > 3 then return end
-    local count = 0
-    for k, v in pairs(t) do
-        count = count + 1
-        if count <= 500 then
-            local vtype = type(v)
-            if vtype == "string" then
-                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = \"" .. v:sub(1, 200) .. "\"")
-            elseif vtype == "table" then
-                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = {table}")
-                _dump_table(v, name .. "." .. tostring(k), depth + 1)
-            elseif vtype == "function" then
-                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = function")
-            elseif vtype == "number" then
-                _log("[TABLE][" .. name .. "][" .. tostring(k) .. "] = " .. tostring(v))
-            end
-        end
-    end
-    _log("[TABLE][" .. name .. "] total entries: " .. count)
-end
-
-local _hooked_setmetatable = false
-local _original_setmetatable = ORIGINAL_SETMETATABLE
-_G.setmetatable = function(t, mt)
-    if not _hooked_setmetatable and type(t) == "table" and type(mt) == "table" then
-        if mt.__newindex and not mt.__call then
-            _hooked_setmetatable = true
-            _log("[HOOK] setmetatable with __newindex detected — wrapping for logging")
-            local orig_newindex = mt.__newindex
-            mt.__newindex = function(tbl, k, v)
-                _log("[REG_WRITE][" .. tostring(k) .. "] = " .. tostring(v):sub(1, 150))
-                return orig_newindex(tbl, k, v)
-            end
-        end
-        if mt.__call then
-            _log("[HOOK] setmetatable with __call detected")
-        end
-    end
-    return _original_setmetatable(t, mt)
-end
-
-getfenv = getfenv or function() return _G end
-setfenv = setfenv or function(f, e) return f end
-
-local Roblox = {}
-function Roblox.make_proxy(name)
-    local proxy = newproxy(true)
-    local mt = getmetatable(proxy)
-    mt.__index = function(t, k)
-        local newPath = name .. "." .. tostring(k)
-        if name == "game" then
-            if k == "PlaceId" then return 123456 end
-            if k == "JobId" then return "deadbeef-1234-5678-9abc-def012345678" end
-            if k == "Players" then return Roblox.make_proxy("Players") end
-            if k == "Workspace" then return Roblox.make_proxy("Workspace") end
-            if k == "GetService" then return function(self, sn)
-                if sn == "Players" then return Roblox.make_proxy("Players") end
-                if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
-                return Roblox.make_proxy(sn)
-            end end
-            if k == "HttpGet" then return function() return "--PAYLOAD" end end
-            if k == "SetCore" then return function() end end
-        end
-        if k == "LocalPlayer" then
-            local lp = Roblox.make_proxy("LocalPlayer")
-            local lmt = getmetatable(lp)
-            lmt.__index = function(_, pk)
-                if pk == "Name" then return "LocalPlayer" end
-                if pk == "UserId" then return 1 end
-                return Roblox.make_proxy(pk)
-            end
-            return lp
-        end
-        return Roblox.make_proxy(newPath)
-    end
-    mt.__newindex = function() end
-    mt.__call = function(t, ...) return Roblox.make_proxy(name .. "()") end
-    mt.__tostring = function() return name end
-    mt.__len = function() return 2853638 end
-    mt.__gc = function() end
-    mt.__add = function() return 0 end
-    mt.__sub = function() return 0 end
-    mt.__mul = function() return 0 end
-    mt.__div = function() return 0 end
-    mt.__mod = function() return 0 end
-    mt.__unm = function() return 0 end
-    mt.__concat = function(a, b) return tostring(a) .. tostring(b) end
-    mt.__lt = function() return false end
-    mt.__le = function() return false end
-    mt.__eq = function() return false end
-    return proxy
-end
-
-local _game = Roblox.make_proxy("game")
-rawset(_game, "GetService", function(self, sn)
-    if sn == "Players" then return Roblox.make_proxy("Players") end
-    if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
-    return Roblox.make_proxy(sn)
-end)
-rawset(_game, "Players", Roblox.make_proxy("Players"))
-rawset(_game, "Workspace", Roblox.make_proxy("Workspace"))
-rawset(_game, "PlaceId", 123456)
-rawset(_game, "JobId", "deadbeef-1234-5678-9abc-def012345678")
-game = _game
-workspace = Roblox.make_proxy("workspace")
-script = Roblox.make_proxy("script")
-shared = {}
-task = { wait = function() end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end }
-wait = function() end
-spawn = function(f) pcall(f) end
-delay = function(t, f) pcall(f) end
-tick = function() return 0 end
-time = function() return 0 end
-os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "" end }
-CFrame = {} function CFrame.new(...) return Roblox.make_proxy("CFrame") end
-Vector3 = {} function Vector3.new(...) return Roblox.make_proxy("Vector3") end
-Vector2 = {} function Vector2.new(...) return Roblox.make_proxy("Vector2") end
-Color3 = {} function Color3.new(...) return Roblox.make_proxy("Color3") end
-UDim2 = {} function UDim2.new(...) return Roblox.make_proxy("UDim2") end
-Instance = {} function Instance.new(className) return Roblox.make_proxy("Instance." .. className) end
-Enum = Roblox.make_proxy("Enum")
-getgenv = function() return _G end
-getrenv = function() return _G end
-checkcaller = function() return true end
-identifyexecutor = function() return "Synapse X", "2.0.0" end
-getrawmetatable = function(t) return getmetatable(t) end
-hookfunction = function(f, h) return f end
-newcclosure = function(f) return f end
-islclosure = function() return true end
-iscclosure = function() return false end
-request = function(o) return { StatusCode = 200, Body = "--PAYLOAD", Headers = {} } end
-http_request = request
-readfile = function() return "" end
-writefile = function() end
-isfile = function() return false end
-isfolder = function() return false end
-crypt = {
-    encrypt = function(d) return d end, decrypt = function(d) return d end,
-    base64encode = function(d) return d end, base64decode = function(d) return d end,
-}
-syn = { request = request, crypt = crypt, queue_on_teleport = function() end }
-debug = rawget(_G, "debug") or {}
-debug.getinfo = debug.getinfo or function() return {source="mock", short_src="mock", func=function() end} end
-debug.getconstants = debug.getconstants or function() return {} end
-debug.getupvalues = debug.getupvalues or function() return {} end
-debug.getprotos = debug.getprotos or function() return {} end
-debug.getregistry = debug.getregistry or function() return {} end
-math.clamp = math.clamp or function(x, mn, mx) return math.max(mn, math.min(mx, x)) end
-os.execute = nil
-os.exit = nil
-os.remove = nil
-os.rename = nil
-os.getenv = nil
-package = nil
-require = function(id) return setmetatable({}, { __index = function() return function() end end, __call = function() return nil end }) end
-
-local _instruction_count = 0
-local _vm_limit = 2000000
-local _hooked_sethook = rawget(debug, "sethook") or (rawget(_G, "debug") and rawget(_G, "debug").sethook)
-if _hooked_sethook then
-    _hooked_sethook(function(event)
-        _instruction_count = _instruction_count + 1
-        if _instruction_count > _vm_limit then
-            _log("VM_LOOP_LIMIT: " .. _instruction_count)
-            error("VM LOOP LIMIT REACHED", 0)
-        end
-    end, "", 1000)
-end
-
-local _patched_pcall = false
-local _original_pcall = ORIGINAL_PCALL
-_G.pcall = function(fn, ...)
-    if not _patched_pcall then
-        _patched_pcall = true
-        _log("[PCALL] intercepted — will dump instrTbl after execution")
-        local results = {_original_pcall(fn, ...)}
-        local ok = results[1]
-        _log("[PCALL] finished, ok=" .. tostring(ok))
-        if not ok then
-            _log("[PCALL] error: " .. tostring(results[2]))
-        end
-        _log("[DUMP] instrTbl:")
-        _dump_table(_G.instrTbl or rawget(_G, "instrTbl") or {}, "instrTbl", 0)
-        _log("[DUMP] vmStack:")
-        _dump_table(_G.vmStack or rawget(_G, "vmStack") or {}, "vmStack", 0)
-        local f = io.open(_outpath, "w")
-        if f then
-            f:write("-- instrTbl dump\n")
-            local instrTbl = _G.instrTbl or rawget(_G, "instrTbl") or {}
-            for k, v in pairs(instrTbl) do
-                if type(v) == "string" and #v > 5 then
-                    f:write(v .. "\n")
-                end
-            end
-            f:close()
-        end
-        return unpack(results)
-    end
-    return _original_pcall(fn, ...)
-end
-"""
+HARNESS_LUAU = os.path.join(os.path.dirname(os.path.abspath(__file__)), "httplog_harness.luau")
 
 
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
         self.unluac_path = unluac_path
         self.available = self._find_lua() is not None
+        self.lune_available = self._find_lune() is not None
 
     @staticmethod
     def _find_lua() -> str | None:
@@ -276,7 +21,57 @@ class LuaHarness:
                 return candidate
         return None
 
+    @staticmethod
+    def _find_lune() -> str | None:
+        if shutil.which('lune'):
+            return 'lune'
+        return None
+
     def run(self, source: str, timeout: int = 30) -> str | None:
+        if self.lune_available and os.path.isfile(HARNESS_LUAU):
+            return self._run_lune(source, timeout)
+        if self.available:
+            return self._run_lua(source, timeout)
+        return None
+
+    def _run_lune(self, source: str, timeout: int = 30) -> str | None:
+        tmpdir = tempfile.mkdtemp()
+        input_path = os.path.join(tmpdir, "input.lua")
+        output_path = os.path.join(tmpdir, "captured.lua")
+        log_path = os.path.join(tmpdir, "log.txt")
+
+        try:
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            proc = subprocess.Popen(
+                ["lune", "run", HARNESS_LUAU, input_path, output_path, log_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True, cwd=tmpdir
+            )
+            try:
+                proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except Exception:
+                    pass
+
+            if os.path.exists(output_path):
+                with open(output_path, "r", encoding="utf-8") as f:
+                    captured = f.read().strip()
+                if captured:
+                    return captured
+            return None
+        except Exception:
+            return None
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _run_lua(self, source: str, timeout: int = 30) -> str | None:
         if not self.available:
             return None
         tmpdir = tempfile.mkdtemp()
@@ -289,20 +84,28 @@ class LuaHarness:
         harness_code = (
             'local _outpath = "' + output_path_fixed + '"\n'
             + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
-            + ENV_BOOTSTRAP
-            + "\n"
-            "_log(\"EXECUTION_START\")\n"
-            "local ok, err = ORIGINAL_PCALL(function()\n"
+            + 'local _r = {}\n'
+            + 'local _c = 0\n'
+            + 'local function _25ms(var)\n'
+            + '  if type(var) == "string" then\n'
+            + '    _c = _c + 1\n'
+            + '    _r[_c] = var\n'
+            + '    _log_file:write("[25ms][" .. _c .. "] " .. var:sub(1, 150) .. "\\n")\n'
+            + '  end\n'
+            + '  return var\n'
+            + 'end\n'
+            + 'local _real_pcall = pcall\n'
+            + 'local ok, err = _real_pcall(function()\n'
             + source +
-            "\nend)\n"
-            "\n"
-            "_log(\"EXECUTION_FINISHED ok=\" .. tostring(ok))\n"
-            "if not ok then\n"
-            ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
-            "end\n"
-            "if _log_file then\n"
-            " _log_file:close()\n"
-            "end\n"
+            '\nend)\n'
+            + '_log_file:write("EXECUTION_FINISHED ok=" .. tostring(ok) .. "\\n")\n'
+            + 'if not ok then _log_file:write("RUNTIME_ERROR: " .. tostring(err) .. "\\n") end\n'
+            + '_log_file:write("Strings captured: " .. _c .. "\\n")\n'
+            + 'if _c > 0 then\n'
+            + '  local f = io.open(_outpath, "w")\n'
+            + '  if f then f:write(table.concat(_r, "\\n")); f:close() end\n'
+            + 'end\n'
+            + 'if _log_file then _log_file:close() end\n'
         )
 
         try:
@@ -327,7 +130,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
-                if captured and not captured.startswith("-- [HARNESS]"):
+                if captured:
                     return captured
             return None
         except Exception:
@@ -336,51 +139,27 @@ class LuaHarness:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
-        if not self.available:
-            return {'captured': None, 'trace': 'lua not found', 'error': None}
+        if self.lune_available and os.path.isfile(HARNESS_LUAU):
+            return self._run_lune_with_trace(source, timeout)
+        result = {'captured': self.run(source, timeout), 'trace': '', 'error': None, 'stdout': '', 'stderr': '', 'timed_out': False}
+        return result
+
+    def _run_lune_with_trace(self, source: str, timeout: int = 30) -> dict:
         tmpdir = tempfile.mkdtemp()
-        harness_path = os.path.join(tmpdir, "harness.lua")
+        input_path = os.path.join(tmpdir, "input.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
         log_path = os.path.join(tmpdir, "log.txt")
-        output_path_fixed = output_path.replace('\\', '/')
-        log_path_fixed = log_path.replace('\\', '/')
 
-        harness_code = (
-            'local _outpath = "' + output_path_fixed + '"\n'
-            + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
-            + ENV_BOOTSTRAP
-            + "\n"
-            "_log(\"EXECUTION_START\")\n"
-            "local ok, err = ORIGINAL_PCALL(function()\n"
-            + source +
-            "\nend)\n"
-            "\n"
-            "_log(\"EXECUTION_FINISHED ok=\" .. tostring(ok))\n"
-            "if not ok then\n"
-            ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
-            "end\n"
-            "if _log_file then\n"
-            " _log_file:close()\n"
-            "end\n"
-        )
-
-        result = {
-            'captured': None,
-            'trace': '',
-            'error': None,
-            'stdout': '',
-            'stderr': '',
-            'timed_out': False,
-        }
+        result = {'captured': None, 'trace': '', 'error': None, 'stdout': '', 'stderr': '', 'timed_out': False}
 
         try:
-            with open(harness_path, "w", encoding="utf-8") as f:
-                f.write(harness_code)
-            lua_bin = self._find_lua()
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
             proc = subprocess.Popen(
-                [lua_bin, harness_path],
+                ["lune", "run", HARNESS_LUAU, input_path, output_path, log_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                start_new_session=True
+                start_new_session=True, cwd=tmpdir
             )
             try:
                 stdout_b, stderr_b = proc.communicate(timeout=timeout)
@@ -404,10 +183,8 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
-                if captured and not captured.startswith("-- [HARNESS]"):
+                if captured:
                     result['captured'] = captured
-                else:
-                    result['error'] = captured
 
         except Exception as e:
             result['error'] = str(e)
