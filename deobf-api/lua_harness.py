@@ -40,7 +40,6 @@ class LuaHarness:
                 pass
 
         lua.globals()._py_capture = _capture_string
-        lua.globals()._py_error = lambda msg: errors.append(str(msg))
 
         lua.execute(r'''
         local _orig_type = type
@@ -52,7 +51,6 @@ class LuaHarness:
                 __type = function() return "userdata" end,
                 __tostring = function() return name end,
                 __len = function() return 2853638 end,
-                __gc = function() end,
                 __index = function(self, k)
                     return _spy_make(name .. "." .. tostring(k))
                 end,
@@ -127,14 +125,22 @@ class LuaHarness:
             if type(src) == "string" and #src > 0 then
                 _py_capture(src)
             end
-            return _orig_loadstring(src, name)
+            if _orig_loadstring then
+                return _orig_loadstring(src, name)
+            end
+            return _orig_load(src, name)
         end
 
         load = function(src, name)
             if type(src) == "string" and #src > 0 then
                 _py_capture(src)
             end
-            return _orig_load(src, name)
+            if _orig_load then
+                return _orig_load(src, name)
+            end
+            if _orig_loadstring then
+                return _orig_loadstring(src, name)
+            end
         end
 
         game = _spy_make("game")
@@ -262,8 +268,13 @@ class LuaHarness:
         script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
         ''')
 
+        stripped = source.strip()
+        if stripped.startswith('return'):
+            stripped = stripped[len('return'):].strip()
+        executable_source = 'local _fn = (' + stripped + ')\nif type(_fn) == "function" then _fn() end'
+        
         try:
-            result = lua.execute(source)
+            lua.execute(executable_source)
         except Exception as e:
             errors.append("Lua execution error: " + str(e))
 
