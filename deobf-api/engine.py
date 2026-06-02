@@ -13,6 +13,12 @@ from lune_pipeline import run_lune_darklua_pipeline
 from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
 from instruction_decoder import WeAreDevsVMLifter
 
+try:
+    from luaparser import ast as lua_ast
+    HAS_LUAPARSER = True
+except ImportError:
+    HAS_LUAPARSER = False
+
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
 
@@ -38,6 +44,15 @@ class Unveiler:
 
     def _log(self, stage: str, success: bool, message: str) -> None:
         self.trace.append({'stage': stage, 'success': success, 'message': message, 'timestamp': time.time()})
+
+    def _is_valid_lua(self, code: str) -> bool:
+        if not HAS_LUAPARSER:
+            return True
+        try:
+            lua_ast.parse(code)
+            return True
+        except Exception:
+            return False
 
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
@@ -66,23 +81,34 @@ class Unveiler:
         vm_lifter = WeAreDevsVMLifter(decoder.strings)
         lifted = vm_lifter.lift(source)
         if lifted:
-            renamer = VarRenamer()
-            lifted = renamer.rename(lifted)
-            lifted = beautify(lifted)
-            self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
-            return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
+            if not self._is_valid_lua(lifted):
+                self._log('devirtualise', False, 'VM lifter produced invalid Lua, falling back')
+            else:
+                renamer = VarRenamer()
+                lifted = renamer.rename(lifted)
+                lifted = beautify(lifted)
+                self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+                return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('devirtualise', True, 'attempting state machine unflattening')
         devirt = Devirtualiser(decoder)
         processed = devirt.process(source)
-        sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
-        lifted_result = sm_lifter.lift()
-        if lifted_result:
-            renamer = VarRenamer()
-            final_code = renamer.rename(lifted_result)
-            final_code = beautify(final_code)
-            self._log('devirtualise_success', True, 'state machine unflattened')
-            return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
+        if not self._is_valid_lua(processed):
+            self._log('devirtualise', False, 'devirtualiser produced invalid Lua, skipping fold and beautify')
+            sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
+            lifted_result = sm_lifter.lift()
+            if lifted_result:
+                self._log('devirtualise_success', True, 'state machine unflattened (without fold)')
+                return lifted_result, 'state_machine_lifted', 'State machine unflattened (syntax errors present)'
+        else:
+            sm_lifter = StateMachineLifter(processed, decoder.strings, offset=decoder.offset)
+            lifted_result = sm_lifter.lift()
+            if lifted_result:
+                renamer = VarRenamer()
+                final_code = renamer.rename(lifted_result)
+                final_code = beautify(final_code)
+                self._log('devirtualise_success', True, 'state machine unflattened')
+                return final_code, 'state_machine_lifted', 'State machine successfully unflattened'
 
         self._log('devirtualise', True, 'falling back to static devirtualisation')
         if processed:
