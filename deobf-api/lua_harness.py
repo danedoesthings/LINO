@@ -4,9 +4,8 @@ import os
 import shutil
 import signal
 import time
-import re
 
-LOG_LIMIT = 10000
+LOG_LIMIT = 8000
 VM_INSTRUCTION_LIMIT = 2000000
 
 ENV_BOOTSTRAP = r"""
@@ -16,6 +15,8 @@ local ORIGINAL_PCALL = pcall
 local ORIGINAL_CONCAT = table.concat
 local ORIGINAL_CHAR = string.char
 local ORIGINAL_UNPACK = unpack or table.unpack
+local ORIGINAL_SETMETATABLE = setmetatable
+local ORIGINAL_GETMETATABLE = getmetatable
 
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
@@ -64,12 +65,10 @@ if not unpack then unpack = table.unpack or function(t, i, j) j = j or #t; i = i
 local _log_file = nil
 local _log_count = 0
 local _log_limit = """ + str(LOG_LIMIT) + r"""
-local _captured_buffers = {}
-local _buffer_count = 0
-local _state_count = 0
-local _state_limit = 3000
+local _best_payload = ""
+local _best_score = 0
 
-function _log(msg)
+local function _log(msg)
     if _log_file and _log_count < _log_limit then
         _log_file:write(msg .. "\n")
         _log_file:flush()
@@ -77,63 +76,41 @@ function _log(msg)
     end
 end
 
-function _save_buffer(data, tag)
-    _buffer_count = _buffer_count + 1
-    if _buffer_count == 1 then
-        _log("[BUFFER][" .. tag .. "][" .. _buffer_count .. "] len=" .. #data .. " first=" .. data:sub(1, 200))
+local function _score_source(src)
+    if type(src) ~= "string" then return 0 end
+    local s = 0
+    if src:find("^[%w_]+$") then s = s - 100 end
+    if src:find("function") then s = s + 10 end
+    if src:find("local ") then s = s + 5 end
+    if src:find("return") then s = s + 8 end
+    if src:find("for ") then s = s + 8 end
+    if src:find("while ") then s = s + 8 end
+    if src:find("if ") then s = s + 8 end
+    if src:find("\nthen") or src:find(" then") then s = s + 5 end
+    if src:find("\nend") or src:find(" end") then s = s + 5 end
+    if src:find("game[%.:]") or src:find("game:") then s = s + 10 end
+    if src:find("print") then s = s + 1 end
+    if #src > 1000 then s = s + 20 end
+    if #src > 5000 then s = s + 30 end
+    return s
+end
+
+local function _save_payload(src, tag)
+    local sc = _score_source(src)
+    _log("[PAYLOAD][" .. tag .. "] len=" .. #src .. " score=" .. sc)
+    if sc > _best_score then
+        _best_score = sc
+        _best_payload = src
+        _log("NEW BEST PAYLOAD score=" .. sc)
         local f = io.open(_outpath, "w")
-        if f then f:write(data); f:close() end
+        if f then f:write(src); f:close() end
     end
-end
-
-function _log_state(state)
-    _state_count = _state_count + 1
-    if _state_count <= _state_limit then
-        if _state_count <= 10 or _state_count % 100 == 0 then
-            _log("[STATE][" .. _state_count .. "] -> " .. state)
-        end
-    end
-end
-
-function _log_reg_write(tbl_name, key, value)
-    if _state_count > _state_limit then return end
-    local vtype = type(value)
-    local vstr
-    if vtype == "string" then
-        vstr = value:sub(1, 120)
-        if #value > 20 then _save_buffer(value, "reg_string") end
-    elseif vtype == "number" then
-        vstr = tostring(value)
-    elseif vtype == "function" then
-        vstr = "function"
-    elseif vtype == "table" then
-        vstr = "table"
-    elseif vtype == "nil" then
-        vstr = "nil"
-    else
-        vstr = vtype
-    end
-    _log("[REG][" .. tbl_name .. "][" .. tostring(key) .. "] = " .. vstr .. " (" .. vtype .. ")")
-end
-
-table.concat = function(t, sep, i, j)
-    local r = ORIGINAL_CONCAT(t, sep, i, j)
-    if type(r) == "string" and #r > 100 then
-        _save_buffer(r, "concat")
-    end
-    return r
-end
-
-string.char = function(...)
-    local r = ORIGINAL_CHAR(...)
-    local argc = select("#", ...)
-    if argc >= 4 and #r > 50 then _save_buffer(r, "char") end
-    return r
 end
 
 function loadstring(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _save_buffer(chunk, "loadstring")
+        _log("===== LOADSTRING CAPTURED len=" .. #chunk .. " =====")
+        _save_payload(chunk, "loadstring")
     end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
     return ORIGINAL_LOAD(chunk, chunkname)
@@ -141,10 +118,29 @@ end
 
 function load(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _save_buffer(chunk, "load")
+        _log("===== LOAD CAPTURED len=" .. #chunk .. " =====")
+        _save_payload(chunk, "load")
     end
     if ORIGINAL_LOAD then return ORIGINAL_LOAD(chunk, chunkname) end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
+end
+
+table.concat = function(t, sep, i, j)
+    local r = ORIGINAL_CONCAT(t, sep, i, j)
+    if type(r) == "string" and #r > 100 then
+        _log("[CONCAT] len=" .. #r .. " first=" .. r:sub(1, 150))
+        _save_payload(r, "concat")
+    end
+    return r
+end
+
+string.char = function(...)
+    local r = ORIGINAL_CHAR(...)
+    if select("#", ...) >= 4 and #r > 50 then
+        _log("[CHAR] len=" .. #r)
+        _save_payload(r, "char")
+    end
+    return r
 end
 
 getfenv = getfenv or function() return _G end
@@ -310,27 +306,24 @@ crypt = {
 syn = { request = request, crypt = crypt, queue_on_teleport = function() end, protect_gui = function() end }
 fluxus = syn
 
-if debug then
-    debug.getinfo = debug.getinfo or function() return {source="mock", short_src="mock", func=function() end} end
-    debug.getconstants = debug.getconstants or function() return {} end
-    debug.getconstant = debug.getconstant or function() return nil end
-    debug.getupvalues = debug.getupvalues or function() return {} end
-    debug.getupvalue = debug.getupvalue or function() return nil end
-    debug.getprotos = debug.getprotos or function() return {} end
-    debug.getproto = debug.getproto or function() return nil end
-    debug.getstack = debug.getstack or function() return {} end
-    debug.setstack = debug.setstack or function() end
-    debug.setconstant = debug.setconstant or function() end
-    debug.setupvalue = debug.setupvalue or function() end
-    debug.getregistry = debug.getregistry or function() return {} end
-    debug.getmetatable = debug.getmetatable or function(t) return getmetatable(t) end
-    debug.setmetatable = debug.setmetatable or function(t, m) return setmetatable(t, m) end
-    debug.profilebegin = debug.profilebegin or function() end
-    debug.profileend = debug.profileend or function() end
-    debug.traceback = debug.traceback or function() return "mock traceback" end
-else
-    debug = {}
-end
+debug = rawget(_G, "debug") or {}
+debug.getinfo = debug.getinfo or function() return {source="mock", short_src="mock", func=function() end} end
+debug.getconstants = debug.getconstants or function() return {} end
+debug.getconstant = debug.getconstant or function() return nil end
+debug.getupvalues = debug.getupvalues or function() return {} end
+debug.getupvalue = debug.getupvalue or function() return nil end
+debug.getprotos = debug.getprotos or function() return {} end
+debug.getproto = debug.getproto or function() return nil end
+debug.getstack = debug.getstack or function() return {} end
+debug.setstack = debug.setstack or function() end
+debug.setconstant = debug.setconstant or function() end
+debug.setupvalue = debug.setupvalue or function() end
+debug.getregistry = debug.getregistry or function() return {} end
+debug.getmetatable = debug.getmetatable or function(t) return getmetatable(t) end
+debug.setmetatable = debug.setmetatable or function(t, m) return setmetatable(t, m) end
+debug.profilebegin = debug.profilebegin or function() end
+debug.profileend = debug.profileend or function() end
+debug.traceback = debug.traceback or function() return "mock traceback" end
 
 math.clamp = math.clamp or function(x, mn, mx) return math.max(mn, math.min(mx, x)) end
 
@@ -349,7 +342,7 @@ if _hooked_sethook then
     _hooked_sethook(function(event)
         _instruction_count = _instruction_count + 1
         if _instruction_count > _vm_limit then
-            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions, " .. _buffer_count .. " buffers")
+            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions")
             error("VM LOOP LIMIT REACHED", 0)
         end
     end, "", 1000)
@@ -369,33 +362,9 @@ class LuaHarness:
                 return candidate
         return None
 
-    def _instrument_source(self, source: str) -> str:
-        """Inject _log_reg_write and _log_state calls into the VM source."""
-        # Hook instrTbl[key] = value  ->  instrTbl[key] = (_log_reg_write("instrTbl", key, value) or value)
-        source = re.sub(
-            r'\b(instrTbl)\s*\[\s*(.+?)\s*\]\s*=\s*(.+?)(?=\n|;|$)',
-            r'\1[ \2 ] = (_log_reg_write("\1", \2, \3) or \3)',
-            source
-        )
-        # Hook vmStack[key] = value
-        source = re.sub(
-            r'\b(vmStack)\s*\[\s*(.+?)\s*\]\s*=\s*(.+?)(?=\n|;|$)',
-            r'\1[ \2 ] = (_log_reg_write("\1", \2, \3) or \3)',
-            source
-        )
-        # Hook vmState = <number> but only as a standalone assignment
-        source = re.sub(
-            r'^(\s*)(vmState)\s*=\s*(-?\d+)(\s*)$',
-            r'\1\2 = (_log_state(\3) or \3)\4',
-            source,
-            flags=re.MULTILINE
-        )
-        return source
-
-    def run(self, source: str, timeout: int = 20) -> str | None:
+    def run(self, source: str, timeout: int = 30) -> str | None:
         if not self.available:
             return None
-        source = self._instrument_source(source)
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
@@ -416,8 +385,15 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
-            "_log(\"State transitions: \" .. _state_count)\n"
-            "_log(\"Buffers captured: \" .. _buffer_count)\n"
+            "if _best_payload ~= \"\" then\n"
+            " _log(\"Best payload saved, score=\" .. _best_score)\n"
+            "else\n"
+            " local f = io.open(_outpath, \"w\")\n"
+            " if f then\n"
+            '  f:write("-- [HARNESS] No payload captured\\n-- Error: " .. tostring(err or "none") .. "\\n")\n'
+            "  f:close()\n"
+            " end\n"
+            "end\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
@@ -445,7 +421,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
-                if captured and not captured.startswith("-- [HARNESS ERROR]"):
+                if captured and not captured.startswith("-- [HARNESS]"):
                     return captured
             return None
         except Exception:
@@ -456,7 +432,6 @@ class LuaHarness:
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
         if not self.available:
             return {'captured': None, 'trace': 'lua not found', 'error': None}
-        source = self._instrument_source(source)
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
@@ -477,8 +452,15 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
-            "_log(\"State transitions: \" .. _state_count)\n"
-            "_log(\"Buffers captured: \" .. _buffer_count)\n"
+            "if _best_payload ~= \"\" then\n"
+            " _log(\"Best payload saved, score=\" .. _best_score)\n"
+            "else\n"
+            " local f = io.open(_outpath, \"w\")\n"
+            " if f then\n"
+            '  f:write("-- [HARNESS] No payload captured\\n-- Error: " .. tostring(err or "none") .. "\\n")\n'
+            "  f:close()\n"
+            " end\n"
+            "end\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
@@ -524,7 +506,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
-                if captured and not captured.startswith("-- [HARNESS ERROR]"):
+                if captured and not captured.startswith("-- [HARNESS]"):
                     result['captured'] = captured
                 else:
                     result['error'] = captured
