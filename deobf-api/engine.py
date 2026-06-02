@@ -77,8 +77,12 @@ class Unveiler:
             self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
+        self._log('devirtualise', True, 'preparing decoded source for AST lifting')
+        devirt = Devirtualiser(decoder, annotate=False)
+        decoded_source = devirt.process(source)
+
         self._log('devirtualise', True, 'attempting state-machine lifting via AST')
-        sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
+        sm_lifter = StateMachineLifter(decoded_source, decoder.strings, offset=decoder.offset)
         lifted = sm_lifter.lift()
         if lifted:
             if self._is_valid_lua(lifted):
@@ -91,11 +95,11 @@ class Unveiler:
                 self._log('devirtualise', False, 'lifter produced invalid Lua')
         else:
             diag_msg = '; '.join(sm_lifter.diagnostics) if sm_lifter.diagnostics else 'no diagnostics'
-            self._log('devirtualise', False, f'AST lifter returned None: {diag_msg}')
+            self._log('devirtualise', False, f'AST lifter failed: {diag_msg}')
 
         self._log('devirtualise', True, 'attempting instruction-level VM lifting')
         vm_lifter = WeAreDevsVMLifter(decoder.strings)
-        lifted = vm_lifter.lift(source)
+        lifted = vm_lifter.lift(decoded_source)
         if lifted and self._is_valid_lua(lifted):
             renamer = VarRenamer()
             lifted = renamer.rename(lifted)
@@ -104,11 +108,9 @@ class Unveiler:
             return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('devirtualise', True, 'falling back to static devirtualisation')
-        devirt = Devirtualiser(decoder, annotate=True)
-        processed = devirt.process(source)
-        if processed:
+        if decoded_source:
             renamer = VarRenamer()
-            result = renamer.rename(processed)
+            result = renamer.rename(decoded_source)
             result = beautify(result)
             header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete'
