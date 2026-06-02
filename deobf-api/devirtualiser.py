@@ -24,12 +24,12 @@ def substitute_string_calls(source: str, decoder: StringTableDecoder) -> str:
         inner = m.group(1).strip()
         n = safe_eval_int(inner)
         if n is None:
-            return m.group(0)
+            return 'nil'
         val = decoder.resolve(n)
         if val is None:
-            return m.group(0)
-        if not val:
             return 'nil'
+        if not val:
+            return '""'
         return escape_lua_string(str(val))
     return _CALL_PAT.sub(_repl, source)
 
@@ -45,7 +45,7 @@ def substitute_table_indices(source: str, decoder: StringTableDecoder) -> str:
         if 0 <= py_idx < len(decoder.strings):
             val = decoder.strings[py_idx]
             if not val:
-                return 'nil'
+                return '""'
             return escape_lua_string(str(val))
         return m.group(0)
     return _INDEX_PAT.sub(_repl, source)
@@ -100,30 +100,44 @@ class DispatcherUnflattener:
         return visited
 
 class Devirtualiser:
-    def __init__(self, decoder: StringTableDecoder) -> None:
+    def __init__(self, decoder: StringTableDecoder, annotate: bool = False) -> None:
         self.decoder = decoder
         self.vm_detected = False
         self.state_count = 0
+        self.annotate = annotate
 
     def process(self, source: str) -> str:
         source = substitute_string_calls(source, self.decoder)
         source = substitute_table_indices(source, self.decoder)
+        source = self._replace_unresolved_getstr(source)
         source = fold_constants(source)
         source = strip_bootstrap(source)
         self.vm_detected = is_vm_obfuscated(source)
-        if self.vm_detected:
+        if self.vm_detected and self.annotate:
             source = self._annotate_vm(source)
         return source
+
+    def _replace_unresolved_getstr(self, source: str) -> str:
+        def _repl(m: re.Match) -> str:
+            inner = m.group(1).strip()
+            n = safe_eval_int(inner)
+            if n is None:
+                return 'nil'
+            return f'({n})'
+        return _CALL_PAT.sub(_repl, source)
 
     def _annotate_vm(self, source: str) -> str:
         unflat = DispatcherUnflattener(source)
         order = unflat.linearise()
         self.state_count = len(order)
         if not order:
-            return '-- [VM DETECTED] Could not linearise state machine\n\n' + source
-        header = (
-            f'-- [VM DETECTED]  {self.state_count} reachable states identified\n'
-            f'-- Execution order: {order[:20]}'
-            + ('...' if len(order) > 20 else '') + '\n\n'
-        )
-        return header + source
+            return source
+        annotated_lines = []
+        for line in source.split('\n'):
+            annotated_lines.append(line)
+            for state in order:
+                if f'vmState = {state}' in line and '--' not in line.split('vmState = ')[-1].split()[0]:
+                    next_state = unflat.transitions.get(state)
+                    if next_state is not None:
+                        annotated_lines.append(f'-- state {state} -> {next_state}')
+        return '\n'.join(annotated_lines)
