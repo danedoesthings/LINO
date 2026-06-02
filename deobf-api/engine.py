@@ -79,17 +79,20 @@ class Unveiler:
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
 
         self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
-        vm_devirt = VMDevirtualizer(source, decoder, wrapper_name="GetStr")
-        lifted = vm_devirt.devirtualize()
-        if lifted and self._is_valid_lua(lifted):
-            self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
-            renamer = VarRenamer()
-            lifted = renamer.rename(lifted)
-            lifted = beautify(lifted)
-            return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
-        else:
-            diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'no diagnostics'
-            self._log('devirtualise', False, f'VM devirtualizer failed: {diag_msg}')
+        try:
+            vm_devirt = VMDevirtualizer(source, decoder, wrapper_name="GetStr")
+            lifted = vm_devirt.devirtualize()
+            if lifted and self._is_valid_lua(lifted):
+                self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
+                renamer = VarRenamer()
+                lifted = renamer.rename(lifted)
+                lifted = beautify(lifted)
+                return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
+            else:
+                diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'returned None/empty'
+                self._log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
+        except Exception as e:
+            self._log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
 
         self._log('devirtualise', True, 'attempting state-machine lifting via regex')
         sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
