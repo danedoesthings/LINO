@@ -5,14 +5,19 @@ import shutil
 import signal
 import time
 
-LOG_LIMIT = 8000
+LOG_LIMIT = 10000
 VM_INSTRUCTION_LIMIT = 2000000
 
 ENV_BOOTSTRAP = r"""
 local ORIGINAL_LOADSTRING = rawget(_G, "loadstring")
 local ORIGINAL_LOAD = rawget(_G, "load")
 local ORIGINAL_PCALL = pcall
+local ORIGINAL_CONCAT = table.concat
+local ORIGINAL_CHAR = string.char
 local ORIGINAL_UNPACK = unpack or table.unpack
+local ORIGINAL_SETMETATABLE = setmetatable
+local ORIGINAL_GETMETATABLE = getmetatable
+local ORIGINAL_SETHOOK = rawget(debug, "sethook") or rawget(_G, "debug") and rawget(_G, "debug").sethook
 
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
@@ -52,9 +57,7 @@ if not newproxy then
     end
     type = function(obj)
         local mt = getmetatable(obj)
-        if mt and mt.__type then
-            return mt.__type()
-        end
+        if mt and mt.__type then return mt.__type() end
         return _G.type(obj)
     end
 end
@@ -63,6 +66,8 @@ if not unpack then unpack = table.unpack or function(t, i, j) j = j or #t; i = i
 local _log_file = nil
 local _log_count = 0
 local _log_limit = """ + str(LOG_LIMIT) + r"""
+local _captured_buffers = {}
+local _buffer_count = 0
 
 local function _log(msg)
     if _log_file and _log_count < _log_limit then
@@ -72,99 +77,106 @@ local function _log(msg)
     end
 end
 
-local _generated_functions = {}
-local _generated_count = 0
-local _generated_limit = 500
-
-local _closure_factories = {}
-local _closure_factory_names = {
-    "funcWrap", "helperG", "tokenMap", "shuffleTbl",
-    "r5", "e", "regD", "cleanRef", "allocSlot",
-    "packArgs", "callEnvA", "callEnvB", "vmState"
-}
-
-local function _wrap_closure_factory(original, name)
-    if _closure_factories[name] then return _closure_factories[name] end
-    local wrapper = function(...)
-        _log("[FACTORY][" .. name .. "] called with " .. select("#", ...) .. " args")
-        local results = {original(...)}
-        for i, result in ipairs(results) do
-            if type(result) == "function" then
-                _generated_count = _generated_count + 1
-                if _generated_count <= _generated_limit then
-                    _generated_functions[_generated_count] = {
-                        factory = name,
-                        func = result,
-                        index = _generated_count,
-                    }
-                    _log("[CLOSURE][" .. name .. "][" .. _generated_count .. "] created")
-                end
-                results[i] = _wrap_generated_function(result, name, _generated_count)
-            elseif type(result) == "table" then
-                _log("[TABLE][" .. name .. "] returned table")
-                results[i] = _wrap_vm_table(result, name)
-            end
-        end
-        return ORIGINAL_UNPACK(results, 1, #results)
+local function _save_buffer(data, tag)
+    _buffer_count = _buffer_count + 1
+    _log("[BUFFER][" .. tag .. "][" .. _buffer_count .. "] len=" .. #data .. " first=" .. data:sub(1, 200))
+    if _buffer_count == 1 then
+        local f = io.open(_outpath, "w")
+        if f then f:write(data); f:close() end
     end
-    _closure_factories[name] = wrapper
-    return wrapper
 end
 
-local function _wrap_generated_function(fn, factory_name, index)
-    local wrapper = function(...)
-        local args = {...}
-        _log("[CALL][" .. factory_name .. "_" .. index .. "] called with " .. select("#", ...) .. " args")
-        for i, arg in ipairs(args) do
-            if type(arg) == "string" and #arg > 0 then
-                _log("  arg[" .. i .. "]: " .. arg:sub(1, 200))
-            elseif type(arg) == "table" then
-                _log("  arg[" .. i .. "]: table")
-            elseif type(arg) == "function" then
-                _log("  arg[" .. i .. "]: function")
-            elseif type(arg) == "number" then
-                _log("  arg[" .. i .. "]: " .. tostring(arg))
-            end
-        end
-        local results = {fn(...)}
-        for i, result in ipairs(results) do
-            if type(result) == "string" and #result > 20 then
-                _log("[RESULT][" .. factory_name .. "_" .. index .. "] string len=" .. #result)
-                _log(result:sub(1, 1000))
-                local f = io.open(_outpath, "w")
-                if f then f:write(result); f:close() end
-            elseif type(result) == "function" then
-                _log("[RESULT][" .. factory_name .. "_" .. index .. "] returned a function")
-            end
-        end
-        return ORIGINAL_UNPACK(results, 1, #results)
+table.concat = function(t, sep, i, j)
+    local r = ORIGINAL_CONCAT(t, sep, i, j)
+    if type(r) == "string" and #r > 100 then
+        _log("[CONCAT] len=" .. #r .. " first=" .. r:sub(1, 150))
+        _save_buffer(r, "concat")
     end
-    return wrapper
+    return r
 end
 
-local function _wrap_vm_table(t, name)
+string.char = function(...)
+    local r = ORIGINAL_CHAR(...)
+    local argc = select("#", ...)
+    if argc >= 4 and #r > 0 then
+        _log("[CHAR] args=" .. argc .. " result=" .. r:sub(1, 100))
+        if #r > 50 then _save_buffer(r, "char") end
+    end
+    return r
+end
+
+local _observed_tables = {}
+local _table_id_counter = 0
+local _registered_tables = {}
+
+local function _hook_table(t, name)
+    if _registered_tables[t] then return end
+    _registered_tables[t] = true
+    _table_id_counter = _table_id_counter + 1
+    local tid = name .. "_" .. _table_id_counter
+    _log("[TABLE][" .. tid .. "] registered")
     local proxy = {}
     local mt = {
         __index = function(tbl, k)
-            _log("[VM_TABLE][" .. name .. "] index: " .. tostring(k))
-            return rawget(proxy, "_data")[k]
+            local v = rawget(proxy, "_data")[k]
+            if type(v) == "function" then
+                _log("[TABLE][" .. tid .. "] index: [" .. tostring(k) .. "] -> function")
+            elseif type(v) == "string" and #v > 10 then
+                _log("[TABLE][" .. tid .. "] index: [" .. tostring(k) .. "] -> \"" .. v:sub(1, 80) .. "\"")
+            elseif type(v) == "number" then
+                _log("[TABLE][" .. tid .. "] index: [" .. tostring(k) .. "] -> " .. tostring(v))
+            end
+            return v
         end,
         __newindex = function(tbl, k, v)
-            _log("[VM_TABLE][" .. name .. "] store: [" .. tostring(k) .. "] = " .. tostring(v):sub(1, 150))
+            _log("[TABLE][" .. tid .. "] store: [" .. tostring(k) .. "] = " .. type(v))
+            if type(v) == "string" and #v > 20 then
+                _log("  value: " .. v:sub(1, 200))
+                _save_buffer(v, "table_string")
+            elseif type(v) == "number" and v > 1000 then
+                _log("  value: " .. tostring(v))
+            end
             rawset(proxy, "_data")[k] = v
         end,
+        __call = function(tbl, ...)
+            _log("[TABLE][" .. tid .. "] called with " .. select("#", ...) .. " args")
+            local args = {...}
+            for i, arg in ipairs(args) do
+                if type(arg) == "string" and #arg > 20 then
+                    _log("  arg[" .. i .. "]: " .. arg:sub(1, 200))
+                end
+            end
+            local results = {proxy._data(...)}
+            return ORIGINAL_UNPACK(results, 1, #results)
+        end,
+        __len = function() return #proxy._data end,
     }
     proxy._data = t
-    setmetatable(proxy, mt)
+    ORIGINAL_SETMETATABLE(proxy, mt)
     return proxy
+end
+
+local _hooked_setmetatable = false
+local _original_global_setmetatable = ORIGINAL_SETMETATABLE
+_G.setmetatable = function(t, mt)
+    if not _hooked_setmetatable and type(t) == "table" and type(mt) == "table" then
+        if mt.__newindex then
+            _hooked_setmetatable = true
+            _log("[HOOK] setmetatable detected with __newindex — likely VM register table")
+            _hook_table(t, "regtable")
+        end
+        if mt.__call then
+            _log("[HOOK] setmetatable detected with __call — likely callable table")
+            _hook_table(t, "calltable")
+        end
+    end
+    return _original_global_setmetatable(t, mt)
 end
 
 function loadstring(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _log("===== LOADSTRING CAPTURED (len=" .. #chunk .. ") =====")
-        _log(chunk:sub(1, 1000))
-        local f = io.open(_outpath, "w")
-        if f then f:write(chunk); f:close() end
+        _log("[LOADSTRING] len=" .. #chunk)
+        _save_buffer(chunk, "loadstring")
     end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
     return ORIGINAL_LOAD(chunk, chunkname)
@@ -172,10 +184,8 @@ end
 
 function load(chunk, chunkname)
     if type(chunk) == "string" and #chunk > 0 then
-        _log("===== LOAD CAPTURED (len=" .. #chunk .. ") =====")
-        _log(chunk:sub(1, 1000))
-        local f = io.open(_outpath, "w")
-        if f then f:write(chunk); f:close() end
+        _log("[LOAD] len=" .. #chunk)
+        _save_buffer(chunk, "load")
     end
     if ORIGINAL_LOAD then return ORIGINAL_LOAD(chunk, chunkname) end
     if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
@@ -202,16 +212,12 @@ function Roblox.make_proxy(name)
             if k == "Lighting" then return Roblox.make_proxy("Lighting") end
             if k == "StarterGui" then return Roblox.make_proxy("StarterGui") end
             if k == "CoreGui" then return Roblox.make_proxy("CoreGui") end
-            if k == "GetService" then
-                return function(self, sn)
-                    if sn == "Players" then return Roblox.make_proxy("Players") end
-                    if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
-                    return Roblox.make_proxy(sn)
-                end
-            end
-            if k == "HttpGet" or k == "HttpGetAsync" then
-                return function(self, url) return "--REMOTE_PAYLOAD" end
-            end
+            if k == "GetService" then return function(self, sn)
+                if sn == "Players" then return Roblox.make_proxy("Players") end
+                if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
+                return Roblox.make_proxy(sn)
+            end end
+            if k == "HttpGet" or k == "HttpGetAsync" then return function(self, url) return "--REMOTE_PAYLOAD" end end
             if k == "SetCore" then return function() end end
         end
         if k == "LocalPlayer" then
@@ -225,22 +231,9 @@ function Roblox.make_proxy(name)
             end
             return lp
         end
-        if k == "Character" then
-            local char = Roblox.make_proxy("Character")
-            local cmt = getmetatable(char)
-            cmt.__index = function(_, pk)
-                if pk == "Humanoid" then return Roblox.make_proxy("Humanoid") end
-                return Roblox.make_proxy(pk)
-            end
-            return char
-        end
-        if k == "Connect" or k == "connect" then
-            return function(self, cb)
-                if string.find(newPath, "Button") or string.find(newPath, "Click") or string.find(newPath, "Submit") then
-                    pcall(cb)
-                end
-            end
-        end
+        if k == "Connect" or k == "connect" then return function(self, cb)
+            if string.find(newPath, "Button") or string.find(newPath, "Click") then pcall(cb) end
+        end end
         return Roblox.make_proxy(newPath)
     end
     mt.__newindex = function() end
@@ -361,25 +354,27 @@ crypt = {
 syn = { request = request, crypt = crypt, queue_on_teleport = function() end, protect_gui = function() end }
 fluxus = syn
 
-debug = {
-    getinfo = function() return {source="mock", short_src="mock", func=function() end} end,
-    getconstants = function() return {} end,
-    getconstant = function() return nil end,
-    getupvalues = function() return {} end,
-    getupvalue = function() return nil end,
-    getprotos = function() return {} end,
-    getproto = function() return nil end,
-    getstack = function() return {} end,
-    setstack = function() end,
-    setconstant = function() end,
-    setupvalue = function() end,
-    getregistry = function() return {} end,
-    getmetatable = function(t) return getmetatable(t) end,
-    setmetatable = function(t, m) return setmetatable(t, m) end,
-    profilebegin = function() end,
-    profileend = function() end,
-    traceback = function() return "mock traceback" end
-}
+if debug then
+    debug.getinfo = debug.getinfo or function() return {source="mock", short_src="mock", func=function() end} end
+    debug.getconstants = debug.getconstants or function() return {} end
+    debug.getconstant = debug.getconstant or function() return nil end
+    debug.getupvalues = debug.getupvalues or function() return {} end
+    debug.getupvalue = debug.getupvalue or function() return nil end
+    debug.getprotos = debug.getprotos or function() return {} end
+    debug.getproto = debug.getproto or function() return nil end
+    debug.getstack = debug.getstack or function() return {} end
+    debug.setstack = debug.setstack or function() end
+    debug.setconstant = debug.setconstant or function() end
+    debug.setupvalue = debug.setupvalue or function() end
+    debug.getregistry = debug.getregistry or function() return {} end
+    debug.getmetatable = debug.getmetatable or function(t) return getmetatable(t) end
+    debug.setmetatable = debug.setmetatable or function(t, m) return setmetatable(t, m) end
+    debug.profilebegin = debug.profilebegin or function() end
+    debug.profileend = debug.profileend or function() end
+    debug.traceback = debug.traceback or function() return "mock traceback" end
+else
+    debug = {}
+end
 
 math.clamp = math.clamp or function(x, mn, mx) return math.max(mn, math.min(mx, x)) end
 
@@ -393,14 +388,16 @@ require = function(id) return setmetatable({}, { __index = function() return fun
 
 local _instruction_count = 0
 local _vm_limit = """ + str(VM_INSTRUCTION_LIMIT) + r"""
-debug.sethook(function(event)
-    _instruction_count = _instruction_count + 1
-    if _instruction_count > _vm_limit then
-        _log("VM_LOOP_LIMIT reached: " .. _instruction_count .. " instructions")
-        _log("Generated functions: " .. _generated_count)
-        error("VM LOOP LIMIT REACHED", 0)
-    end
-end, "", 1000)
+local _hooked_sethook = ORIGINAL_SETHOOK
+if _hooked_sethook then
+    _hooked_sethook(function(event)
+        _instruction_count = _instruction_count + 1
+        if _instruction_count > _vm_limit then
+            _log("VM_LOOP_LIMIT: " .. _instruction_count .. " instructions, " .. _buffer_count .. " buffers captured")
+            error("VM LOOP LIMIT REACHED", 0)
+        end
+    end, "", 1000)
+end
 """
 
 
@@ -431,10 +428,6 @@ class LuaHarness:
             + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
             + ENV_BOOTSTRAP
             + "\n"
-            "local _temp_funcWrap, _temp_helperG, _temp_tokenMap, _temp_shuffleTbl\n"
-            "local _temp_r5, _temp_e, _temp_regD, _temp_cleanRef, _temp_allocSlot\n"
-            "local _temp_packArgs, _temp_callEnvA, _temp_callEnvB, _temp_vmState\n"
-            "\n"
             "local ok, err = ORIGINAL_PCALL(function()\n"
             + source +
             "\nend)\n"
@@ -443,7 +436,8 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
-            "_log(\"Generated functions: \" .. _generated_count)\n"
+            "_log(\"Buffers captured: \" .. _buffer_count)\n"
+            "_log(\"Tables registered: \" .. _table_id_counter)\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
@@ -502,7 +496,8 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
-            "_log(\"Generated functions: \" .. _generated_count)\n"
+            "_log(\"Buffers captured: \" .. _buffer_count)\n"
+            "_log(\"Tables registered: \" .. _table_id_counter)\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
@@ -543,7 +538,7 @@ class LuaHarness:
 
             if os.path.exists(log_path):
                 with open(log_path, "r", encoding="utf-8") as tf:
-                    result['trace'] = tf.read()[:8000]
+                    result['trace'] = tf.read()[:10000]
 
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
