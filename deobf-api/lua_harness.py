@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import subprocess
 import signal
+import re
 from typing import Optional, Dict
 
 
@@ -269,10 +270,10 @@ class LuaHarness:
         ''')
 
         stripped = source.strip()
-        if stripped.startswith('return'):
-            stripped = stripped[len('return'):].strip()
-        executable_source = 'local _fn = (' + stripped + ')\nif type(_fn) == "function" then _fn() end'
+        stripped = re.sub(r'^return\s+', '', stripped, count=1)
         
+        executable_source = stripped
+
         try:
             lua.execute(executable_source)
         except Exception as e:
