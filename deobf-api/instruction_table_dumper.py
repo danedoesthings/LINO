@@ -10,42 +10,59 @@ class InstructionTableDumper:
 
     def dump(self) -> Optional[str]:
         results = []
-        results.append("-- Instruction Table Dump")
-        results.append(f"-- {len(self.strings)} decoded strings available")
+        results.append("-- Decoded String Table")
+        results.append(f"-- {len(self.strings)} strings decoded")
         results.append("")
 
-        instr_patterns = [
-            r'instrTbl\s*\[\s*(\w+)\s*\]\s*=\s*"([^"]*)"',
-            r'instrTbl\s*\[\s*(\w+)\s*\]\s*=\s*\'([^\']*)\'',
-            r'instrTbl\s*\[\s*(\d+)\s*\]\s*=\s*"([^"]*)"',
-            r'instrTbl\s*\[\s*(\d+)\s*\]\s*=\s*\'([^\']*)\'',
-            r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*"([^"]*)"',
-            r'(\w+)\s*\[\s*(\w+)\s*\]\s*=\s*\'([^\']*)\'',
-        ]
-
-        found_any = False
-        for pattern in instr_patterns:
-            for m in re.finditer(pattern, self.source):
-                found_any = True
-                key = m.group(1)
-                val = m.group(2) if len(m.groups()) == 2 else m.group(3)
-                results.append(f"-- instrTbl[{key}] = \"{val}\"")
-
-        if not found_any:
-            results.append("-- No instruction table entries found directly")
-            results.append("-- Searching for string references to decoded strings...")
-            results.append("")
-
-            for i, s in enumerate(self.strings):
-                if s and len(s) > 3 and s in self.source:
-                    escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                    results.append(f"-- string[{i}] = \"{escaped}\"")
-
-        results.append("")
-        results.append("-- All decoded strings:")
+        results.append("local R = {")
         for i, s in enumerate(self.strings):
             if s:
-                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                results.append(f"R[{i + 1}] = \"{escaped}\"")
+                escaped = json.dumps(s)
+                results.append(f"\t[{i + 1}] = {escaped},")
+        results.append("}")
+        results.append("")
+
+        results.append("-- Strings found in source context:")
+        results.append("")
+
+        encstr_patterns = [
+            r'EncStr\s*\[\s*"([^"]+)"\s*\]',
+            r"EncStr\s*\[\s*'([^']+)'\s*\]",
+            r'EncStr\s*\[\s*(\w+)\s*\]',
+        ]
+
+        found_strings = set()
+        for pattern in encstr_patterns:
+            for m in re.finditer(pattern, self.source):
+                key = m.group(1)
+                found_strings.add(key)
+                matching = [s for s in self.strings if s == key]
+                if matching:
+                    idx = self.strings.index(key) + 1
+                    results.append(f"-- EncStr[\"{key}\"] -> R[{idx}] = {json.dumps(key)}")
+                else:
+                    results.append(f"-- EncStr[\"{key}\"] -> (not in decoded strings)")
+
+        results.append("")
+        results.append("-- Possible payload reconstruction:")
+        results.append("")
+
+        important_strings = [s for s in self.strings if s and len(s) > 2 and not s.startswith("l1") and not s.startswith("l2")]
+        important_strings = [s for s in important_strings if not re.match(r'^[A-Za-z0-9]{10,}$', s)]
+        important_strings = [s for s in important_strings if not re.match(r'^[A-Z]{2,4}$', s)]
+
+        known_functions = ['print', 'pcall', 'tostring', 'tonumber', 'error', 'math', 'table', 'string',
+                          'floor', 'char', 'concat', 'gsub', 'byte', 'len']
+        
+        results.append("-- Likely function calls:")
+        for s in important_strings:
+            if s in known_functions:
+                results.append(f"--   {s}(...)")
+
+        results.append("")
+        results.append("-- Other decoded strings (likely arguments or values):")
+        for s in important_strings:
+            if s not in known_functions and s not in found_strings:
+                results.append(f"--   {json.dumps(s)}")
 
         return "\n".join(results)
