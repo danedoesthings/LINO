@@ -4,6 +4,7 @@ import os
 import shutil
 import signal
 import time
+import re
 
 LOG_LIMIT = 10000
 VM_INSTRUCTION_LIMIT = 2000000
@@ -15,9 +16,6 @@ local ORIGINAL_PCALL = pcall
 local ORIGINAL_CONCAT = table.concat
 local ORIGINAL_CHAR = string.char
 local ORIGINAL_UNPACK = unpack or table.unpack
-local ORIGINAL_SETMETATABLE = setmetatable
-local ORIGINAL_GETMETATABLE = getmetatable
-local ORIGINAL_SETHOOK = rawget(debug, "sethook") or rawget(_G, "debug") and rawget(_G, "debug").sethook
 
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
@@ -69,7 +67,7 @@ local _log_limit = """ + str(LOG_LIMIT) + r"""
 local _captured_buffers = {}
 local _buffer_count = 0
 
-local function _log(msg)
+function _log(msg)
     if _log_file and _log_count < _log_limit then
         _log_file:write(msg .. "\n")
         _log_file:flush()
@@ -77,9 +75,9 @@ local function _log(msg)
     end
 end
 
-local function _save_buffer(data, tag)
+function _save_buffer(data, tag)
     _buffer_count = _buffer_count + 1
-    _log("[BUFFER][" .. tag .. "][" .. _buffer_count .. "] len=" .. #data .. " first=" .. data:sub(1, 200))
+    _log("[BUFFER][" .. tag .. "][" .. _buffer_count .. "] len=" .. #data)
     if _buffer_count == 1 then
         local f = io.open(_outpath, "w")
         if f then f:write(data); f:close() end
@@ -99,78 +97,9 @@ string.char = function(...)
     local r = ORIGINAL_CHAR(...)
     local argc = select("#", ...)
     if argc >= 4 and #r > 0 then
-        _log("[CHAR] args=" .. argc .. " result=" .. r:sub(1, 100))
         if #r > 50 then _save_buffer(r, "char") end
     end
     return r
-end
-
-local _observed_tables = {}
-local _table_id_counter = 0
-local _registered_tables = {}
-
-local function _hook_table(t, name)
-    if _registered_tables[t] then return end
-    _registered_tables[t] = true
-    _table_id_counter = _table_id_counter + 1
-    local tid = name .. "_" .. _table_id_counter
-    _log("[TABLE][" .. tid .. "] registered")
-    local proxy = {}
-    local mt = {
-        __index = function(tbl, k)
-            local v = rawget(proxy, "_data")[k]
-            if type(v) == "function" then
-                _log("[TABLE][" .. tid .. "] index: [" .. tostring(k) .. "] -> function")
-            elseif type(v) == "string" and #v > 10 then
-                _log("[TABLE][" .. tid .. "] index: [" .. tostring(k) .. "] -> \"" .. v:sub(1, 80) .. "\"")
-            elseif type(v) == "number" then
-                _log("[TABLE][" .. tid .. "] index: [" .. tostring(k) .. "] -> " .. tostring(v))
-            end
-            return v
-        end,
-        __newindex = function(tbl, k, v)
-            _log("[TABLE][" .. tid .. "] store: [" .. tostring(k) .. "] = " .. type(v))
-            if type(v) == "string" and #v > 20 then
-                _log("  value: " .. v:sub(1, 200))
-                _save_buffer(v, "table_string")
-            elseif type(v) == "number" and v > 1000 then
-                _log("  value: " .. tostring(v))
-            end
-            rawset(proxy, "_data")[k] = v
-        end,
-        __call = function(tbl, ...)
-            _log("[TABLE][" .. tid .. "] called with " .. select("#", ...) .. " args")
-            local args = {...}
-            for i, arg in ipairs(args) do
-                if type(arg) == "string" and #arg > 20 then
-                    _log("  arg[" .. i .. "]: " .. arg:sub(1, 200))
-                end
-            end
-            local results = {proxy._data(...)}
-            return ORIGINAL_UNPACK(results, 1, #results)
-        end,
-        __len = function() return #proxy._data end,
-    }
-    proxy._data = t
-    ORIGINAL_SETMETATABLE(proxy, mt)
-    return proxy
-end
-
-local _hooked_setmetatable = false
-local _original_global_setmetatable = ORIGINAL_SETMETATABLE
-_G.setmetatable = function(t, mt)
-    if not _hooked_setmetatable and type(t) == "table" and type(mt) == "table" then
-        if mt.__newindex then
-            _hooked_setmetatable = true
-            _log("[HOOK] setmetatable detected with __newindex — likely VM register table")
-            _hook_table(t, "regtable")
-        end
-        if mt.__call then
-            _log("[HOOK] setmetatable detected with __call — likely callable table")
-            _hook_table(t, "calltable")
-        end
-    end
-    return _original_global_setmetatable(t, mt)
 end
 
 function loadstring(chunk, chunkname)
@@ -388,7 +317,7 @@ require = function(id) return setmetatable({}, { __index = function() return fun
 
 local _instruction_count = 0
 local _vm_limit = """ + str(VM_INSTRUCTION_LIMIT) + r"""
-local _hooked_sethook = ORIGINAL_SETHOOK
+local _hooked_sethook = rawget(debug, "sethook") or (rawget(_G, "debug") and rawget(_G, "debug").sethook)
 if _hooked_sethook then
     _hooked_sethook(function(event)
         _instruction_count = _instruction_count + 1
@@ -397,6 +326,37 @@ if _hooked_sethook then
             error("VM LOOP LIMIT REACHED", 0)
         end
     end, "", 1000)
+end
+
+local _state_count = 0
+local _state_limit = 3000
+
+function _log_state(state, next_state, line)
+    _state_count = _state_count + 1
+    if _state_count <= _state_limit then
+        _log(string.format("[STATE][%d] %d -> %s", _state_count, state, tostring(next_state)))
+    end
+end
+
+function _log_reg_write(tbl_name, key, value)
+    if _state_count > _state_limit then return end
+    local vtype = type(value)
+    local vstr
+    if vtype == "string" then
+        vstr = value:sub(1, 120)
+        if #value > 20 then _save_buffer(value, "reg_string") end
+    elseif vtype == "number" then
+        vstr = tostring(value)
+    elseif vtype == "function" then
+        vstr = "function"
+    elseif vtype == "table" then
+        vstr = "table"
+    elseif vtype == "nil" then
+        vstr = "nil"
+    else
+        vstr = vtype
+    end
+    _log(string.format("[REG][%s][%s] = %s (%s)", tbl_name, tostring(key), vstr, vtype))
 end
 """
 
@@ -413,9 +373,32 @@ class LuaHarness:
                 return candidate
         return None
 
+    def _instrument_source(self, source: str) -> str:
+        """Inject logging calls directly into the VM source before execution."""
+        # Hook instrTbl writes: instrTbl[regA] = value  ->  instrTbl[regA] = _log_reg_write("instrTbl", regA, value)
+        source = re.sub(
+            r'\b(instrTbl)\s*\[\s*([^\]]+)\s*\]\s*=\s*([^;]+?)(?=\n|;|$|instrTbl|vmStack)',
+            r'\1[ \2 ] = (_log_reg_write("\1", \2, \3) or \3)',
+            source
+        )
+        # Hook vmStack writes
+        source = re.sub(
+            r'\b(vmStack)\s*\[\s*([^\]]+)\s*\]\s*=\s*([^;]+?)(?=\n|;|$|instrTbl|vmStack)',
+            r'\1[ \2 ] = (_log_reg_write("\1", \2, \3) or \3)',
+            source
+        )
+        # Hook vmState transitions
+        source = re.sub(
+            r'\b(vmState)\s*=\s*(-?\d+)',
+            r'(\2)\1 = _log_state(\1, \2) or \2',
+            source
+        )
+        return source
+
     def run(self, source: str, timeout: int = 20) -> str | None:
         if not self.available:
             return None
+        source = self._instrument_source(source)
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
@@ -436,8 +419,8 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
+            "_log(\"State transitions: \" .. _state_count)\n"
             "_log(\"Buffers captured: \" .. _buffer_count)\n"
-            "_log(\"Tables registered: \" .. _table_id_counter)\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
@@ -476,6 +459,7 @@ class LuaHarness:
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
         if not self.available:
             return {'captured': None, 'trace': 'lua not found', 'error': None}
+        source = self._instrument_source(source)
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
@@ -496,8 +480,8 @@ class LuaHarness:
             "if not ok then\n"
             ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
             "end\n"
+            "_log(\"State transitions: \" .. _state_count)\n"
             "_log(\"Buffers captured: \" .. _buffer_count)\n"
-            "_log(\"Tables registered: \" .. _table_id_counter)\n"
             "if _log_file then\n"
             " _log_file:close()\n"
             "end\n"
