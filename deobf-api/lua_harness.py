@@ -33,7 +33,7 @@ class LuaHarness:
 
         def _capture_string(s):
             try:
-                if len(s) > 2:
+                if isinstance(s, str) and len(s) > 2:
                     captured.append(s)
             except:
                 pass
@@ -271,10 +271,10 @@ class LuaHarness:
         script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
         ''')
 
+        wrapped_source = 'return pcall(function() ' + source + ' end)'
+        
         try:
-            chunk = lua.eval(source)
-            if chunk is not None:
-                pass
+            result = lua.execute(wrapped_source)
         except Exception:
             pass
 
