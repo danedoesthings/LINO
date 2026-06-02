@@ -3,8 +3,32 @@ import tempfile
 import os
 import shutil
 import signal
+import time
+
+LOG_LIMIT = 3000
+CAPTURE_LIMIT = 20
+VM_INSTRUCTION_LIMIT = 500000
 
 ENV_BOOTSTRAP = r"""
+local ORIGINAL_LOADSTRING = rawget(_G, "loadstring")
+local ORIGINAL_LOAD = rawget(_G, "load")
+local ORIGINAL_CONCAT = table.concat
+local ORIGINAL_CHAR = string.char
+local ORIGINAL_PCALL = pcall
+local ORIGINAL_XPCALL = xpcall or nil
+local ORIGINAL_SETFENV = setfenv or (getfenv and function(f, e) end)
+local ORIGINAL_GETFENV = getfenv or function() return _G end
+local ORIGINAL_SETMETATABLE = setmetatable
+local ORIGINAL_GETMETATABLE = getmetatable
+local ORIGINAL_COROUTINE_CREATE = coroutine.create or nil
+local ORIGINAL_COROUTINE_WRAP = coroutine.wrap or nil
+local ORIGINAL_COROUTINE_RESUME = coroutine.resume or nil
+local ORIGINAL_LOADFILE = loadfile or nil
+local ORIGINAL_DOFILE = dofile or nil
+local ORIGINAL_GSUB = string.gsub
+local ORIGINAL_SUB = string.sub
+local ORIGINAL_UNPACK = unpack or table.unpack
+
 local bit32 = rawget(_G, "bit32")
 if not bit32 then
     local function bxor(a,b) local r,m=0,1; while a>0 or b>0 do local ab,bb=a%2,b%2; if ab~=bb then r=r+m end; a=math.floor(a/2); b=math.floor(b/2); m=m*2 end; return r end
@@ -20,10 +44,306 @@ end
 _G.bit32 = bit32
 _G.bit = bit32
 
-if not getfenv then getfenv = function(f) return _G end end
-if not setfenv then setfenv = function(f, t) return f end end
-if not newproxy then newproxy = function(addmeta) local p = {}; if addmeta then setmetatable(p, {}) end; return p end end
+if not newproxy then
+    local _userdata_counter = 0
+    newproxy = function(addmeta)
+        _userdata_counter = _userdata_counter + 1
+        local ud = {}
+        local name = "userdata_" .. _userdata_counter
+        setmetatable(ud, {
+            __type = function() return "userdata" end,
+            __tostring = function() return name end,
+        })
+        if addmeta then
+            setmetatable(ud, {
+                __index = function() return nil end,
+                __newindex = function() end,
+                __type = function() return "userdata" end,
+                __tostring = function() return name end,
+                __metatable = "The metatable is locked",
+            })
+        end
+        return ud
+    end
+    type = function(obj)
+        local mt = getmetatable(obj)
+        if mt and mt.__type then
+            return mt.__type()
+        end
+        return _G.type(obj)
+    end
+end
 if not unpack then unpack = table.unpack or function(t, i, j) j = j or #t; i = i or 1; if i > j then return end; return t[i], unpack(t, i+1, j) end end
+
+local _inside_hook = false
+
+local function safe_hook(fn)
+    if _inside_hook then return end
+    _inside_hook = true
+    local ok = pcall(fn)
+    _inside_hook = false
+end
+
+local _log_file = nil
+local _log_count = 0
+local _log_limit = """ + str(LOG_LIMIT) + r"""
+local _captures = {}
+local _capture_count = 0
+local _capture_limit = """ + str(CAPTURE_LIMIT) + r"""
+local _best_payload = ""
+local _best_score = 0
+local _bytecode_index = 0
+
+local function _log(msg)
+    if _log_file and _log_count < _log_limit then
+        _log_file:write(msg .. "\n")
+        _log_file:flush()
+        _log_count = _log_count + 1
+    end
+end
+
+local function dump(tag, data)
+    safe_hook(function()
+        local s = tostring(data)
+        if #s > 400 then s = s:sub(1, 400) .. "... (len=" .. #s .. ")" end
+        _log("[HOOK][" .. tag .. "] " .. s)
+    end)
+end
+
+local function score_source(src)
+    if type(src) ~= "string" then return 0 end
+    if src:sub(1, 4) == "\27Lua" then
+        _bytecode_index = _bytecode_index + 1
+        local fn = _outpath_bytecode:gsub("%.luac$", "_" .. _bytecode_index .. ".luac")
+        local f = io.open(fn, "wb")
+        if f then f:write(src); f:close() end
+        _log("BYTECODE saved to " .. fn)
+        return -1000
+    end
+    local s = 0
+    if src:find("^[%w_]+$") then s = s - 100 end
+    local unique = {}
+    for i = 1, #src do unique[src:sub(i,i)] = true end
+    local ratio = 0
+    for _ in pairs(unique) do ratio = ratio + 1 end
+    ratio = ratio / math.max(#src, 1)
+    if ratio > 0.8 then s = s - 50 end
+    if src:find("function") then s = s + 10 end
+    if src:find("local ") then s = s + 5 end
+    if src:find("return") then s = s + 8 end
+    if src:find("for ") then s = s + 8 end
+    if src:find("while ") then s = s + 8 end
+    if src:find("repeat") then s = s + 8 end
+    if src:find("if ") then s = s + 8 end
+    if src:find("\nthen") or src:find(" then") then s = s + 5 end
+    if src:find("\nend") or src:find(" end") then s = s + 5 end
+    if src:find("game[%.:]") or src:find("game:") then s = s + 10 end
+    if src:find("print") then s = s + 1 end
+    if src:find("loadstring") then s = s + 2 end
+    if src:find("pcall") then s = s + 2 end
+    if #src > 1000 then s = s + 20 end
+    if #src > 5000 then s = s + 30 end
+    if #src > 10000 then s = s + 40 end
+    return s
+end
+
+local function store_capture(chunk, tag)
+    safe_hook(function()
+        tag = tag or "source"
+        _capture_count = _capture_count + 1
+        if _capture_count > _capture_limit then return end
+        local sc = score_source(chunk)
+        _captures[_capture_count] = {chunk = chunk, score = sc, tag = tag}
+        _log("CAPTURE #" .. _capture_count .. " [" .. tag .. "] len=" .. #chunk .. " score=" .. sc .. " preview=" .. chunk:sub(1, 150))
+        if sc > _best_score then
+            _best_score = sc
+            _best_payload = chunk
+            _log("NEW BEST PAYLOAD score=" .. sc)
+            local f = io.open(_outpath, "w")
+            if f then f:write(chunk); f:close() end
+        end
+    end)
+end
+
+function loadstring(chunk, chunkname)
+    if type(chunk) == "string" and #chunk > 0 then
+        safe_hook(function() dump("loadstring", "len=" .. #chunk) end)
+        store_capture(chunk, "loadstring")
+    end
+    if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
+    return ORIGINAL_LOAD(chunk, chunkname)
+end
+
+function load(chunk, chunkname)
+    if type(chunk) == "string" and #chunk > 0 then
+        safe_hook(function() dump("load", "len=" .. #chunk) end)
+        store_capture(chunk, "load")
+    elseif type(chunk) == "function" then
+        local reader = chunk
+        local fragments = {}
+        chunk = function()
+            local data = reader()
+            if data then
+                table.insert(fragments, data)
+            end
+            return data
+        end
+        local fn = ORIGINAL_LOAD(chunk, chunkname)
+        local assembled = table.concat(fragments)
+        if #assembled > 0 then
+            safe_hook(function() dump("load-reader", "len=" .. #assembled) end)
+            store_capture(assembled, "load-reader")
+        end
+        return fn
+    end
+    if ORIGINAL_LOAD then return ORIGINAL_LOAD(chunk, chunkname) end
+    if ORIGINAL_LOADSTRING then return ORIGINAL_LOADSTRING(chunk, chunkname) end
+end
+
+if ORIGINAL_LOADFILE then
+    loadfile = function(filename, ...)
+        safe_hook(function() dump("loadfile", filename) end)
+        return ORIGINAL_LOADFILE(filename, ...)
+    end
+end
+
+if ORIGINAL_DOFILE then
+    dofile = function(filename, ...)
+        safe_hook(function() dump("dofile", filename) end)
+        return ORIGINAL_DOFILE(filename, ...)
+    end
+end
+
+table.concat = function(t, sep, i, j)
+    local r = ORIGINAL_CONCAT(t, sep, i, j)
+    if type(r) == "string" and #r > 0 then
+        safe_hook(function() dump("table.concat", "len=" .. #r .. " first=" .. r:sub(1, 100)) end)
+        if #r > 20 then store_capture(r, "table.concat") end
+    end
+    return r
+end
+
+string.char = function(...)
+    local r = ORIGINAL_CHAR(...)
+    local argc = select("#", ...)
+    if argc >= 4 and #r > 0 then
+        safe_hook(function() dump("string.char", "args=" .. argc .. " len=" .. #r .. " first=" .. r:sub(1, 80)) end)
+        if #r > 3 then store_capture(r, "string.char") end
+    end
+    return r
+end
+
+string.gsub = function(s, p, r, n)
+    local res = ORIGINAL_GSUB(s, p, r, n)
+    if type(res) == "string" and #res > 50 then
+        safe_hook(function() dump("string.gsub", "len=" .. #res .. " first=" .. res:sub(1, 100)) end)
+        store_capture(res, "string.gsub")
+    end
+    return res
+end
+
+string.sub = function(s, i, j)
+    local res = ORIGINAL_SUB(s, i, j)
+    if type(res) == "string" and #res > 50 then
+        safe_hook(function() dump("string.sub", "len=" .. #res .. " first=" .. res:sub(1, 100)) end)
+        store_capture(res, "string.sub")
+    end
+    return res
+end
+
+table.unpack = function(t, i, j)
+    local parts = {}
+    local count = 0
+    local function collector(...)
+        count = select("#", ...)
+        for idx = 1, count do parts[idx] = tostring(select(idx, ...)) end
+    end
+    if ORIGINAL_UNPACK then collector(ORIGINAL_UNPACK(t, i, j)) end
+    if count > 10 then
+        local assembled = table.concat(parts, " ")
+        safe_hook(function() dump("unpack", "count=" .. count .. " len=" .. #assembled .. " first=" .. assembled:sub(1, 100)) end)
+        store_capture(assembled, "unpack")
+    end
+    return ORIGINAL_UNPACK(t, i, j)
+end
+
+pcall = function(fn, ...)
+    safe_hook(function() dump("pcall", tostring(fn):sub(1, 80)) end)
+    return ORIGINAL_PCALL(fn, ...)
+end
+
+if ORIGINAL_XPCALL then
+    xpcall = function(fn, errh, ...)
+        safe_hook(function() dump("xpcall", tostring(fn):sub(1, 80)) end)
+        return ORIGINAL_XPCALL(fn, errh, ...)
+    end
+end
+
+setfenv = function(fn, env)
+    safe_hook(function() dump("setfenv", tostring(fn):sub(1, 80)) end)
+    return ORIGINAL_SETFENV(fn, env)
+end
+
+getfenv = function(fn)
+    local r = ORIGINAL_GETFENV(fn)
+    safe_hook(function() dump("getfenv", tostring(fn):sub(1, 80)) end)
+    return r
+end
+
+setmetatable = function(t, mt)
+    safe_hook(function() dump("setmetatable", tostring(mt):sub(1, 80)) end)
+    return ORIGINAL_SETMETATABLE(t, mt)
+end
+
+getmetatable = function(t)
+    local r = ORIGINAL_GETMETATABLE(t)
+    if r then safe_hook(function() dump("getmetatable", tostring(t):sub(1, 80)) end) end
+    return r
+end
+
+if ORIGINAL_COROUTINE_CREATE then
+    coroutine.create = function(fn)
+        safe_hook(function() dump("coroutine.create", tostring(fn):sub(1, 80)) end)
+        return ORIGINAL_COROUTINE_CREATE(fn)
+    end
+end
+
+if ORIGINAL_COROUTINE_WRAP then
+    coroutine.wrap = function(fn)
+        safe_hook(function() dump("coroutine.wrap", tostring(fn):sub(1, 80)) end)
+        return ORIGINAL_COROUTINE_WRAP(fn)
+    end
+end
+
+if ORIGINAL_COROUTINE_RESUME then
+    coroutine.resume = function(co, ...)
+        safe_hook(function() dump("coroutine.resume", tostring(co):sub(1, 80)) end)
+        return ORIGINAL_COROUTINE_RESUME(co, ...)
+    end
+end
+
+local _real_print = print
+print = function(...)
+    local parts = {}
+    for i = 1, select('#', ...) do
+        parts[i] = tostring(select(i, ...))
+    end
+    local msg = table.concat(parts, "\t")
+    safe_hook(function() dump("print", msg) end)
+    if #msg > 20 then store_capture(msg, "print") end
+    _real_print(msg)
+end
+
+local _real_warn = warn or print
+warn = function(...)
+    local parts = {}
+    for i = 1, select('#', ...) do
+        parts[i] = tostring(select(i, ...))
+    end
+    local msg = table.concat(parts, "\t")
+    safe_hook(function() dump("warn", msg) end)
+    _real_warn(msg)
+end
 
 local Roblox = {}
 
@@ -45,13 +365,23 @@ function Roblox.make_proxy(name)
             if k == "CoreGui" then return Roblox.make_proxy("CoreGui") end
             if k == "GetService" then
                 return function(self, sn)
+                    safe_hook(function() dump("GetService", sn) end)
                     if sn == "Players" then return Roblox.make_proxy("Players") end
                     if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
                     return Roblox.make_proxy(sn)
                 end
             end
-            if k == "HttpGet" or k == "HttpGetAsync" then return function() return "" end end
-            if k == "SetCore" then return function() end end
+            if k == "HttpGet" or k == "HttpGetAsync" then
+                return function(self, url)
+                    safe_hook(function() dump("HttpGet", url) end)
+                    return "--REMOTE_PAYLOAD"
+                end
+            end
+            if k == "SetCore" then
+                return function(self, method, args)
+                    safe_hook(function() dump("SetCore", method .. " args=" .. tostring(args)) end)
+                end
+            end
         end
         if k == "LocalPlayer" then
             local lp = Roblox.make_proxy("LocalPlayer")
@@ -72,6 +402,15 @@ function Roblox.make_proxy(name)
                 return Roblox.make_proxy(pk)
             end
             return char
+        end
+        if k == "Connect" or k == "connect" then
+            return function(self, cb)
+                safe_hook(function() dump("Connect", newPath) end)
+                if string.find(newPath, "Button") or string.find(newPath, "Click") or string.find(newPath, "Submit") then
+                    _log("Auto-triggering callback for " .. newPath)
+                    pcall(cb)
+                end
+            end
         end
         return Roblox.make_proxy(newPath)
     end
@@ -95,6 +434,7 @@ end
 
 local _game = Roblox.make_proxy("game")
 rawset(_game, "GetService", function(self, sn)
+    safe_hook(function() dump("GetService", sn) end)
     if sn == "Players" then return Roblox.make_proxy("Players") end
     if sn == "HttpService" then return Roblox.make_proxy("HttpService") end
     return Roblox.make_proxy(sn)
@@ -155,11 +495,6 @@ hmt.__index = function(t, k)
     return Roblox.make_proxy("HttpService." .. k)
 end
 
-local function make_stub(name)
-    local stub = Roblox.make_proxy(name)
-    return stub
-end
-
 getgenv = function() return _G end
 getrenv = function() return _G end
 checkcaller = function() return true end
@@ -181,21 +516,24 @@ newcclosure = function(f) return f end
 islclosure = function() return true end
 iscclosure = function() return false end
 getsynasset = function() return "content" end
-request = function(o) return { StatusCode = 200, Body = "", Headers = {} } end
+request = function(o)
+    safe_hook(function() dump("request", o.Url or "?") end)
+    return { StatusCode = 200, Body = "--REMOTE_PAYLOAD", Headers = {} }
+end
 http_request = request
-readfile = function() return "" end
-writefile = function() end
-appendfile = function() end
+readfile = function(f) safe_hook(function() dump("readfile", f) end); return "" end
+writefile = function(f, c) safe_hook(function() dump("writefile", f) end) end
+appendfile = function(f, c) safe_hook(function() dump("appendfile", f) end) end
 isfile = function() return false end
 isfolder = function() return false end
 makefolder = function() end
 delfolder = function() end
 delfile = function() end
 listfiles = function() return {} end
-rconsoleprint = function() end
-rconsoleinfo = function() end
-rconsolewarn = function() end
-rconsoleerr = function() end
+rconsoleprint = function(...) safe_hook(function() dump("rconsole", table.concat({...}, "\t")) end) end
+rconsoleinfo = function(...) safe_hook(function() dump("rconsole", table.concat({...}, "\t")) end) end
+rconsolewarn = function(...) safe_hook(function() dump("rconsole", table.concat({...}, "\t")) end) end
+rconsoleerr = function(...) safe_hook(function() dump("rconsole", table.concat({...}, "\t")) end) end
 rconsoleclear = function() end
 rconsolename = function() end
 mouse1click = function() end
@@ -224,7 +562,54 @@ syn = {
 }
 fluxus = syn
 
+debug = {
+    getinfo = function() return {source="mock", short_src="mock", func=function() end} end,
+    getconstants = function() return {} end,
+    getconstant = function() return nil end,
+    getupvalues = function() return {} end,
+    getupvalue = function() return nil end,
+    getprotos = function() return {} end,
+    getproto = function() return nil end,
+    getstack = function() return {} end,
+    setstack = function() end,
+    setconstant = function() end,
+    setupvalue = function() end,
+    getregistry = function() return {} end,
+    getmetatable = function(t) return getmetatable(t) end,
+    setmetatable = function(t, m) return setmetatable(t, m) end,
+    profilebegin = function() end,
+    profileend = function() end,
+    traceback = function() return "mock traceback" end
+}
+
 math.clamp = math.clamp or function(x, mn, mx) return math.max(mn, math.min(mx, x)) end
+
+local _instruction_count = 0
+local _vm_limit = """ + str(VM_INSTRUCTION_LIMIT) + r"""
+debug.sethook(function(event)
+    _instruction_count = _instruction_count + 1
+    if _instruction_count > _vm_limit then
+        _log("VM_LOOP_LIMIT reached: " .. _instruction_count .. " instructions")
+        error("VM LOOP LIMIT REACHED", 0)
+    end
+end, "", 1000)
+
+setclipboard = function(s) safe_hook(function() dump("setclipboard", s:sub(1, 100)) end) end
+toclipboard = function(s) safe_hook(function() dump("toclipboard", s:sub(1, 100)) end) end
+os.execute = nil
+os.exit = nil
+os.remove = nil
+os.rename = nil
+os.getenv = nil
+package = nil
+require = function(id)
+    safe_hook(function() dump("require", id) end)
+    return setmetatable({}, {
+        __index = function(t, k) return function() return nil end end,
+        __call = function(t, ...) return nil end,
+        __tostring = function() return "module:" .. id end
+    })
+end
 """
 
 
@@ -246,54 +631,39 @@ class LuaHarness:
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
+        bytecode_path = os.path.join(tmpdir, "captured.luac")
+        log_path = os.path.join(tmpdir, "log.txt")
         output_path_fixed = output_path.replace('\\', '/')
+        bytecode_path_fixed = bytecode_path.replace('\\', '/')
+        log_path_fixed = log_path.replace('\\', '/')
 
         harness_code = (
-            "local _real_loadstring = loadstring or load\n"
-            "local _real_load = load or loadstring\n"
-            'local _captured_payload = ""\n'
-            "\n"
-            "local function hook_load(chunk, chunkname)\n"
-            ' if type(chunk) == "string" and #chunk > 0 then\n'
-            "  _captured_payload = chunk\n"
-            '  local f = io.open("' + output_path_fixed + '", "w")\n'
-            "  if f then\n"
-            "   f:write(chunk)\n"
-            "   f:close()\n"
-            "  end\n"
-            " end\n"
-            " return _real_loadstring(chunk, chunkname)\n"
-            "end\n"
-            "\n"
-            "_G.loadstring = hook_load\n"
-            "_G.load = hook_load\n"
-            "if getfenv then\n"
-            " local env = getfenv()\n"
-            " env.loadstring = hook_load\n"
-            " env.load = hook_load\n"
-            "end\n"
-            "\n"
-            "os.execute = nil\n"
-            "os.exit = nil\n"
-            "os.remove = nil\n"
-            "os.rename = nil\n"
-            "os.getenv = nil\n"
-            "package = nil\n"
-            "require = function() return {} end\n"
-            "\n"
-            + ENV_BOOTSTRAP +
-            "\n"
-            "local _real_pcall = pcall\n"
-            "local ok, err = _real_pcall(function()\n"
+            'local _outpath = "' + output_path_fixed + '"\n'
+            + 'local _outpath_bytecode = "' + bytecode_path_fixed + '"\n'
+            + 'local _captured_payload = ""\n'
+            + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
+            + ENV_BOOTSTRAP
+            + "\n"
+            "local ok, err = ORIGINAL_PCALL(function()\n"
             + source +
             "\nend)\n"
             "\n"
-            'if not ok and _captured_payload == "" then\n'
-            ' local f = io.open("' + output_path_fixed + '", "w")\n'
+            "_log(\"EXECUTION_FINISHED ok=\" .. tostring(ok))\n"
+            "if not ok then\n"
+            ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
+            "end\n"
+            "if _best_payload ~= \"\" then\n"
+            ' _captured_payload = _best_payload\n'
+            "end\n"
+            'if _captured_payload == "" then\n'
+            " local f = io.open(_outpath, \"w\")\n"
             " if f then\n"
-            '  f:write("-- [HARNESS ERROR] " .. tostring(err))\n'
+            '  f:write("-- [HARNESS ERROR] " .. tostring(err or "no payload captured"))\n'
             "  f:close()\n"
             " end\n"
+            "end\n"
+            "if _log_file then\n"
+            " _log_file:close()\n"
             "end\n"
         )
 
@@ -333,106 +703,50 @@ class LuaHarness:
         tmpdir = tempfile.mkdtemp()
         harness_path = os.path.join(tmpdir, "harness.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
-        trace_path = os.path.join(tmpdir, "vm_trace.txt")
+        bytecode_path = os.path.join(tmpdir, "captured.luac")
+        log_path = os.path.join(tmpdir, "log.txt")
         output_path_fixed = output_path.replace('\\', '/')
-        trace_path_fixed = trace_path.replace('\\', '/')
+        bytecode_path_fixed = bytecode_path.replace('\\', '/')
+        log_path_fixed = log_path.replace('\\', '/')
 
         harness_code = (
-            'local _real_loadstring = loadstring or load\n'
-            'local _real_load = load or loadstring\n'
-            'local _captured_payload = ""\n'
-            '\n'
-            'local _trace_file = io.open("' + trace_path_fixed + '", "w")\n'
-            'local _trace_count = 0\n'
-            'local _trace_limit = 500\n'
-            '\n'
-            'local function _log_trace(msg)\n'
-            ' if _trace_file and _trace_count < _trace_limit then\n'
-            '  _trace_file:write(msg .. "\\n")\n'
-            '  _trace_file:flush()\n'
-            '  _trace_count = _trace_count + 1\n'
-            ' end\n'
-            'end\n'
-            '\n'
-            'local function hook_load(chunk, chunkname)\n'
-            ' _log_trace("HOOK_LOADSTRING called, chunk len=" .. tostring(type(chunk) == "string" and #chunk or "not_string"))\n'
-            ' if type(chunk) == "string" and #chunk > 0 then\n'
-            '  _captured_payload = chunk\n'
-            '  _log_trace("HOOK_LOADSTRING captured payload, first 200 chars: " .. string.sub(chunk, 1, 200))\n'
-            '  local f = io.open("' + output_path_fixed + '", "w")\n'
-            '  if f then\n'
-            '   f:write(chunk)\n'
-            '   f:close()\n'
-            '  end\n'
-            ' end\n'
-            ' return _real_loadstring(chunk, chunkname)\n'
-            'end\n'
-            '\n'
-            '_G.loadstring = hook_load\n'
-            '_G.load = hook_load\n'
-            'if getfenv then\n'
-            ' local env = getfenv()\n'
-            ' env.loadstring = hook_load\n'
-            ' env.load = hook_load\n'
-            'end\n'
-            '\n'
-            'local _real_newproxy = newproxy\n'
-            'if _real_newproxy then\n'
-            ' local _proxy_count = 0\n'
-            ' _G.newproxy = function(addmeta)\n'
-            '  _proxy_count = _proxy_count + 1\n'
-            '  _log_trace("newproxy called, count=" .. _proxy_count)\n'
-            '  return _real_newproxy(addmeta)\n'
-            ' end\n'
-            'end\n'
-            '\n'
-            'local _real_setfenv = setfenv or (getfenv and function(f, e) end)\n'
-            'if _real_setfenv then\n'
-            ' _G.setfenv = function(f, e)\n'
-            '  _log_trace("setfenv called")\n'
-            '  return _real_setfenv(f, e)\n'
-            ' end\n'
-            'end\n'
-            '\n'
-            'local _real_getfenv = getfenv or function() return _G end\n'
-            '_G.getfenv = function(f)\n'
-            ' _log_trace("getfenv called")\n'
-            ' return _real_getfenv(f)\n'
-            'end\n'
-            '\n'
-            'os.execute = nil\n'
-            'os.exit = nil\n'
-            'os.remove = nil\n'
-            'os.rename = nil\n'
-            'os.getenv = nil\n'
-            'package = nil\n'
-            'require = function() return {} end\n'
-            '\n'
-            + ENV_BOOTSTRAP +
-            '\n'
-            'local _real_pcall = pcall\n'
-            'local ok, err = _real_pcall(function()\n'
+            'local _outpath = "' + output_path_fixed + '"\n'
+            + 'local _outpath_bytecode = "' + bytecode_path_fixed + '"\n'
+            + 'local _captured_payload = ""\n'
+            + 'local _log_file = io.open("' + log_path_fixed + '", "w")\n'
+            + ENV_BOOTSTRAP
+            + "\n"
+            "local ok, err = ORIGINAL_PCALL(function()\n"
             + source +
-            '\nend)\n'
-            '\n'
-            'if _trace_file then\n'
-            ' _log_trace("EXECUTION_FINISHED ok=" .. tostring(ok))\n'
-            ' if not ok then\n'
-            '  _log_trace("RUNTIME_ERROR: " .. tostring(err))\n'
-            ' end\n'
-            ' _trace_file:close()\n'
-            'end\n'
-            '\n'
-            'if not ok and _captured_payload == "" then\n'
-            ' local f = io.open("' + output_path_fixed + '", "w")\n'
-            ' if f then\n'
-            '  f:write("-- [HARNESS ERROR] " .. tostring(err))\n'
-            '  f:close()\n'
-            ' end\n'
-            'end\n'
+            "\nend)\n"
+            "\n"
+            "_log(\"EXECUTION_FINISHED ok=\" .. tostring(ok))\n"
+            "if not ok then\n"
+            ' _log("RUNTIME_ERROR: " .. tostring(err))\n'
+            "end\n"
+            "if _best_payload ~= \"\" then\n"
+            ' _captured_payload = _best_payload\n'
+            "end\n"
+            'if _captured_payload == "" then\n'
+            " local f = io.open(_outpath, \"w\")\n"
+            " if f then\n"
+            '  f:write("-- [HARNESS ERROR] " .. tostring(err or "no payload captured"))\n'
+            "  f:close()\n"
+            " end\n"
+            "end\n"
+            "if _log_file then\n"
+            " _log_file:close()\n"
+            "end\n"
         )
 
-        result = {'captured': None, 'trace': '', 'error': None, 'vm_states': []}
+        result = {
+            'captured': None,
+            'trace': '',
+            'error': None,
+            'stdout': '',
+            'stderr': '',
+            'timed_out': False,
+        }
 
         try:
             with open(harness_path, "w", encoding="utf-8") as f:
@@ -457,27 +771,18 @@ class LuaHarness:
                     pass
                 proc.wait()
                 result['timed_out'] = True
-                if os.path.exists(trace_path):
-                    with open(trace_path, "a", encoding="utf-8") as tf:
-                        tf.write("TIMEOUT_EXPIRED after " + str(timeout) + "s\n")
-            else:
-                result['timed_out'] = False
 
-            if os.path.exists(trace_path):
-                with open(trace_path, "r", encoding="utf-8") as tf:
-                    result['trace'] = tf.read()
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as tf:
+                    result['trace'] = tf.read()[:4000]
 
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
                 if captured and not captured.startswith("-- [HARNESS ERROR]"):
                     result['captured'] = captured
-
-            if not result['captured'] and os.path.exists(output_path):
-                with open(output_path, "r", encoding="utf-8") as f:
-                    err_content = f.read().strip()
-                if err_content:
-                    result['error'] = err_content
+                else:
+                    result['error'] = captured
 
         except Exception as e:
             result['error'] = str(e)
