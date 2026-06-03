@@ -55,6 +55,13 @@ class InstructionTableDumper:
 
         getter_name, offset_const = self._detect_getter(source)
         if getter_name:
+            getter_def = re.search(
+                rf'local\s+function\s+{getter_name}\s*\([^)]*\)\s*return\s+R\s*\[[^\]]+\]',
+                source
+            )
+            if getter_def:
+                source = source[:getter_def.start()] + source[getter_def.end():]
+
             def repl(m):
                 try:
                     expr = m.group(1).strip()
@@ -70,10 +77,10 @@ class InstructionTableDumper:
                 except:
                     pass
                 return m.group(0)
-            source = re.sub(rf'{getter_name}\s*\(\s*([^)]+)\s*\)', repl, source)
+            source = re.sub(rf'{getter_name}\s*\(\s*([^)]+?)\s*\)', repl, source)
 
-        if 'E(' in source or 'l1(' in source or 'l2(' in source:
-            return None
+        if getter_name and f'{getter_name}(' not in source:
+            return source
         if 'function' in source or 'local' in source or 'print' in source:
             return source
         return None
@@ -87,19 +94,19 @@ class InstructionTableDumper:
 
     def _simple_eval(self, expr: str) -> int:
         expr = expr.strip()
-        
+
         while '(' in expr:
             expr = re.sub(r'\(([^()]+)\)', lambda m: str(self._eval_simple_expr(m.group(1))), expr)
-        
+
         return self._eval_simple_expr(expr)
 
     def _eval_simple_expr(self, expr: str) -> int:
         expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
-        
+
         tokens = re.findall(r'[+\-]?\d+', expr)
         if tokens:
             return sum(int(t) for t in tokens)
-        
+
         tokens = re.split(r'([+\-])', expr)
         result = 0
         sign = 1
@@ -129,11 +136,28 @@ class InstructionTableDumper:
         return code
 
     def _detect_getter(self, source: str):
+        m = re.search(
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?([^)]+)\)?\s*\]',
+            source
+        )
+        if m:
+            name = m.group(1)
+            expr = m.group(2)
+            val = self._eval_arithmetic(expr)
+            if val is not None:
+                return name, val
+
         for name in ['E', 'GetStr', 'GetString', 'l1', 'l2']:
-            m = re.search(rf'local\s+function\s+{name}\s*\(\s*{name}\s*\)\s*return\s+R\s*\[\s*{name}\s*\+\s*\(?(-?\d+)\)?\s*\]', source)
+            m = re.search(
+                rf'local\s+function\s+{name}\s*\(\s*{name}\s*\)\s*return\s+R\s*\[\s*{name}\s*\+\s*\(?(-?\d+)\)?\s*\]',
+                source
+            )
             if m:
                 return name, int(m.group(1))
-            m = re.search(rf'local\s+{name}\s*=\s*function\s*\([^)]*\)\s*return\s+R\s*\[[^\]]*\+\s*\(?(-?\d+)\)?\s*\]', source)
+            m = re.search(
+                rf'local\s+{name}\s*=\s*function\s*\([^)]*\)\s*return\s+R\s*\[[^\]]*\+\s*\(?(-?\d+)\)?\s*\]',
+                source
+            )
             if m:
                 return name, int(m.group(1))
         return None, 0
