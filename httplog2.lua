@@ -787,4 +787,721 @@ analyzefunction = function(chunk,r,lowestlayer,...)
        mt=false,
        used=false
       }
-      insert(currentR,'('..tostring_complex(tbl)..')['..tostring_complex(key)..'] = '..tostring_complex
+      insert(currentR,'('..tostring_complex(tbl)..')['..tostring_complex(key)..'] = '..tostring_complex(value))
+     end
+     tbl[key]=value
+    end,
+    __type='sybau type',
+   })
+  end
+ end
+ cenv.setmetatable=function(tbl,mt)
+  if type(tbl)=="context_type" or tbl==fenv_mt or type(mt)=="context_type" then
+   local varname=getnewvar('setmetatable')
+   simplelog(varname,'setmetatable',tbl,mt)
+   return spytbl(varname)
+  end
+  metatables[tbl]={
+   mt=mt,
+   used=false
+  }
+  return setmetatable(tbl,mt)
+ end
+ cenv.setfenv=env.setfenv
+ local game_meta=table.clone(spymt)
+ game_meta.__call=function()
+  return error('game cant be called')
+ end
+ if specialhandle=='moonveil' then
+  local og_index=game_meta.__index
+  game_meta.__index=function(_,key)
+   if type(key)=="string" then
+    if key:sub(1,1):lower()==key:sub(1,1) or key:sub(#key,#key):upper()==key:sub(#key,#key)then
+     print('dtc',key)
+     game_meta.__index=og_index
+     error'moonveil is bad'
+    end
+   end
+   return og_index(_,key)
+  end
+ end
+ cenv.game=setmetatable({
+  [__25mslocation]="game",
+ },game_meta)
+ cenv.Game=cenv.game
+ for _,name in {
+  "Instance","Drawing","UDim","CFrame","Color3","Vector3","UDim2","Vector2",
+  "workspace","ypcall","gethwid","setfpscap","rconsoleprint",
+  "rconsolewarn","package","makefolder","writefile","readfile","listfiles",
+  "mkdir","isfile","delay","clonefunction","hookmetamethod",
+  "setreadonly", "getrawmetatable", "fireproximityprompt",
+  "ColorSequence","ColorSequenceKeypoint","Font","Workspace","cloneref",
+  "TweenInfo","OverlapParams","setclipboard","toclipboard",
+  "hookmetatable","hookfunction","base64","Random","RaycastParams","Ray",
+  "restorefunction","script","hookfunction","print",
+  "request","http_request","httpRequest","HttpRequest","http",
+  "warn","getconnections","hash","NumberRange","NumberSequence",
+  "Rect","NumberSequenceKeypoint","getgc",
+  "getcustomasset","_VERSION","PhysicalProperties","queue_on_teleport",
+  "shared","gethui","fireproximityprompt","crypt","getnamecallmethod",
+  "getconstants","BrickColor","cleardrawcache","WebSocket","isrenderobj",
+  "setrenderproperty","getrenderproperty","setidentity","setthreadcontext",
+  "getidentity","getthreadcontext","getthreadidentity","setthreadidentity",
+  "getsenv","getscripts","getscripthash","getrunningscripts","queueonteleport",
+  "isrbxactive","isgameactive","cache","checkcaller","getupvalue","DeepCopy",
+  "DateTime","input","time","Vector3int16","Vector2int16",
+ } do
+  cenv[name]=spytbl(name)
+ end
+ cenv.tick=function()return os.clock()end
+ cenv.Random={
+  new=function(seed)
+   return {
+    NextNumber=function(_,...)
+     return math.random(...)
+    end
+   }
+  end
+ }
+ cenv._VERSION="Luau"
+ cenv.bit=bit32
+ local spynewcclosure=spytbl("newcclosure")
+ cenv.newcclosure=function(...)
+  local func=...
+  simplelog("_","newcclosure",...)
+  local new_f=function(...)
+   return func(...)
+  end 
+  closures[new_f]=true
+  return new_f
+ end
+ cenv.newlclosure=function(...)
+  local func=...
+  simplelog("_","newlclosure",...)
+  return function(...)return func(...)end
+ end
+ closures[cenv.newcclosure]=true
+ cenv.iscclosure=function(f)
+  return not not closures[f]
+ end
+ cenv.islclosure=function(f)
+  return not closures[f]
+ end
+ cenv.isexecutorclosure=function(...)
+  simplelog("_","isexecutorclosure",...)
+  return true
+ end
+ cenv.require=function(...)
+  local varname=getnewvar('reg')
+  simplelog(varname,'require',...)
+  local t=type(...)
+  if t=='string' and string.sub(...),1,1)=='@' then
+   if (...)=='@self' or (...)=='@game' then
+    error'Unable to require module from given path'
+   elseif string.sub(...),1,6)=='@game/' then
+    error(''..string.sub(...),7)..' is not a valid Service name')
+   end
+   error'Path contains unsupported'
+  elseif t=='context_type' or t=='number' or t=='userdata' then
+   error('expected a ModuleScript, got '..type(...))
+  end
+  return spytbl(varname)
+ end
+ for _,name in pairs({'table','string','math','debug','os','coroutine','buffer'}) do
+  local og=env[name]
+  cenv[name]={}
+  for i,func in pairs(og) do
+   if i=='insert' then
+    cenv[name][i]=og[i]
+    continue
+   elseif type(func)=='function' then
+    cenv[name][i]=func
+   else
+    cenv[name][i]=function(...)
+     local a,b,c=...
+     local has_context=false
+     for _,v in {...} do
+      if type(v)=="context_type" then
+       has_context=true
+       break
+      end
+     end
+     if name=='debug' and (i=='info' or i=='getinfo') then
+      print('debug.info called with',a,b,c)
+      local isnumber=type(a)=='number'
+      if isnumber and a<0 then
+       return error('invalid argument #1 to \'info\' (level can\'t be negative)')
+      elseif a==0 and b=='l' then
+       return -1
+      elseif isnumber and a>1 then
+       for i=1,a+2 do
+        local targetfunc=debug.info(i,'f')
+        if targetfunc==analyzefunction then
+         return
+        end
+       end
+      end
+      a=isnumber and a+1 or a
+      print(a)
+      local res=pack(func(a,b,c))
+      if b=='slnaf' then
+       local diddename
+       for i,v in pairs(cenv) do
+        if (...) == v then
+         diddename=i
+        end
+       end
+       print('didded',diddename)
+       return '[C]',-1,diddename or '',0,true,a
+      end
+      return smart_unpack(res)
+     elseif i=='char' and name=='string' and a==nil then
+      return ''
+     elseif i=='concat' and name=='table' then
+      for i,v in pairs(...) do
+       if type(v)=="context_type" then
+        (...) [i]=concat_me..tostring_complex(v)..concat_me_close
+       end
+      end
+     elseif i=='create' and name=='table' then
+      if a<0 then return {} end
+     end
+     if i=="find" and type(a)=="function" then
+      local varname=getnewvar("find")
+      simplelog(varname,"string.find",a,b,c)
+      return spytbl(varname)
+     end
+     local real_res=has_context and not table.find({"pack","move","unpack"},i) or {func(...)}
+     if i=="traceback" and name=="debug" and type(real_res[1])=="string" then
+      print(real_res[1])
+      real_res[1]=real_res[1]:gsub("%[string \"%.\\httplog2\"%]:%d+\n",""):gsub("%[string \"sandbox\"%]:(%d+)\n","[string \"Dumped script\"]:%1\n")
+     end
+     if (has_context and not table.find({"pack","move","unpack"},i) or real_res[1]=="[string \"./httplog2\"]") then
+      local vars,varstr=genvars(3)
+      simplelog(varstr,name.."."..i,...)
+      return unpack(vars)
+     end
+     return unpack(real_res)
+    end
+   end
+   closures[cenv[name][i]]=true
+  end
+  if name=="debug" then
+   cenv.debug.getinfo=debug_getinfo
+   for i,v in pairs({"getupvalue","getlocal","setlocal","sethook","getregistry","getmetatable","setmetatable","setupvalue","getuservalue","getfenv","setfenv","getinfo"}) do
+    cenv.debug[v]=spytbl("debug."..v,"function")
+   end
+  end
+  if name~="debug" then table.freeze(cenv[name]) end
+ end
+ cenv.Enum=spytbl("Enum")
+ cenv.pcall=pcall,function(...)
+  if plserror then plserror=nil;error("<25ms: forcederror>") end
+  local res={_pcall(...)}
+  if res[1] == false then
+   res[2] = tostring(res[2])
+  end
+  return unpack(res)
+ end
+ if input:find("newproxy, setmetatable, getmetatable, select,",1,true) then
+  local error_just_called
+  cenv.pcall = function(...)
+   local results = {_pcall(...)}
+   if error_just_called then
+    error_just_called = false
+    return unpack(results)
+   end
+   local first = results[1]
+   if type(first) == "boolean" and first == false then
+    local second = results[2]
+    if type(second) == "string" then
+     results[2] = (second:gsub(":(%d+)([:\r\n])", ":1%2"))
+    end
+   end
+   return unpack(results)
+  end
+  local _error = error
+  cenv.error = function(...)
+   error_just_called = true
+   return _error(...)
+  end
+ end
+ for _,v in pairs({"pairs","ipairs"}) do
+  cenv[v]=function(tbl)
+   if not tbl then
+    insert(currentR,"for i,v in "..v.."(nil)do end")
+    return
+   end
+   if type(tbl)=="context_type" then
+    local mt=getmetatable(tbl)
+    if not mt or not mt.__iter then
+     simplelog("_",v,tbl)
+     return function()end
+    end
+    return mt.__iter(tbl,v)
+   else return env[v](tbl)
+   end
+  end
+ end
+ local nextcalls={}
+ cenv.next=function(tbl,...)
+  if type(tbl)=="context_type" then
+   if ... and nextcalls[tbl] then
+    return nextcalls[tbl](tbl,...)
+   end
+   local func=getmetatable(tbl).__iter(tbl,"next")
+   nextcalls[tbl]=func
+   return func(tbl,...)
+  else return env.next(tbl,...)
+  end
+ end
+ cenv.ishooked=function(...)
+  simplelog("_","ishooked",...)
+  return false
+ end
+ cenv.IsHooked=function(...)
+  simplelog("_","IsHooked",...)
+  return false
+ end
+ cenv.isfunctionhooked=function(...)
+  simplelog("_","isfunctionhooked",...)
+  return false
+ end
+ cenv.wait=function(...)simplelog("_","wait",...);return ((...) or 0)+math.random()/10 end
+ cenv.loadstring=function(src,...)
+  local varname=getnewvar()
+  if type(src)=="string" then
+   if not(type(src)=="string" and src:find(".@%(/*,....... ...,,*/(#%&@@.\n (* ,/(#%%&&@@@@&",1,true)) then
+    simplelog(varname,"loadstring",src,...)
+   end
+   src=settings.hook_op and hook_op(src) or src
+   local success,_func,a=_pcall(luau.load,src,(...) or "25ms_loadstring")
+   if not success then
+    return nil,_func
+   end
+   local _funcenv=getfenv(_func)
+   if _funcenv.require~=cenv.require then
+    setfenv(_func,setmetatable({},{__index=function(_,key)
+     return cenv[key] or _funcenv[key]
+    end}))
+   end
+   return _func,a
+  elseif type(src)=="context_type" then
+   simplelog(varname,"loadstring",src)
+   return function(...)
+    local func_varname=getnewvar()
+    simplelog(func_varname,varname,...)
+    return spytbl(func_varname)
+   end
+  end
+ end
+ if msecNotReady then
+  cenv.allowLogging=function()
+   msecNotReady=false
+   cenv.allowLogging=nil
+   cenv.SetCenv=nil
+  end
+  cenv.SetCenv=function(key,value)
+   cenv[key]=value
+  end
+ end
+ cenv.ce_like_loadstring_fn=cenv.loadstring
+ cenv.script_key="c4ce76cd36f2afee4dcee7e87576e5fa"
+ local _rawset=rawset
+ local tsenv={}
+ cenv.getgenv=function()
+  return setmetatable({
+   [__25mslocation]="genv",
+  },{
+   __index=function(_,key)
+    local varname=getnewvar()
+    insert(currentR,"local "..varname.."=genv["..stringify(key).."]")
+    if settings.spynilglobals and _25mspredefined[key]==nil and genv[key]==nil then
+     return spytbl(varname)
+    end
+    return _25mspredefined[key] or genv[key] or cenv[key]
+   end,
+   __newindex=function(_,k,v)
+    genvused=true
+    insert(currentR,"genv["..stringify(k).."]="..tostring_complex(v))
+    genv[k]=v
+   end,
+   __type="context_type"
+  })
+ end
+ cenv.getenv=function()
+  return setmetatable({
+   [__25mslocation]="renv",
+  },{
+   __index=cenv,
+   __newindex=function(_,k,v)
+    insert(currentR,"getenv()["..stringify(k).."]="..tostring_complex(v))
+   end,
+   __type="context_type"
+  })
+ end
+ cenv._G=setmetatable({
+  [__25mslocation]="_G"
+ },{
+  __index=function(_,key)
+   insert(currentR,"local _=_G["..stringify(key).."]")
+   print(key)
+   return rawget(_,key) or _25mspredefined[key] or cenv[key] or genv[key]
+  end,
+  __newindex=function(_,k,v)
+   insert(currentR,"_G["..stringify(k).."]="..tostring_complex(v)..(settings.log_lines and " -- line "..(function()
+    local linenumber=debug.traceback():split"\n"
+    for i,v in linenumber do
+     if v:find("sandbox",1,true) then
+      linenumber=v:split(":")[2]
+      break
+     end
+    end
+    return linenumber
+   end() or ""))
+   rawset(_,k,v)
+  end,
+  __type='context_type'
+ })
+ cenv.task=setmetatable({
+  wait=function(...)simplelog("_","task.wait",...);return ((...or 0)+math.random()/10 end,
+  [__25mslocation]='task'
+ },{
+  __index=spytbl('task'),
+  __type='context_type',
+ })
+ cenv.spawn=spytbl('spawn'),function(f,...)f(...)end
+ cenv.getenv=function(lvl)
+  local originvl=lvl
+  if type(lvl)=='number' and lvl<0 then return error('invalid argument #1 to \'getenv\' (level must be non-negative)') end
+  if type(lvl)=='boolean' then return error('invalid argument #1 to \'getenv\' (number expected, got boolean)') end
+  lvl=lvl and (type(lvl)=='number' and lvl+1 or lvl) or 2
+  local res=getfenv((table.find({'function','number'},type(lvl)) and lvl or nil))
+  local res_mt=getmetatable(res)
+  if rawget(res,'require')==require or (type(res_mt)=='table' and type(res_mt.__index)=='table' and res_mt.__index.require==require) or (type(res_mt)=='table' and type(res_mt.__index)=='function' and rawget(res,'print')==print) then
+   return fenv_mt
+  end
+  return res
+ end
+ cenv.identifyexecutor=function()
+  local vars,varstr=genvars(2)
+  simplelog(varstr,'identifyexecutor')
+  return vars[1],vars[2]
+ end
+ cenv.getexecutorname=function()
+  local varname=getnewvar()
+  simplelog(varname,'getexecutorname')
+  return spytbl(varname)
+ end
+ local fake_file_system={}
+ cenv.writefile=function(path,cont)
+  simplelog("_",'writefile',path,cont)
+  fake_file_system[path]=cont
+ end
+ cenv.appendfile=function(path,cont)
+  simplelog("_",'appendfile',path,cont)
+  if fake_file_system[path] then
+   fake_file_system[path]=fake_file_system[path]..cont
+  else
+   fake_file_system[path]=cont
+  end
+ end
+ cenv.readfile=function(path)
+  local varname=getnewvar()
+  return fake_file_system[path]
+ end
+ cenv.isfile=function(path)
+  return fake_file_system[path]~=nil
+ end
+ cenv.isfolder=function(path)
+  return fake_file_system[path]~=nil
+ end
+ cenv.mkdir=function(path)
+  simplelog("_",'mkdir',path)
+  fake_file_system[path]={}
+ end
+ cenv.listfiles=function(path)
+  local varname=getnewvar()
+  simplelog(varname,'listfiles',path)
+  local res={}
+  for i,v in pairs(fake_file_system) do
+   if table.concat(v:reverse():split("/"),"/",2):reverse()==path then
+    insert(res,i)
+   end
+  end
+  return spytbl(varname)
+ end
+ for i,v in pairs(cenv) do
+  genv[i] = v
+ end
+ local typin_check=false
+ cenv._25missingfunction=function(...) if ...=='meow:3' then error('Controlled shutdown') end end
+ cenv.type=function(...)
+  local res=type(...)
+  if ...=='25ms is such a god' then typin_check=true;return "my dhh hurts"
+  elseif typin_check==true and res=='table' and (...)[1]=='bat is gay' then
+   local calledtimes,extreme_mow=math.random(1,10),0
+   local meow_obj
+   for i=1,calledtimes do
+    local len=math.random(1,3)
+    local str=string.rep('x',len)
+    if extreme_mow+len>100 then
+     str=""
+    else
+     extreme_mow+=len
+    end
+    meow_obj=(...)[str]
+   end
+   meow_obj[__25mslocation]=meow_obj
+   setmetatable(meow_obj,{
+    __index=function(_,key)
+     if key==extreme_mow then
+      return string.rep('x',calledtimes-1)..'\x1B'
+     elseif key==420 then
+      return '\x1B'
+     end
+     return string.rep('x',math.random(1,20))
+    end,
+    __type="context_type",
+    __metatable=false
+   })
+   return nil
+  end
+  if closures(...) then
+   return "function"
+  elseif types(...) then
+   return types(...)
+  elseif res=="context_type" then
+   simplelog('_','type',...)
+   return 'table'
+  end
+  return res
+ end
+ cenv.typeof=cenv.type
+ local oldgetmt=getmetatable
+ cenv.getmetatable=function(t)
+  if type(t)=="context_type" or t==fenv_mt then
+   local varname=getnewvar()
+   simplelog(varname,'getmetatable',t)
+   return spytbl(varname)
+  end
+  return oldgetmt(t)
+ end
+ cenv.rawget=function(t,k)
+  if (type(t)=="context_type" or type(k)=="context_type") and not type(k)=="table" then
+   local varname=getnewvar('rawget')
+   simplelog(varname,'rawget',t,k)
+   return spytbl(varname)
+  end
+  return rawget(t,k)
+ end
+ for _,func in pairs({"newproxy","unpack","rawset"}) do
+  cenv[func]=function(...)
+   simplelog("_",func,...)
+   local varname=getnewvar()
+   return spytbl(varname)
+  end
+ end
+ cenv.ipairs=cenv.ipairs
+ cenv.pairs=cenv.pairs
+ cenv.select=function(...)
+  simplelog("_",'select',...)
+  local varname=getnewvar()
+  return spytbl(varname)
+ end
+ cenv.require=cenv.require
+ local function b_loadstring(f,source)
+  local varname=getnewvar()
+  simplelog(varname,'loadstring',source)
+  return spytbl(varname)
+ end
+ cenv.loadstring=b_loadstring
+ cenv.load=b_loadstring
+ local blocked_upvalues={}
+ local mt_25ms_globals=setmetatable({},{__index=cenv,__newindex=cenv,__type="context_type"})
+ local fenv_mt
+ fenv_mt=setmetatable({
+  [__25mslocation]="fenv"
+ },{
+  __index=function(_,key)
+   local lastlen=#currentR
+   if key==nil then
+    print(key)
+    return
+   end
+   if not predefinedfound and key=='_25mspredefine' and input:find('_25mspredefine',1,true) then
+    predefinedfound=true
+    simplelog('_','_25mspredefine','this function was referenced in the script, if you didn\'t do this place _25mspredefine() on top of your script')
+    return function(t)
+     for i,v in t do
+      _25mspredefined[i]=v
+     end
+    end
+   end
+   if luraphnotready==1 and key=='coroutine' then
+    luraphnotready=2
+   elseif luraphnotready==2 and key=='bit32' then
+    luraphnotready=3
+    print"reached 3"
+   elseif luraphnotready==3 and key=='select' then
+    luraphnotready=4
+   elseif luraphnotready==4 and key=='table' then
+    luraphnotready=5
+    print"reached 5"
+   elseif luraphnotready==5 then
+    if key=='loadstring' then
+     return function(src,...)
+      luraphnotready=0
+      print("done!!!!!!!!!!!!!!!!")
+      return luau.load(src,...)
+     end
+    elseif key=='require' then
+     return function()return {}end
+    end
+   end
+   if #currentR==lastlen then
+    fuck+=1
+    if fuck>fenv_error_on+2 then
+     plserror=true
+    elseif fuck>fenv_error_on then
+     error("<25ms: infiniteleopofenv>")
+    end
+   else
+    fuck=0
+   end
+   lastlen=#currentR
+   local try=_25mspredefined[key] or tsenv[key] or cenv[key]
+   if try~=nil then
+    return try
+   elseif key=="IsChooseTeam" then
+    return function()return true end
+   elseif (env[key]==nil) then
+    if not logged_undefined_fenv[key] and not (type(key)=="string" and #key>=12 and #key<=14 and settings.ignore_prom_globals) then
+     fenvused=true
+     local varname=getnewvar(key)
+     logged_undefined_fenv[key]=varname
+     insert(currentR,"local "..varname.."=fenv["..tostring_complex(key).."]")
+    end
+    if settings.spynilglobals and not (#key>=12 and #key<=14 and settings.ignore_prom_globals) then return spytbl(logged_undefined_fenv[key]) end
+    return env[key] or genv[key]
+   end
+  end,
+  __newindex=function(_,k,v)
+   if k=="_" or #k>50 then return end
+   fenvused=true
+   if not table.find({"Db","Dc"},k) and not msecNotReady then
+    if k=="MoonSec_StringsHiddenAttr" then
+     settings.spynilglobals=settings.spynilglobals==nil or settings.spynilglobals
+     settings.hook_op=settings.hook_op==nil or settings.hook_op
+     settings.usesimplefunctions=settings.usesimplefunctions==true
+    end
+    if k=="Descriptor" or type(k)=="string" and k:sub(1,10)=="FlatIdent_" then
+    else
+     insert(currentR,`fenv[{tostring_complex(k)}] = {tostring_complex(v)}`..(settings.log_lines and " -- line "..(function()
+      local linenumber=debug.traceback():split"\n"
+      for i,v in linenumber do
+       if v:find("sandbox",1,true) then
+        linenumber=v:split(":")[2]
+        break
+       end
+      end
+      return linenumber
+     end)() or ""))
+    end
+   end
+   tsenv[k]=v
+  end,
+  __metatable=false,
+ })
+ setfenv(chunk,fenv_mt)
+end
+local p
+if lowestlayer and luraphcarry then
+ chunk=function()error"v14.6 support soon sorry gays"end
+ p=table.pack(_pcall(chunk,luraphcarry))
+else p = table.pack(_pcall(chunk,unpackchoose(varargs,...))) end
+if not p[1] and type(p[2])=="string" then
+ p[2]=p[2]:gsub("%[string \"sandbox\"%]:","line "):gsub("%[string \"%.[\\/]httplog2\"%]:","internal ")
+ simplelog("er","error",unpack(p,2))
+elseif not p[1] then
+ simplelog("er","error")
+else
+ local function get(num)
+  if not num or num==0 then return end
+  if num>100 then
+   return nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil
+  elseif num>10 then
+   return nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,get(num-10)
+  end
+  return nil, get(num-1)
+ end
+ if p.n>1 then
+  insert(r,"return "..stringify(unpack(p,2,p.n)))
+ end
+end
+currentR=oldR
+return r
+end
+local r={
+}
+local start=clock()
+local s,re=pcall(analyzefunction,chunk,r,true)
+if not s then print("heh",s,re) end
+local post=commercial and "_dump.lua" or ".lua"
+for i=1,unclosed_blocks do
+ insert(r,"end")
+end
+if fenvused then
+ insert(r,1,"local fenv=getfenv()")
+end
+if genvused then
+ insert(r,1,"local genv=getgenv()")
+end
+for i=1,20 do
+ if not is_unfinished then break end
+ local newr={}
+ for _,line in pairs(r) do
+  local num=line:match("-- func(%d+)")
+  if num and unfinishedfuncs[tonumber(num)] then
+   local locallocation,localused=#newr,false
+   local localname=newr[locallocation]:match("local ([%w_]+)")
+   local obj=unfinishedfuncs[tonumber(num)]
+   local s,re=pcall(analyzefunction,obj.func,{},false,multiunpack(obj.args,obj.varargs))
+   for i,v in pairs(re) do
+    if v~=nil then
+     if v:find(localname,1,true) then
+      localused=true
+     end
+     insert(newr,v)
+    end
+   end
+   if localused then
+    newr[locallocation]=newr[locallocation]:gsub("(local )([%w_]+)","%2")
+    insert(newr,locallocation,"local "..localname)
+   end
+  else
+   insert(newr,line)
+  end
+ end
+ r=newr
+end
+if not settings.log_lines then
+ local total_before=#r
+ local start=os.clock()
+ r=evaluate_single_use_variables(r)
+ evaluate_stuff(r)
+ print("evaluating in ",os.clock()-start,"seconds")
+ print("reduced from",total_before,"to",#r,"lines")
+else
+ local oldr=table.clone(r)
+ table.clear(r)
+ for _,v in oldr do
+  if v~=nil then
+   insert(r,(v:gsub(identifier.."_?","")))
+  end
+ end
+end
+fs.writeFile(outpath..targetfilename:gsub(".lua","")..post,table.concat(r,"\n"))
+local endt=clock()-startt
+print("success in",endt,"seconds!\nWritten to "..outpath..targetfilename:gsub(".lua","")..post)
+print(table.concat(r,"\n"))
