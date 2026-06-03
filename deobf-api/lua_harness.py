@@ -1,12 +1,18 @@
 import os
 import re
+import shutil
+import tempfile
+import subprocess
+import signal
 from typing import Optional
 
 
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
         self.unluac_path = unluac_path
-        self.available = self._check_lupa()
+        self.lune_available = shutil.which('lune') is not None
+        self.lupa_available = self._check_lupa()
+        self.available = self.lune_available or self.lupa_available
 
     @staticmethod
     def _check_lupa() -> bool:
@@ -17,9 +23,48 @@ class LuaHarness:
             return False
 
     def run(self, source: str, timeout: int = 30) -> Optional[str]:
-        if not self.available:
+        if self.lune_available:
+            return self._run_lune(source, timeout)
+        if self.lupa_available:
+            return self._run_lupa(source, timeout)
+        return None
+
+    def _run_lune(self, source: str, timeout: int = 30) -> Optional[str]:
+        tmpdir = tempfile.mkdtemp()
+        input_path = os.path.join(tmpdir, "input.lua")
+        output_path = os.path.join(tmpdir, "captured.lua")
+        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "httplog_harness.luau")
+
+        try:
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            proc = subprocess.Popen(
+                ["lune", "run", harness_path, input_path, output_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True
+            )
+            try:
+                proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except Exception:
+                    pass
+
+            if os.path.exists(output_path):
+                with open(output_path, "r", encoding="utf-8") as f:
+                    captured = f.read().strip()
+                if captured and len(captured) > 10:
+                    return captured
             return None
-        return self._run_lupa(source, timeout)
+        except Exception:
+            return None
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _run_lupa(self, source: str, timeout: int = 30) -> Optional[str]:
         import lupa
@@ -151,12 +196,8 @@ class LuaHarness:
         stripped = source.strip()
         stripped = re.sub(r'^return\s+', '', stripped, count=1)
 
-        patched = stripped.replace('error("Tamper Detected!")', '-- tamper bypassed')
-        patched = re.sub(r'\btype\(', 'type_raw(', patched)
-        patched = 'type_raw = type\n' + patched
-
         try:
-            lua.execute(patched)
+            lua.execute(stripped)
         except Exception:
             pass
 
