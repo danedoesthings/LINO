@@ -56,12 +56,20 @@ class Unveiler:
         except Exception:
             return False
 
+    def _raw_string_dump(self, source: str) -> str:
+        lines = ["-- Raw string dump (decode failed)"]
+        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', source)
+        for i, s in enumerate(strings[:100]):
+            lines.append(f'-- [{i}] "{s}"')
+        return '\n'.join(lines)
+
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
         decoder = StringTableDecoder(source)
         if not decoder.ok:
             self._log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
-            return '', 'unable', 'String decode failed'
+            return self._raw_string_dump(source), 'raw_string_dump', 'String decode failed, returning raw dump'
+
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
         self._log('harness', True, 'executing Lua harness')
@@ -83,9 +91,9 @@ class Unveiler:
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
             dumped = dumper.dump()
-            if dumped:
-                self._log('devirtualise_success', True, 'instruction table dumped')
-                return dumped, 'instr_table_dump', 'Instruction table and all decoded strings dumped'
+            if dumped and len(dumped) > 200:
+                self._log('devirtualise_success', True, 'instruction table dumped with reconstruction')
+                return dumped, 'instr_table_dump', 'String table with source reconstruction'
         except Exception as e:
             self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
 
@@ -135,7 +143,14 @@ class Unveiler:
             header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete'
 
-        self._log('devirtualise', False, 'static analysis produced no meaningful output')
+        self._log('devirtualise', False, 'all stages failed, returning string dump')
+        try:
+            dumper = InstructionTableDumper(source, decoder.strings)
+            dumped = dumper.dump()
+            if dumped:
+                return dumped, 'wearedevs_decode', 'Decoded string table (best effort)'
+        except:
+            pass
         lines = [f'-- [{i}] {json.dumps(str(s))}' for i, s in enumerate(decoder.strings) if s]
         return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
 
