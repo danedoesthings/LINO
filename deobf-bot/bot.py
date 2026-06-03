@@ -353,5 +353,17 @@ async def on_ready():
         log.error(f"Failed to sync commands: {e}")
     log.info(f'Ready: {bot.user} | API: {API_URL}')
 
+    async def keep_alive():
+        await bot.wait_until_ready()
+        while not bot.is_closed():
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.get(f'{API_URL}/alive')
+            except:
+                pass
+            await asyncio.sleep(60)
+
+    bot.loop.create_task(keep_alive())
+
 if __name__ == '__main__':
     bot.run(TOKEN)
