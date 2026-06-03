@@ -29,13 +29,30 @@ JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
 os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
 
 
-def safe_eval(expr: str) -> int:
+def safe_eval(expr: str) -> Optional[int]:
     expr = re.sub(r'\s+', '', expr)
+    if re.match(r'^0[xX][0-9a-fA-F]+$', expr):
+        return int(expr, 16)
+    expr = expr.strip('()')
     expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
-    tokens = re.findall(r'[+\-]?\d+', expr)
-    if tokens:
-        return sum(int(t) for t in tokens)
-    return 0
+    result = 0
+    current = ''
+    sign = 1
+    for i, c in enumerate(expr):
+        if c in '+-' and i > 0 and expr[i-1] not in '+-':
+            if current:
+                result += sign * int(current)
+            current = ''
+            sign = 1 if c == '+' else -1
+        else:
+            current += c
+    if current:
+        result += sign * int(current)
+    return result
+
+
+def _token_replace(text: str, old: str, new: str) -> str:
+    return re.sub(r'(?<![a-zA-Z0-9_])' + re.escape(old) + r'(?![a-zA-Z0-9_])', new, text)
 
 
 @dataclass
@@ -60,6 +77,7 @@ class Unveiler:
 
     def _is_valid_lua(self, code: str) -> bool:
         if not HAS_LUAPARSER:
+            self._log('validation', False, 'luaparser not available, skipping syntax check')
             return True
         try:
             lua_ast.parse(code)
@@ -93,29 +111,42 @@ class Unveiler:
     def _detect_all_getters(self, source: str) -> list:
         single = source.replace('\n', ' ').replace('\r', ' ')
         patterns = [
-            r'local\s+function\s+(\w+)\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(([^)]+)\)\s*\]',
-            r'local\s+function\s+(\w+)\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*\+\s*([\d\-\+]+)\s*\]',
-            r'local\s+(\w+)\s*=\s*function\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(?([^)]+)\)?\s*\]',
+            r'local\s+function\s+(\w+)\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*([+\-*/%])\s*\(?([^)\]]+)\)?\s*\]',
+            r'local\s+(\w+)\s*=\s*function\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*([+\-*/%])\s*\(?([^)\]]+)\)?\s*\]',
         ]
         getters = []
         for pat in patterns:
             for m in re.finditer(pat, single):
                 name = m.group(1)
-                offset = safe_eval(m.group(3))
-                if name and offset is not None:
-                    getters.append((name, offset))
+                op = m.group(3)
+                offset_expr = m.group(4)
+                if op == '+':
+                    offset = safe_eval(offset_expr)
+                    if name and offset is not None:
+                        getters.append((name, offset))
+                elif op == '-':
+                    offset = safe_eval(offset_expr)
+                    if name and offset is not None:
+                        getters.append((name, -offset))
         return getters
+
+    def _is_getter_definition(self, source: str, pos: int) -> bool:
+        before = source[max(0, pos-30):pos]
+        return bool(re.search(r'\b(function|local\s+function)\s*$', before))
 
     def _resolve_all_getters(self, source: str, strings: list) -> str:
         getters = self._detect_all_getters(source)
         result = source
         for getter_name, getter_offset in getters:
-            pattern = re.compile(rf'{getter_name}\s*\(')
+            pattern = re.compile(rf'(?<!\bfunction\s)(?<!\blocal\s){getter_name}\s*\(')
             pos = 0
             while pos < len(result):
                 m = pattern.search(result, pos)
                 if not m:
                     break
+                if self._is_getter_definition(result, m.start()):
+                    pos = m.end()
+                    continue
                 start = m.start()
                 paren_start = m.end()
                 depth = 1
@@ -131,24 +162,25 @@ class Unveiler:
                     i += 1
                 if i >= len(result):
                     break
-                expr = result[paren_start:i]
+                expr = result[paren_start:i].strip('()')
                 try:
                     n = safe_eval(expr)
-                    idx = n + getter_offset
-                    if 1 <= idx <= len(strings):
-                        s = strings[idx - 1]
-                        if s:
-                            escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                            result = result[:start] + f'"{escaped}"' + result[i+1:]
-                            pos = start + len(escaped) + 2
-                            continue
+                    if n is not None:
+                        idx = n + getter_offset
+                        if 1 <= idx <= len(strings):
+                            s = strings[idx - 1]
+                            if s:
+                                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                                result = result[:start] + f'"{escaped}"' + result[i+1:]
+                                pos = start + len(escaped) + 2
+                                continue
                 except:
                     pass
                 pos = i + 1
         return result
 
     def _replace_string_table_refs(self, source: str, strings: list) -> str:
-        def repl(m):
+        def repl_read(m):
             try:
                 idx = int(m.group(1))
                 if 1 <= idx <= len(strings):
@@ -158,8 +190,8 @@ class Unveiler:
             except:
                 pass
             return m.group(0)
-        result = re.sub(r'R\s*\[\s*(\d+)\s*\]', repl, source)
-        result = re.sub(r'R\s*\[\s*\(\s*(\d+)\s*\)\s*\]', repl, result)
+        result = re.sub(r'(?<!=)\s*R\s*\[\s*(\d+)\s*\]', repl_read, source)
+        result = re.sub(r'(?<!=)\s*R\s*\[\s*\(\s*(\d+)\s*\)\s*\]', repl_read, result)
         return result
 
     def _calculate_vm_score(self, source: str) -> int:
@@ -167,7 +199,7 @@ class Unveiler:
         indicators = [
             (r'while\s+\w+\s+do\s+if\s+\w+\s*[<>=]+\s*-?\d+\s+then', 20),
             (r'if\s+\w+\s*[<>=]+\s*-?\d+\s+then', 5),
-            (r'local\s+function\s+\w+\s*\([^)]*\)\s*return\s+R\s*\[.*\+\s*\d+\]', 15),
+            (r'local\s+function\s+\w+\s*\([^)]*\)\s*return\s+R\s*\[[^\]]*[+\-*/%][^\]]*\d+\]', 15),
             (r'\w+\s*=\s*\{\s*\[?\d+\]?\s*=\s*function', 10),
         ]
         for pattern, weight in indicators:
@@ -184,9 +216,36 @@ class Unveiler:
 
         reconstructed = self._resolve_all_getters(source, decoder.strings)
         reconstructed = self._replace_string_table_refs(reconstructed, decoder.strings)
-        
+
         vm_score = self._calculate_vm_score(reconstructed)
         self._log('vm_detect', True, f'VM score: {vm_score}')
+
+        if vm_score >= 30:
+            self._log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
+            try:
+                vm_devirt = VMDevirtualizer(source, decoder)
+                lifted = vm_devirt.devirtualize()
+                if lifted and self._is_valid_lua(lifted):
+                    self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
+                    renamer = VarRenamer()
+                    lifted = renamer.rename(lifted)
+                    lifted = beautify(lifted)
+                    return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
+                else:
+                    diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'returned None/empty'
+                    self._log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
+            except Exception as e:
+                self._log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
+
+            self._log('devirtualise', True, 'attempting instruction-level VM lifting')
+            vm_lifter = WeAreDevsVMLifter(decoder.strings)
+            lifted = vm_lifter.lift(source)
+            if lifted and self._is_valid_lua(lifted):
+                renamer = VarRenamer()
+                lifted = renamer.rename(lifted)
+                lifted = beautify(lifted)
+                self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+                return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('harness', True, 'attempting static symbolic evaluation')
         harness_result = self.harness.run(reconstructed, timeout=30, decoded_strings=decoder.strings)
@@ -213,22 +272,6 @@ class Unveiler:
         except Exception as e:
             self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
 
-        self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
-        try:
-            vm_devirt = VMDevirtualizer(source, decoder)
-            lifted = vm_devirt.devirtualize()
-            if lifted and self._is_valid_lua(lifted):
-                self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
-                renamer = VarRenamer()
-                lifted = renamer.rename(lifted)
-                lifted = beautify(lifted)
-                return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
-            else:
-                diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'returned None/empty'
-                self._log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
-        except Exception as e:
-            self._log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
-
         self._log('devirtualise', True, 'attempting state-machine lifting via regex')
         sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
         lifted = sm_lifter.lift()
@@ -238,16 +281,6 @@ class Unveiler:
             lifted = renamer.rename(lifted)
             lifted = beautify(lifted)
             return lifted, 'state_machine_lifted', 'State machine lifted'
-
-        self._log('devirtualise', True, 'attempting instruction-level VM lifting')
-        vm_lifter = WeAreDevsVMLifter(decoder.strings)
-        lifted = vm_lifter.lift(source)
-        if lifted and self._is_valid_lua(lifted):
-            renamer = VarRenamer()
-            lifted = renamer.rename(lifted)
-            lifted = beautify(lifted)
-            self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
-            return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('devirtualise', True, 'falling back to static devirtualisation')
         devirt = Devirtualiser(decoder, annotate=True)
