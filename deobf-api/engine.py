@@ -29,34 +29,6 @@ JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
 os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
 
 
-def safe_eval(expr: str) -> Optional[int]:
-    expr = re.sub(r'\s+', '', expr)
-    if re.match(r'^0[xX][0-9a-fA-F]+$', expr):
-        return int(expr, 16)
-    expr = expr.strip('()')
-    expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
-    result = 0
-    current = ''
-    sign = 1
-    for i, c in enumerate(expr):
-        if c in '+-' and i > 0 and expr[i-1] not in '+-':
-            if current:
-                try:
-                    result += sign * int(current)
-                except ValueError:
-                    return None
-            current = ''
-            sign = 1 if c == '+' else -1
-        else:
-            current += c
-    if current:
-        try:
-            result += sign * int(current)
-        except ValueError:
-            return None
-    return result
-
-
 @dataclass
 class DiagnosticEvent:
     stage: str
@@ -79,7 +51,6 @@ class Unveiler:
 
     def _is_valid_lua(self, code: str) -> bool:
         if not HAS_LUAPARSER:
-            self._log('validation', False, 'luaparser not available, skipping syntax check')
             return True
         try:
             lua_ast.parse(code)
@@ -110,144 +81,6 @@ class Unveiler:
     def _is_quality_output(self, code: str) -> bool:
         return self._score_lua_quality(code) >= 20
 
-    def _detect_all_getters(self, source: str) -> list:
-        single = source.replace('\n', ' ').replace('\r', ' ')
-        patterns = [
-            r'local\s+function\s+(\w+)\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*([+\-*/%])\s*\(?([^)\]]+)\)?\s*\]',
-            r'local\s+(\w+)\s*=\s*function\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*([+\-*/%])\s*\(?([^)\]]+)\)?\s*\]',
-        ]
-        getters = []
-        for pat in patterns:
-            for m in re.finditer(pat, single):
-                name = m.group(1)
-                op = m.group(3)
-                offset_expr = m.group(4)
-                offset = safe_eval(offset_expr)
-                if name and offset is not None:
-                    if op == '+':
-                        getters.append((name, offset))
-                    elif op == '-':
-                        getters.append((name, -offset))
-        return getters
-
-    def _resolve_getter_outside_strings(self, source: str, getter_name: str, getter_offset: int, strings: list) -> str:
-        result = []
-        in_string = False
-        string_char = None
-        escape = False
-        in_comment = False
-        i = 0
-
-        while i < len(source):
-            c = source[i]
-
-            if in_comment:
-                if c == '\n':
-                    in_comment = False
-                result.append(c)
-                i += 1
-                continue
-
-            if escape:
-                escape = False
-                result.append(c)
-                i += 1
-                continue
-
-            if c == '\\':
-                escape = True
-                result.append(c)
-                i += 1
-                continue
-
-            if in_string:
-                result.append(c)
-                if c == string_char:
-                    in_string = False
-                i += 1
-                continue
-
-            if c == '"' or c == "'":
-                in_string = True
-                string_char = c
-                result.append(c)
-                i += 1
-                continue
-
-            if source[i:i+2] == '--':
-                in_comment = True
-                result.append(c)
-                i += 1
-                continue
-
-            if source[i:i+2] == '--[[':
-                end_comment = source.find(']]', i + 4)
-                if end_comment == -1:
-                    result.extend(source[i:])
-                    break
-                result.extend(source[i:end_comment+2])
-                i = end_comment + 2
-                continue
-
-            m = re.match(rf'{getter_name}\s*\(', source[i:])
-            if m:
-                start = i
-                paren_start = i + m.end()
-                depth = 1
-                j = paren_start
-                while j < len(source):
-                    if source[j] == '(':
-                        depth += 1
-                    elif source[j] == ')':
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    j += 1
-
-                if j < len(source):
-                    expr = source[paren_start:j].strip('()')
-                    n = safe_eval(expr)
-                    if n is not None:
-                        idx = n + getter_offset
-                        if 1 <= idx <= len(strings):
-                            s = strings[idx - 1]
-                            if s:
-                                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                                result.append(f'"{escaped}"')
-                                i = j + 1
-                                continue
-
-                result.append(source[start])
-                i = start + 1
-                continue
-
-            result.append(c)
-            i += 1
-
-        return ''.join(result)
-
-    def _resolve_all_getters(self, source: str, strings: list) -> str:
-        getters = self._detect_all_getters(source)
-        result = source
-        for getter_name, getter_offset in getters:
-            result = self._resolve_getter_outside_strings(result, getter_name, getter_offset, strings)
-        return result
-
-    def _replace_string_table_refs(self, source: str, strings: list) -> str:
-        def repl_read(m):
-            try:
-                idx = int(m.group(1))
-                if 1 <= idx <= len(strings):
-                    s = strings[idx - 1]
-                    if s:
-                        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
-            except:
-                pass
-            return m.group(0)
-        result = re.sub(r'(?<!=)\s*R\s*\[\s*(\d+)\s*\]', repl_read, source)
-        result = re.sub(r'(?<!=)\s*R\s*\[\s*\(\s*(\d+)\s*\)\s*\]', repl_read, result)
-        return result
-
     def _calculate_vm_score(self, source: str) -> int:
         score = 0
         indicators = [
@@ -268,10 +101,7 @@ class Unveiler:
             return '', 'unable', 'String decode failed'
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
-        reconstructed = self._resolve_all_getters(source, decoder.strings)
-        reconstructed = self._replace_string_table_refs(reconstructed, decoder.strings)
-
-        vm_score = self._calculate_vm_score(reconstructed)
+        vm_score = self._calculate_vm_score(source)
         self._log('vm_detect', True, f'VM score: {vm_score}')
 
         if vm_score >= 30:
@@ -302,7 +132,7 @@ class Unveiler:
                 return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
 
         self._log('harness', True, 'attempting static symbolic evaluation')
-        harness_result = self.harness.run(reconstructed, timeout=30, decoded_strings=decoder.strings)
+        harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
         if harness_result and self._is_quality_output(harness_result):
             self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
             return harness_result, 'lua_harness', 'Symbolic evaluation complete'
