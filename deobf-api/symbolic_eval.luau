@@ -13,6 +13,7 @@ local input = fs.readFile(targetFile)
 local decoded_strings = {}
 local getter_name = nil
 local getter_offset = 0
+local alpha = {}
 
 local function safe_eval(expr)
     expr = expr:gsub("%s+", "")
@@ -40,66 +41,119 @@ local function resolve_getter(n)
     return nil
 end
 
-local single_line = input:gsub("\n", " "):gsub("\r", " ")
+local function decode_octal(s)
+    return (s:gsub('\\(%d%d?%d?)', function(d)
+        return string.char(tonumber(d, 8))
+    end))
+end
 
-local r_table_match = single_line:match('local%s+R%s*=%s*%{([^}]*)%}')
-if not r_table_match then
-    local start_pos = single_line:find('local%s+R%s*=%s*%{')
-    if start_pos then
-        local depth = 0
-        local end_pos = start_pos
-        local in_string = false
-        local escape = false
-        for i = start_pos, #single_line do
-            local c = single_line:sub(i, i)
-            if escape then
-                escape = false
-            elseif c == '\\' then
-                escape = true
-            elseif c == '"' then
-                in_string = not in_string
-            elseif not in_string then
-                if c == '{' then
-                    depth = depth + 1
-                elseif c == '}' then
-                    depth = depth - 1
-                    if depth == 0 then
-                        end_pos = i
-                        break
-                    end
-                end
+local function decode_base64(s, alpha_str)
+    if not alpha_str or #alpha_str ~= 64 then
+        return s
+    end
+
+    local rev = {}
+    for i = 1, #alpha_str do
+        rev[alpha_str:sub(i, i)] = i - 1
+    end
+
+    local bits = 0
+    local bit_count = 0
+    local out = {}
+
+    for i = 1, #s do
+        local c = s:sub(i, i)
+        if c == '=' then break end
+        local v = rev[c]
+        if v then
+            bits = (bits << 6) | v
+            bit_count = bit_count + 6
+            if bit_count >= 8 then
+                bit_count = bit_count - 8
+                table.insert(out, string.char((bits >> bit_count) & 0xFF))
             end
         end
-        r_table_match = single_line:sub(start_pos, end_pos):match('local%s+R%s*=%s*%{([^}]*)%}')
+    end
+
+    return table.concat(out)
+end
+
+local alpha_match = input:match('["\']([A-Za-z0-9+/]{64})["\']')
+if alpha_match then
+    alpha_str = alpha_match
+    for i = 1, #alpha_str do
+        alpha[alpha_str:sub(i, i)] = i - 1
     end
 end
 
-if r_table_match then
+local single_line = input:gsub("\n", " "):gsub("\r", " ")
+
+local r_start = single_line:find('local%s+R%s*=%s*%{')
+if r_start then
+    local depth = 0
+    local in_string = false
+    local escape = false
+    local end_pos = r_start
+    for i = r_start, #single_line do
+        local c = single_line:sub(i, i)
+        if escape then
+            escape = false
+        elseif c == '\\' then
+            escape = true
+        elseif c == '"' then
+            in_string = not in_string
+        elseif not in_string then
+            if c == '{' then
+                depth = depth + 1
+            elseif c == '}' then
+                depth = depth - 1
+                if depth == 0 then
+                    end_pos = i
+                    break
+                end
+            end
+        end
+    end
+    local r_body = single_line:sub(r_start, end_pos)
+    
     local raw_strings = {}
-    for s in r_table_match:gmatch('"((?:[^"\\]|\\.)*)"') do
-        local decoded = s:gsub('\\(%d+)', function(d) return string.char(tonumber(d)) end)
+    for s in r_body:gmatch('"((?:[^"\\]|\\.)*)"') do
+        local decoded = decode_octal(s)
         table.insert(raw_strings, decoded)
     end
 
-    local shuffle_match = single_line:match('ipairs%s*%(%s*%{([^}]+)%}%s*%)')
-    local shuffle_pairs = {}
-    if shuffle_match then
-        for a, b in shuffle_match:gmatch('%{([%d]+)[,;]([%d]+)%}') do
-            table.insert(shuffle_pairs, {tonumber(a), tonumber(b)})
+    if #raw_strings > 0 then
+        if alpha_str then
+            for i, s in ipairs(raw_strings) do
+                local decoded = decode_base64(s, alpha_str)
+                if decoded and #decoded > 0 and decoded ~= s then
+                    raw_strings[i] = decoded
+                end
+            end
         end
-    end
 
-    for _, pair in ipairs(shuffle_pairs) do
-        local lo, hi = pair[1] - 1, pair[2] - 1
-        while lo < hi and lo >= 1 and hi <= #raw_strings do
-            raw_strings[lo], raw_strings[hi] = raw_strings[hi], raw_strings[lo]
-            lo = lo + 1
-            hi = hi - 1
+        local shuffle_match = single_line:match('ipairs%s*%(%s*%{([^}]+)%}%s*%)')
+        local shuffle_pairs = {}
+        if shuffle_match then
+            for a, b in shuffle_match:gmatch('%{([%d]+)[,;]([%d]+)%}') do
+                table.insert(shuffle_pairs, {tonumber(a), tonumber(b)})
+            end
         end
-    end
 
-    for _, s in ipairs(raw_strings) do
-        table.insert(decoded_strings, s)
+        for _, pair in ipairs(shuffle_pairs) do
+            local lo, hi = pair[1] - 1, pair[2] - 1
+            while lo < hi and lo >= 1 and hi <= #raw_strings do
+                raw_strings[lo], raw_strings[hi] = raw_strings[hi], raw_strings[lo]
+                lo = lo + 1
+                hi = hi - 1
+            end
+        end
+
+        for _, s in ipairs(raw_strings) do
+            if s and #s > 0 then
+                table.insert(decoded_strings, s)
+            end
+        end
     end
 end
 
@@ -146,7 +200,8 @@ end
 output = output .. "\n"
 output = output .. "local R = {\n"
 for i, s in ipairs(decoded_strings) do
-    output = output .. '\t[' .. i .. '] = "' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '",\n'
+    local display = s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r')
+    output = output .. '\t[' .. i .. '] = "' .. display .. '",\n'
 end
 output = output .. "}\n\n"
 output = output .. result
