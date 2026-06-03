@@ -30,12 +30,14 @@ class LuaHarness:
         from lupa import LuaRuntime
 
         lua = LuaRuntime(unpack_returned_tuples=True)
+        seen = set()
         accumulated = []
 
         def _accumulate(s):
             try:
                 if isinstance(s, str) and len(s) > 0:
-                    if not accumulated or accumulated[-1] != s:
+                    if s not in seen:
+                        seen.add(s)
                         accumulated.append(s)
             except:
                 pass
@@ -97,58 +99,6 @@ class LuaHarness:
         }
         _G.bit32 = bit32
         _G.bit = bit32
-
-        local _orig_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local r = _orig_concat(t, sep, i, j)
-            if type(r) == "string" and #r > 0 then
-                _py_accumulate(r)
-            end
-            return r
-        end
-
-        local _orig_char = string.char
-        string.char = function(...)
-            local r = _orig_char(...)
-            if #r > 0 then
-                _py_accumulate(r)
-            end
-            return r
-        end
-
-        local _orig_gsub = string.gsub
-        string.gsub = function(s, p, r, n)
-            local res = _orig_gsub(s, p, r, n)
-            if type(res) == "string" and #res > 0 then
-                _py_accumulate(res)
-            end
-            return res
-        end
-
-        local _orig_loadstring = loadstring or load
-        local _orig_load = load or loadstring
-
-        loadstring = function(src, name)
-            if type(src) == "string" and #src > 0 then
-                _py_accumulate(src)
-            end
-            if _orig_loadstring then
-                return _orig_loadstring(src, name)
-            end
-            return _orig_load(src, name)
-        end
-
-        load = function(src, name)
-            if type(src) == "string" and #src > 0 then
-                _py_accumulate(src)
-            end
-            if _orig_load then
-                return _orig_load(src, name)
-            end
-            if _orig_loadstring then
-                return _orig_loadstring(src, name)
-            end
-        end
 
         game = _spy_make("game")
         workspace = _spy_make("workspace")
