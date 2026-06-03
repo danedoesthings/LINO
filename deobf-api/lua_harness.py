@@ -31,16 +31,25 @@ class LuaHarness:
 
         lua = LuaRuntime(unpack_returned_tuples=True)
         captured = []
+        accumulated = []
         errors = []
 
         def _capture_string(s):
             try:
-                if isinstance(s, str) and len(s) > 2:
+                if isinstance(s, str) and len(s) > 0:
                     captured.append(s)
             except:
                 pass
 
+        def _accumulate(s):
+            try:
+                if isinstance(s, str) and len(s) > 0:
+                    accumulated.append(s)
+            except:
+                pass
+
         lua.globals()._py_capture = _capture_string
+        lua.globals()._py_accumulate = _accumulate
 
         lua.execute(r'''
         local _orig_type = type
@@ -56,8 +65,8 @@ class LuaHarness:
                     return _spy_make(name .. "." .. tostring(k))
                 end,
                 __newindex = function(self, k, v)
-                    if type(v) == "string" and #v > 2 then
-                        _py_capture(v)
+                    if type(v) == "string" and #v > 0 then
+                        _py_accumulate(v)
                     end
                 end,
                 __call = function(self, ...)
@@ -101,21 +110,27 @@ class LuaHarness:
         local _orig_concat = table.concat
         table.concat = function(t, sep, i, j)
             local r = _orig_concat(t, sep, i, j)
-            if type(r) == "string" and #r > 3 then _py_capture(r) end
+            if type(r) == "string" and #r > 0 then
+                _py_accumulate(r)
+            end
             return r
         end
 
         local _orig_char = string.char
         string.char = function(...)
             local r = _orig_char(...)
-            if select("#", ...) >= 3 then _py_capture(r) end
+            if #r > 0 then
+                _py_accumulate(r)
+            end
             return r
         end
 
         local _orig_gsub = string.gsub
         string.gsub = function(s, p, r, n)
             local res = _orig_gsub(s, p, r, n)
-            if type(res) == "string" and #res > 10 then _py_capture(res) end
+            if type(res) == "string" and #res > 0 then
+                _py_accumulate(res)
+            end
             return res
         end
 
@@ -271,18 +286,18 @@ class LuaHarness:
 
         stripped = source.strip()
         stripped = re.sub(r'^return\s+', '', stripped, count=1)
-        
-        executable_source = stripped
 
         try:
-            lua.execute(executable_source)
+            lua.execute(stripped)
         except Exception as e:
             errors.append("Lua execution error: " + str(e))
 
-        if captured:
-            return "\n".join(captured)
         if errors:
             return "ERROR:\n" + "\n".join(errors)
+        if accumulated:
+            return "\n".join(accumulated)
+        if captured:
+            return "\n".join(captured)
         return None
 
     def _run_subprocess_fallback(self, source: str, timeout: int = 30) -> Optional[str]:
