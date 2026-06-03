@@ -1,4 +1,5 @@
-import re, json
+import re
+import json
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Set
@@ -23,8 +24,10 @@ class BasicBlock:
     fallthrough_target: Optional[int] = None
 
 class WeAreDevsVMLifter:
-    def __init__(self, decoded_strings):
+    def __init__(self, decoded_strings, offset=0, getter_name=None):
         self.strings = decoded_strings
+        self.offset = offset
+        self.getter_name = getter_name
         self.instructions = []
         self.handlers = {}
         self.blocks = {}
@@ -37,6 +40,9 @@ class WeAreDevsVMLifter:
         self.indent_level = 0
 
     def lift(self, source):
+        source = self._resolve_getter_calls(source)
+        if not source:
+            return None
         self._extract_handler_table(source)
         self._extract_instructions(source)
         if len(self.instructions) < 10:
@@ -47,6 +53,40 @@ class WeAreDevsVMLifter:
         if result and len(result) > 100:
             return result
         return None
+
+    def _resolve_getter_calls(self, source):
+        if not self.getter_name:
+            self.getter_name, self.offset = self._detect_getter(source)
+        if not self.getter_name or self.offset is None:
+            return source
+        def repl(m):
+            try:
+                expr = m.group(1).strip()
+                n = safe_eval_int(expr)
+                if n is not None:
+                    idx = n + self.offset
+                    if 1 <= idx <= len(self.strings):
+                        return str(idx)
+                return m.group(0)
+            except:
+                return m.group(0)
+        pattern = rf'{re.escape(self.getter_name)}\s*\(\s*([^)]+?)\s*\)'
+        return re.sub(pattern, repl, source)
+
+    def _detect_getter(self, source):
+        patterns = [
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?(-?\d+(?:[+\-]\d+)*)\)?\s*\]',
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?([^)]+)\)?\s*\]',
+        ]
+        for p in patterns:
+            m = re.search(p, source)
+            if m:
+                name = m.group(1)
+                offset_str = m.group(2)
+                offset = safe_eval_int(offset_str)
+                if offset is not None:
+                    return name, offset
+        return None, 0
 
     def _extract_handler_table(self, source):
         handler_pattern = r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;]'
@@ -230,13 +270,10 @@ class WeAreDevsVMLifter:
         self.indent_level = 0
         self.register_state = {}
         visited = set()
-
         def get_reg(idx):
             return self.register_state.get(idx, f'reg_{idx}')
-
         def set_reg(idx, val):
             self.register_state[idx] = val
-
         def emit_block(bid):
             if bid in visited:
                 if bid in self.loop_headers:
@@ -366,24 +403,38 @@ class WeAreDevsVMLifter:
                     self.output.append(f'{prefix}local reg_{dest} = string.char({chars})')
                 else:
                     self.output.append(f'{prefix}-- {instr.opcode} {ops}')
-
             if bid in self.loop_headers:
                 self.indent_level -= 1
                 self.output.append(' ' * self.indent_level + 'end')
-
             for sid in block.successors:
                 if sid not in visited or sid in self.loop_headers:
                     emit_block(sid)
-
         if self.blocks:
             first_block = min(self.blocks.keys())
             emit_block(first_block)
-
         if not self.output:
             self.output.append('local R = {')
             for i, s in enumerate(self.strings):
                 if s:
-                    self.output.append(f'\t[{i}] = {json.dumps(s)},')
+                    self.output.append(f'\t[{i + 1}] = {json.dumps(s)},')
             self.output.append('}')
-
         return '\n'.join(self.output)
+
+def safe_eval_int(expr):
+    expr = re.sub(r'\s+', '', str(expr))
+    expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
+    while '(' in expr:
+        m = re.search(r'\(([^()]+)\)', expr)
+        if not m:
+            break
+        inner = safe_eval_int(m.group(1))
+        if inner is None:
+            return None
+        expr = expr[:m.start()] + str(inner) + expr[m.end():]
+    tokens = re.findall(r'[+-]?\d+', expr)
+    if tokens:
+        return sum(int(t) for t in tokens)
+    try:
+        return int(expr)
+    except ValueError:
+        return None
