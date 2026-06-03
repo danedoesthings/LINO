@@ -25,7 +25,7 @@ class LuaHarness:
     def _run_symbolic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
-        strings_path = os.path.join(tmpdir, "strings.json")
+        strings_path = os.path.join(tmpdir, "strings.lua")
         output_path = os.path.join(tmpdir, "deobfuscated.lua")
         harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbolic_eval.luau")
 
@@ -38,8 +38,16 @@ class LuaHarness:
                 f.write(source)
 
             if decoded_strings:
+                escaped = []
+                for s in decoded_strings:
+                    if s:
+                        esc = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                        escaped.append(f'"{esc}"')
+                    else:
+                        escaped.append('""')
+                lua_table = "return {\n" + ",\n".join(escaped) + "\n}"
                 with open(strings_path, "w", encoding="utf-8") as f:
-                    json.dump(decoded_strings, f)
+                    f.write(lua_table)
 
             proc = subprocess.Popen(
                 ["lune", "run", harness_path, input_path, output_path, strings_path if decoded_strings else ""],
