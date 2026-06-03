@@ -22,7 +22,7 @@ class LuaHarness:
 
     def run(self, source: str, timeout: int = 30) -> Optional[str]:
         if not self.available:
-            return self._run_subprocess_fallback(source, timeout)
+            return None
         return self._run_lupa(source, timeout)
 
     def _run_lupa(self, source: str, timeout: int = 30) -> Optional[str]:
@@ -30,16 +30,7 @@ class LuaHarness:
         from lupa import LuaRuntime
 
         lua = LuaRuntime(unpack_returned_tuples=True)
-        captured = []
         accumulated = []
-        errors = []
-
-        def _capture_string(s):
-            try:
-                if isinstance(s, str) and len(s) > 0:
-                    captured.append(s)
-            except:
-                pass
 
         def _accumulate(s):
             try:
@@ -48,7 +39,6 @@ class LuaHarness:
             except:
                 pass
 
-        lua.globals()._py_capture = _capture_string
         lua.globals()._py_accumulate = _accumulate
 
         lua.execute(r'''
@@ -139,7 +129,7 @@ class LuaHarness:
 
         loadstring = function(src, name)
             if type(src) == "string" and #src > 0 then
-                _py_capture(src)
+                _py_accumulate(src)
             end
             if _orig_loadstring then
                 return _orig_loadstring(src, name)
@@ -149,7 +139,7 @@ class LuaHarness:
 
         load = function(src, name)
             if type(src) == "string" and #src > 0 then
-                _py_capture(src)
+                _py_accumulate(src)
             end
             if _orig_load then
                 return _orig_load(src, name)
@@ -289,78 +279,12 @@ class LuaHarness:
 
         try:
             lua.execute(stripped)
-        except Exception as e:
-            errors.append("Lua execution error: " + str(e))
+        except Exception:
+            pass
 
-        if errors:
-            return "ERROR:\n" + "\n".join(errors)
         if accumulated:
             return "\n".join(accumulated)
-        if captured:
-            return "\n".join(captured)
         return None
-
-    def _run_subprocess_fallback(self, source: str, timeout: int = 30) -> Optional[str]:
-        lua_bin = None
-        for candidate in ('lua5.1', 'lua5.2', 'lua', 'lua5.4', 'lua5.3'):
-            if shutil.which(candidate):
-                lua_bin = candidate
-                break
-
-        if not lua_bin:
-            return None
-
-        tmpdir = tempfile.mkdtemp()
-        harness_path = os.path.join(tmpdir, "harness.lua")
-        output_path = os.path.join(tmpdir, "captured.lua")
-        output_path_fixed = output_path.replace('\\', '/')
-
-        harness_code = (
-            'local _r = {}; local _c = 0;\n'
-            'local function _25ms(var)\n'
-            '  if type(var) == "string" then _c = _c + 1; _r[_c] = var end\n'
-            '  return var\n'
-            'end\n'
-            'local _real_pcall = pcall;\n'
-            'local ok, err = _real_pcall(function()\n'
-            + source +
-            '\nend)\n'
-            'if _c > 0 then\n'
-            '  local f = io.open("' + output_path_fixed + '", "w");\n'
-            '  if f then f:write(table.concat(_r, "\\n")); f:close() end\n'
-            'end\n'
-        )
-
-        try:
-            with open(harness_path, "w", encoding="utf-8") as f:
-                f.write(harness_code)
-
-            proc = subprocess.Popen(
-                [lua_bin, harness_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                start_new_session=True
-            )
-            try:
-                proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                try:
-                    if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except Exception:
-                    pass
-
-            if os.path.exists(output_path):
-                with open(output_path, "r", encoding="utf-8") as f:
-                    captured = f.read().strip()
-                if captured:
-                    return captured
-            return None
-        except Exception:
-            return None
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
         captured = self.run(source, timeout)
