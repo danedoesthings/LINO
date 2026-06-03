@@ -261,7 +261,7 @@ local chunk,err
 local variablecount,variable_backs,_25mspredefined,spytbl,predefined=0,{},{},{}
 local luraphcarry
 settings.ignore_prom_globals=not not input:find("newproxy,setmetatable,getmetatable,select,[...])end(...).1,true")
-if --[[input:find("[[This file was protected with MoonSec V3",1,true) and]] (input:find("=_ENV:[&a&d_]+=")) then
+if (input:find("=_ENV:[&a&d_]+=")) then
  msecNotReady=true
  if settings.spynilglobals then settings.spynilglobals=nil end
  if settings.hook_op then settings.hook_op=nil end
