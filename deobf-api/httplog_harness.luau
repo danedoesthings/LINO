@@ -166,9 +166,20 @@ _cenv.assert = assert
 _cenv.collectgarbage = collectgarbage or function() return 0 end
 
 _cenv.coroutine = coroutine or {}
-_cenv.coroutine.create = coroutine.create or function(f) return f end
-_cenv.coroutine.resume = coroutine.resume or function(co, ...) return true, pcall(co, ...) end
-_cenv.coroutine.wrap = coroutine.wrap or function(f) return function(...) return pcall(f, ...) end
+_cenv.coroutine.create = coroutine.create or function(f)
+    return { __func = f }
+end
+_cenv.coroutine.resume = coroutine.resume or function(co, ...)
+    if type(co) == "table" and co.__func then
+        return pcall(co.__func, ...)
+    end
+    return pcall(co, ...)
+end
+_cenv.coroutine.wrap = coroutine.wrap or function(f)
+    return function(...)
+        return pcall(f, ...)
+    end
+end
 _cenv.coroutine.yield = coroutine.yield or function() end
 
 _cenv.math = math
