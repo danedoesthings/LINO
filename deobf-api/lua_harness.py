@@ -35,7 +35,8 @@ class LuaHarness:
         def _accumulate(s):
             try:
                 if isinstance(s, str) and len(s) > 0:
-                    accumulated.append(s)
+                    if not accumulated or accumulated[-1] != s:
+                        accumulated.append(s)
             except:
                 pass
 
