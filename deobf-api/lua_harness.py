@@ -283,7 +283,7 @@ class LuaHarness:
             pass
 
         if accumulated:
-            return "\n".join(accumulated)
+            return "".join(accumulated)
         return None
 
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
