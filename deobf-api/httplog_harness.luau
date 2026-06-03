@@ -75,7 +75,12 @@ _cenv.getfenv = function(lvl)
     return _cenv
 end
 
-_cenv.setfenv = function(f, e) return f end
+_cenv.setfenv = function(f, e)
+    if type(f) == "function" and type(e) == "table" then
+        setfenv(f, e)
+    end
+    return f
+end
 
 _cenv.loadstring = function(src, b)
     if type(src) == "string" then
@@ -222,14 +227,16 @@ _cenv.require = function(id)
 end
 _cenv.script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
 
+local _orig_table_concat = table.concat
 table.concat = function(t, sep, i, j)
-    local r = table.concat(t, sep, i, j)
+    local r = _orig_table_concat(t, sep, i, j)
     if type(r) == "string" and #r > 5 then _25ms(r) end
     return r
 end
 
+local _orig_string_char = string.char
 string.char = function(...)
-    local r = string.char(...)
+    local r = _orig_string_char(...)
     if select("#", ...) >= 3 then _25ms(r) end
     return r
 end
@@ -248,5 +255,5 @@ if not success then
     r[c] = "[Error] " .. tostring(result)
 end
 
-local output = table.concat(r, "\n")
+local output = _orig_table_concat(r, "\n")
 fs.writeFile(outFile, output)
