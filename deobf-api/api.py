@@ -52,6 +52,11 @@ def health():
     })
 
 
+@app.route('/alive')
+def alive():
+    return 'ok'
+
+
 def _check_lupa():
     try:
         import lupa
