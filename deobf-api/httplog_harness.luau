@@ -62,7 +62,10 @@ setmetatable(_cenv, { __index = _G })
 _cenv.pcall = function(fn, ...)
     local results = {pcall(fn, ...)}
     if not results[1] then
-        _25ms("[Error] " .. tostring(results[2]))
+        local err = results[2]
+        local trace = debug.traceback("", 2)
+        _25ms("[Error] " .. tostring(err))
+        _25ms("[Trace] " .. trace)
     end
     return unpack(results)
 end
@@ -205,6 +208,13 @@ _cenv.debug = {
     profileend = function() end,
     traceback = function() return "mock traceback" end,
 }
+_cenv.typeof = function(obj)
+    local mt = getmetatable(obj)
+    if mt and mt.__type and mt.__type() == "userdata" then
+        return "userdata"
+    end
+    return type(obj)
+end
 _cenv.math = math
 _cenv.string = string
 _cenv.table = table
@@ -252,7 +262,8 @@ setfenv(chunk, _cenv)
 local success, result = pcall(chunk)
 if not success then
     c = c + 1
-    r[c] = "[Error] " .. tostring(result)
+    local trace = debug.traceback("", 2)
+    r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace
 end
 
 local output = _orig_table_concat(r, "\n")
