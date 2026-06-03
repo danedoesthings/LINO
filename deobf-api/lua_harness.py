@@ -1,5 +1,4 @@
 import os
-import re
 import shutil
 import tempfile
 import subprocess
@@ -15,6 +14,7 @@ class LuaHarness:
     def run(self, source: str, timeout: int = 30) -> Optional[str]:
         if not self.available:
             return None
+        
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
@@ -22,7 +22,7 @@ class LuaHarness:
 
         if not os.path.isfile(harness_path):
             shutil.rmtree(tmpdir, ignore_errors=True)
-            return None
+            return "ERROR: httplog_harness.luau not found at " + harness_path
 
         try:
             with open(input_path, "w", encoding="utf-8") as f:
@@ -34,7 +34,8 @@ class LuaHarness:
                 start_new_session=True
             )
             try:
-                proc.communicate(timeout=timeout)
+                stdout_b, stderr_b = proc.communicate(timeout=timeout)
+                stderr_output = stderr_b.decode('latin-1', errors='replace') if stderr_b else ''
             except subprocess.TimeoutExpired:
                 try:
                     if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
@@ -43,15 +44,22 @@ class LuaHarness:
                         proc.kill()
                 except Exception:
                     pass
+                return "ERROR: Lune timed out after " + str(timeout) + "s"
+
+            if stderr_output.strip():
+                return "LUNE ERROR: " + stderr_output[:1000]
 
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
                 if captured and len(captured) > 10 and not captured.startswith("-- [ERROR]"):
                     return captured
-            return None
-        except Exception:
-            return None
+                if captured:
+                    return "LUNE OUTPUT: " + captured[:1000]
+
+            return "ERROR: No output from Lune"
+        except Exception as e:
+            return "LUNE EXCEPTION: " + str(e)[:500]
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
