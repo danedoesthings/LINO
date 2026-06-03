@@ -19,6 +19,10 @@ class LuaHarness:
         if result and len(result) > 200:
             return result
 
+        result = self._run_dynamic(source, timeout)
+        if result and len(result) > 100:
+            return result
+
         return None
 
     def _run_symbolic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
@@ -26,7 +30,7 @@ class LuaHarness:
         input_path = os.path.join(tmpdir, "input.lua")
         strings_path = os.path.join(tmpdir, "strings.lua")
         output_path = os.path.join(tmpdir, "deobfuscated.lua")
-        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbolic_vm_executor.luau")
+        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbolic_eval.luau")
 
         if not os.path.isfile(harness_path):
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -50,6 +54,47 @@ class LuaHarness:
 
             proc = subprocess.Popen(
                 ["lune", "run", harness_path, input_path, output_path, strings_path if decoded_strings else ""],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True
+            )
+            try:
+                proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except Exception:
+                    pass
+
+            if os.path.exists(output_path):
+                with open(output_path, "r", encoding="utf-8", errors="replace") as f:
+                    captured = f.read().strip()
+                if captured and len(captured) > 100 and not captured.startswith("-- [ERROR]"):
+                    return captured
+            return None
+        except Exception:
+            return None
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _run_dynamic(self, source: str, timeout: int = 30) -> Optional[str]:
+        tmpdir = tempfile.mkdtemp()
+        input_path = os.path.join(tmpdir, "input.lua")
+        output_path = os.path.join(tmpdir, "captured.lua")
+        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "httplog_harness.luau")
+
+        if not os.path.isfile(harness_path):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return None
+
+        try:
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            proc = subprocess.Popen(
+                ["lune", "run", harness_path, input_path, output_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True
             )
