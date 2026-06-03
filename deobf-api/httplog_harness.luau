@@ -24,23 +24,22 @@ end
 
 local function _spy_make(name)
     local t = {}
-    local mt = {
-        __type = function() return "userdata" end,
-        __tostring = function() return name end,
-        __len = function() return 2853638 end,
-        __metatable = "The metatable is locked",
-        __add = function() return 0 end,
-        __sub = function() return 0 end,
-        __mul = function() return 0 end,
-        __div = function() return 0 end,
-        __mod = function() return 0 end,
-        __unm = function() return 0 end,
-        __concat = function(a, b) return tostring(a) .. tostring(b) end,
-        __lt = function() return false end,
-        __le = function() return false end,
-        __eq = function() return false end,
-        __gc = function() end,
-    }
+    local mt = {}
+    mt.__type = function() return "userdata" end
+    mt.__tostring = function() return name end
+    mt.__len = function() return 2853638 end
+    mt.__metatable = "The metatable is locked"
+    mt.__add = function() return 0 end
+    mt.__sub = function() return 0 end
+    mt.__mul = function() return 0 end
+    mt.__div = function() return 0 end
+    mt.__mod = function() return 0 end
+    mt.__unm = function() return 0 end
+    mt.__concat = function(a, b) return tostring(a) .. tostring(b) end
+    mt.__lt = function() return false end
+    mt.__le = function() return false end
+    mt.__eq = function() return false end
+    mt.__gc = function() end
     mt.__index = function(self, k)
         return _spy_make(name .. "." .. tostring(k))
     end
@@ -59,6 +58,8 @@ end
 local _cenv = {}
 setmetatable(_cenv, { __index = _G })
 
+_cenv._25ms = _25ms
+
 _cenv.pcall = function(fn, ...)
     local results = {pcall(fn, ...)}
     if not results[1] then
@@ -69,6 +70,8 @@ _cenv.pcall = function(fn, ...)
     end
     return unpack(results)
 end
+
+_cenv.xpcall = xpcall or function(f, errh, ...) return pcall(f, ...) end
 
 _cenv.getfenv = function(lvl)
     if lvl then
@@ -101,6 +104,63 @@ _cenv.load = function(src, b)
         setfenv(fn, _cenv)
         return fn
     end
+end
+
+_cenv.select = select or function(n, ...)
+    if n == "#" then return select("#", ...) end
+    local args = {...}
+    local result = {}
+    for i = n, #args do
+        result[#result + 1] = args[i]
+    end
+    return unpack(result)
+end
+
+_cenv.unpack = unpack or table.unpack
+_cenv.setmetatable = setmetatable
+_cenv.getmetatable = getmetatable
+_cenv.rawequal = rawequal or function(a, b) return a == b end
+_cenv.rawget = rawget or function(t, k) return t[k] end
+_cenv.rawset = rawset or function(t, k, v) t[k] = v; return t end
+_cenv.next = next
+_cenv.ipairs = ipairs
+_cenv.pairs = pairs
+_cenv.error = error
+_cenv.assert = assert
+_cenv.collectgarbage = collectgarbage or function() return 0 end
+
+_cenv.coroutine = coroutine or {}
+_cenv.coroutine.create = coroutine.create or function(f) return f end
+_cenv.coroutine.resume = coroutine.resume or function(co, ...) return true, pcall(co, ...) end
+_cenv.coroutine.wrap = coroutine.wrap or function(f) return function(...) return pcall(f, ...) end
+_cenv.coroutine.yield = coroutine.yield or function() end
+
+_cenv.math = math
+_cenv.string = string
+_cenv.table = table
+
+_cenv.bit32 = rawget(_G, "bit32") or {
+    bxor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) ~= (b % 2) then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
+    band = function(a, b) local r, m = 0, 1; while a > 0 and b > 0 do if (a % 2) + (b % 2) == 2 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
+    bor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) + (b % 2) > 0 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
+    lshift = function(v, n) return math.floor(v * (2 ^ n)) % 4294967296 end,
+    rshift = function(v, n) return math.floor(v / (2 ^ n)) end,
+    arshift = function(v, n) return math.floor(v / (2 ^ n)) end,
+}
+_cenv.bit = _cenv.bit32
+
+_cenv.newproxy = function(addmeta)
+    local p = {}
+    if addmeta then setmetatable(p, {}) end
+    return p
+end
+
+_cenv.typeof = function(obj)
+    local mt = getmetatable(obj)
+    if mt and mt.__type and mt.__type() == "userdata" then
+        return "userdata"
+    end
+    return type(obj)
 end
 
 _cenv.game = _spy_make("game")
@@ -208,53 +268,6 @@ _cenv.debug = {
     profileend = function() end,
     traceback = function() return "mock traceback" end,
 }
-_cenv.typeof = function(obj)
-    local mt = getmetatable(obj)
-    if mt and mt.__type and mt.__type() == "userdata" then
-        return "userdata"
-    end
-    return type(obj)
-end
-_cenv.select = select or function(n, ...)
-    if n == "#" then return select("#", ...) end
-    local args = {...}
-    local result = {}
-    for i = n, #args do
-        result[#result + 1] = args[i]
-    end
-    return unpack(result)
-end
-_cenv.setmetatable = setmetatable
-_cenv.getmetatable = getmetatable
-_cenv.rawequal = rawequal or function(a, b) return a == b end
-_cenv.rawget = rawget or function(t, k) return t[k] end
-_cenv.rawset = rawset or function(t, k, v) t[k] = v; return t end
-_cenv.next = next
-_cenv.ipairs = ipairs
-_cenv.pairs = pairs
-_cenv.error = error
-_cenv.assert = assert
-_cenv.collectgarbage = collectgarbage or function() return 0 end
-_cenv.xpcall = xpcall or function(f, errh, ...) return pcall(f, ...) end
-_cenv.coroutine = coroutine or {}
-_cenv.coroutine.create = coroutine.create or function(f) return f end
-_cenv.coroutine.resume = coroutine.resume or function(co, ...) return true, pcall(co, ...) end
-_cenv.coroutine.wrap = coroutine.wrap or function(f) return function(...) return pcall(f, ...) end
-_cenv.coroutine.yield = coroutine.yield or function() end
-_cenv.math = math
-_cenv.string = string
-_cenv.table = table
-_cenv.bit32 = rawget(_G, "bit32") or {
-    bxor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) ~= (b % 2) then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
-    band = function(a, b) local r, m = 0, 1; while a > 0 and b > 0 do if (a % 2) + (b % 2) == 2 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
-    bor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) + (b % 2) > 0 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
-    lshift = function(v, n) return math.floor(v * (2 ^ n)) % 4294967296 end,
-    rshift = function(v, n) return math.floor(v / (2 ^ n)) end,
-    arshift = function(v, n) return math.floor(v / (2 ^ n)) end,
-}
-_cenv.bit = _cenv.bit32
-_cenv.newproxy = function(addmeta) local p = {}; if addmeta then setmetatable(p, {}) end; return p end
-_cenv.unpack = unpack or table.unpack
 _cenv.require = function(id)
     if id == "@lune/fs" then return fs end
     if id == "@lune/process" then return process end
