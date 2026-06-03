@@ -64,9 +64,9 @@ class Unveiler:
             return '', 'unable', 'String decode failed'
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
-        self._log('harness', True, 'attempting static symbolic evaluation')
-        harness_result = self.harness.run(source)
-        if harness_result and len(harness_result) > 50:
+        self._log('harness', True, 'attempting static symbolic evaluation with decoded strings')
+        harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
+        if harness_result and len(harness_result) > 200:
             self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
             return harness_result, 'lua_harness', 'Symbolic evaluation complete'
 
