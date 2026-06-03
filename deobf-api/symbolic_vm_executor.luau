@@ -79,152 +79,85 @@ local function resolve_getter_calls(code)
     end)
 end
 
-local vm_var = nil
-local pc_var = nil
-local stack_var = nil
-local reg_var = nil
-local alloc_func = nil
-local states = {}
-local entry_state = nil
-
-local while_start = input:find('while%s+(%w+)%s+do')
-if while_start then
-    vm_var = input:match('while%s+(%w+)%s+do', while_start)
-end
-
-local block_match = input:match('local%s+function%s*%([^)]*%)%s*([%w_,%s]*)%s*while%s+')
-if block_match then
-    local locals = block_match
-    for var in locals:gmatch('(%w+)') do
-        if var ~= vm_var then
-            if not pc_var then pc_var = var
-            elseif not stack_var then stack_var = var
-            elseif not reg_var then reg_var = var end
-        end
-    end
-end
-
 local output_lines = {}
-table.insert(output_lines, "-- Symbolic VM Execution Output")
+table.insert(output_lines, "-- Deobfuscated Output")
 table.insert(output_lines, "-- " .. #decoded_strings .. " strings decoded")
-table.insert(output_lines, "-- VM variable: " .. (vm_var or "unknown"))
 table.insert(output_lines, "")
 
-local function extract_states(code, var_name)
-    local st = {}
-    local pos = 1
-    local depth = 0
-    local current_state = nil
-    local current_body = {}
-    local in_state = false
-    
-    while pos <= #code do
-        local rest = code:sub(pos)
-        local if_match = rest:match('^%s*if%s+' .. var_name .. '%s*<%s*(-?%d+)%s+then')
-        local assign_match = rest:match('^%s*' .. var_name .. '%s*=%s*(-?%d+)')
-        local end_match = rest:match('^%s*end%s*')
-        
-        if if_match and not in_state then
-            in_state = true
-            current_state = tonumber(if_match)
-            current_body = {}
-            pos = pos + #rest:match('^%s*if%s+' .. var_name .. '%s*<%s*(-?%d+)%s+then') + 4
-        elseif assign_match and in_state then
-            local next_state = tonumber(assign_match)
-            local body_code = table.concat(current_body, "\n")
-            body_code = resolve_getter_calls(body_code)
-            st[current_state] = {
-                body = body_code,
-                next_state = next_state,
-            }
-            in_state = false
-            current_state = nil
-            current_body = {}
-            pos = pos + #rest:match('^%s*' .. var_name .. '%s*=%s*(-?%d+)')
-        else
-            if in_state then
-                local line = rest:match('^([^\n]*)')
-                if line then
-                    table.insert(current_body, line)
-                    pos = pos + #line + 1
-                else
-                    pos = pos + 1
-                end
-            else
-                pos = pos + 1
-            end
-        end
-    end
-    return st
+local resolved = resolve_getter_calls(input)
+
+for i, s in ipairs(decoded_strings) do
+    local escaped = s:gsub('\\', '\\\\'):gsub('"', '\\"')
+    resolved = resolved:gsub('R%[' .. i .. '%]', '"' .. escaped .. '"')
+    resolved = resolved:gsub('R%[ ' .. i .. ' %]', '"' .. escaped .. '"')
 end
 
-if vm_var then
-    local vm_code = input:match('while%s+' .. vm_var .. '%s+do%s*(.-)%s*end%s*$')
-    if vm_code then
-        states = extract_states(vm_code, vm_var)
+local function try_evaluate_expression(expr_str)
+    local n = safe_eval(expr_str)
+    if n then return tostring(n) end
+    local s = resolve_string(expr_str)
+    if s then return '"' .. s .. '"' end
+    return expr_str
+end
+
+local payload_start = resolved:find('return%(function%(')
+if payload_start then
+    local pre_payload = resolved:sub(1, payload_start - 1)
+    local payload_and_rest = resolved:sub(payload_start)
+    
+    local string_match = pre_payload:match('local%s+function%s+%w+%s*%([^)]*%)%s*return%s+R%s*%[%w+%+[^%]]+%]%s*end')
+    if string_match then
+        pre_payload = pre_payload:gsub('local%s+function%s+%w+%s*%([^)]*%)%s*return%s+R%s*%[%w+%+[^%]]+%]%s*end', '')
     end
     
-    if not states or #states == 0 then
-        vm_code = input:match('while%s+' .. vm_var .. '%s+do(.-)end')
-        if vm_code then
-            states = extract_states(vm_code, vm_var)
-        end
+    local shuffle_match = pre_payload:match('for%s+%w+[,]%w+%s+in%s+ipairs.-end%s*end%s*end')
+    if shuffle_match then
+        pre_payload = pre_payload:gsub('for%s+%w+[,]%w+%s+in%s+ipairs.-end%s*end%s*end', '-- [shuffle removed]')
     end
-end
-
-table.insert(output_lines, "-- Found " .. #states .. " state transitions")
-table.insert(output_lines, "")
-
-local visited = {}
-local execution_order = {}
-
-local function find_entry_state()
-    if not vm_var then return end
-    local before_while = input:match('(.-)while%s+' .. vm_var .. '%s+do')
-    if before_while then
-        local assigns = {}
-        for state in before_while:gmatch(vm_var .. '%s*=%s*(-?%d+)') do
-            table.insert(assigns, tonumber(state))
-        end
-        if #assigns > 0 then
-            entry_state = assigns[#assigns]
-        end
+    
+    local decoder_match = pre_payload:match('do%s+local%s+%w+=table%.concat.-end%s*end%s*end')
+    if decoder_match then
+        pre_payload = pre_payload:gsub('do%s+local%s+%w+=table%.concat.-end%s*end%s*end', '-- [decoder removed]')
     end
-end
-
-find_entry_state()
-
-if entry_state and states then
-    table.insert(output_lines, "-- Entry state: " .. tostring(entry_state))
+    
+    table.insert(output_lines, "-- Bootstrap code:")
+    table.insert(output_lines, pre_payload:gsub('%s+', ' '):sub(1, 500) .. "...")
     table.insert(output_lines, "")
     
-    local current = entry_state
-    local depth = 0
+    table.insert(output_lines, "-- VM Dispatcher (with resolved strings):")
     
-    while current and not visited[current] and depth < 500 do
-        visited[current] = true
-        depth = depth + 1
-        local info = states[current]
-        if info then
-            table.insert(output_lines, "-- State " .. tostring(current) .. ":")
-            if info.body and #info.body > 0 then
-                table.insert(output_lines, info.body)
-            else
-                table.insert(output_lines, "--   (empty handler)")
+    local dispatcher = payload_and_rest:match('while%s+%w+%s+do(.-)end%s*end%s*%w+%s*=%s*#')
+    if dispatcher then
+        local clean_dispatcher = dispatcher:gsub('(%w+)%[([^%]]+)%]%s*=%s*(%w+)%[([^%]]+)%]', function(t1, k1, t2, k2)
+            return t1 .. "[" .. k1 .. "] = " .. t2 .. "[" .. k2 .. "]  -- MOVE"
+        end)
+        clean_dispatcher = clean_dispatcher:gsub('(%w+)%[([^%]]+)%]%s*=%s*"([^"]+)"', function(t, k, v)
+            return t .. "[" .. k .. "] = \"" .. v .. "\"  -- LOADK"
+        end)
+        clean_dispatcher = clean_dispatcher:gsub('(%w+)%[([^%]]+)%]%s*=%s*(%w+)%s*%(', function(t, k, f)
+            return t .. "[" .. k .. "] = " .. f .. "(...)  -- CLOSURE"
+        end)
+        
+        for line in clean_dispatcher:gmatch("[^\n]+") do
+            if line:find('"print"') or line:find('"pcall"') or line:find('"tostring"') 
+                or line:find('"tonumber"') or line:find('"error"') or line:find('"table"')
+                or line:find('"math"') or line:find('"floor"') or line:find('"char"')
+                or line:find('"concat"') or line:find('"gsub"') or line:find('"byte"')
+                or line:find('"len"') or line:find('"unpack"') or line:find('"gmatch"') then
+                table.insert(output_lines, line)
             end
-            table.insert(output_lines, "--   -> next state: " .. tostring(info.next_state))
-            table.insert(output_lines, "")
-            current = info.next_state
-        else
-            table.insert(output_lines, "-- State " .. tostring(current) .. ": NOT FOUND")
-            break
         end
     end
+    
+    table.insert(output_lines, "")
+    table.insert(output_lines, "-- String Table:")
+    table.insert(output_lines, "local R = {")
+    for i, s in ipairs(decoded_strings) do
+        table.insert(output_lines, '  [' .. i .. '] = "' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '",')
+    end
+    table.insert(output_lines, "}")
 else
-    table.insert(output_lines, "-- Could not determine VM execution flow")
-    table.insert(output_lines, "-- VM variable: " .. (vm_var or "not found"))
-    table.insert(output_lines, "-- Entry state: " .. (tostring(entry_state) or "not found"))
-    table.insert(output_lines, "-- States found: " .. tostring(#states))
+    table.insert(output_lines, resolved)
 end
 
 local output = table.concat(output_lines, "\n")
