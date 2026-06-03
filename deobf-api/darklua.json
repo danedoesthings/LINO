@@ -8,6 +8,8 @@
         "remove_unused_if_branch",
         "remove_unused_while",
         "convert_index_to_field",
-        "remove_nil_declaration"
+        "remove_nil_declaration",
+        "remove_unused_variable",
+        "remove_spaces"
     ]
 }
