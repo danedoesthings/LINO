@@ -14,7 +14,16 @@ class LuaHarness:
     def run(self, source: str, timeout: int = 30) -> Optional[str]:
         if not self.available:
             return None
-        return self._run_symbolic(source, timeout)
+
+        result = self._run_symbolic(source, timeout)
+        if result and len(result) > 100:
+            return result
+
+        result = self._run_dynamic(source, timeout)
+        if result and len(result) > 50:
+            return result
+
+        return None
 
     def _run_symbolic(self, source: str, timeout: int = 30) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
@@ -49,7 +58,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                     captured = f.read().strip()
-                if captured and len(captured) > 10:
+                if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
                     return captured
             return None
         except Exception:
@@ -77,8 +86,7 @@ class LuaHarness:
                 start_new_session=True
             )
             try:
-                _, stderr_b = proc.communicate(timeout=timeout)
-                stderr_output = stderr_b.decode('latin-1', errors='replace') if stderr_b else ''
+                proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
                     if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
@@ -87,16 +95,11 @@ class LuaHarness:
                         proc.kill()
                 except Exception:
                     pass
-                shutil.rmtree(tmpdir, ignore_errors=True)
-                return None
-
-            if stderr_output.strip():
-                return None
 
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                     captured = f.read().strip()
-                if captured and len(captured) > 10:
+                if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
                     return captured
             return None
         except Exception:
