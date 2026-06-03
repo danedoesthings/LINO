@@ -8,7 +8,6 @@ import base64
 import datetime
 import asyncio
 from discord.ext import commands
-from discord import app_commands
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,28 +25,7 @@ if not TOKEN:
 intents = discord.Intents.default()
 intents.message_content = True
 
-class DeobfBot(commands.Bot):
-    def __init__(self):
-        # Do NOT set self.tree – it's a read-only property
-        super().__init__(command_prefix='=', intents=intents, help_command=None)
-
-    async def setup_hook(self):
-        await self.tree.sync()
-        log.info('Synced commands globally')
-        self.loop.create_task(self.keep_alive())
-
-    async def keep_alive(self):
-        await self.wait_until_ready()
-        while not self.is_closed():
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.get(f'{API_URL}/alive')
-            except Exception:
-                pass
-            await asyncio.sleep(60)
-
-bot = DeobfBot()
-tree = bot.tree
+bot = commands.Bot(command_prefix='=', intents=intents, help_command=None)
 
 ALLOWED_EXTENSIONS = ('.lua', '.txt', '.luau')
 MAX_BYTES = 5 * 1024 * 1024
@@ -177,7 +155,7 @@ async def run_deobf(raw_bytes, filename):
     if detected in PARTIAL_METHODS:
         em.add_field(
             name='Note',
-            value='This output contains decoded strings and a best-effort reconstruction. The original script may use a VM layer that requires runtime execution to fully recover.',
+            value='This output contains decoded strings and a best-effort reconstruction.',
             inline=False,
         )
 
@@ -255,65 +233,6 @@ async def prefix_fulldiag(ctx):
     await ctx.send('Full diagnostic:', file=file)
 
 
-@bot.command(name='debug')
-@commands.cooldown(1, 60, commands.BucketType.user)
-async def prefix_debug(ctx):
-    if not ctx.message.attachments:
-        return await ctx.send('Attach a `.lua` or `.txt` file to debug.')
-
-    att = ctx.message.attachments[0]
-    if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
-        return await ctx.send('Please attach a `.lua`, `.luau`, or `.txt` file.')
-    if att.size > MAX_BYTES:
-        return await ctx.send(f'File too large ({att.size} bytes, max {MAX_BYTES})')
-
-    raw = await att.read()
-    source_b64 = base64.b64encode(raw).decode('ascii')
-
-    msg = await ctx.send(embed=discord.Embed(
-        title='Debugging harness...',
-        description='Running harness with debug output...',
-        color=0x3498db
-    ))
-
-    try:
-        async with httpx.AsyncClient(timeout=180) as c:
-            r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        try:
-            await msg.delete()
-        except:
-            pass
-        return await ctx.send(f'Debug request failed: {str(e)[:1000]}')
-
-    try:
-        await msg.delete()
-    except:
-        pass
-
-    em = discord.Embed(
-        title='Harness Debug Result',
-        color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
-    )
-    em.add_field(name='Lua Found', value=str(data.get('lua_found', 'unknown')), inline=True)
-    em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
-    em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
-    em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
-
-    stdout = data.get('stdout', '')
-    stderr = data.get('stderr', '')
-    if stdout:
-        em.add_field(name='stdout', value=f'```\n{stdout[:900]}\n```', inline=False)
-    if stderr:
-        em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
-    if not stdout and not stderr:
-        em.add_field(name='Output', value='(empty)', inline=False)
-
-    await ctx.send(embed=em)
-
-
 @bot.command(name='ping')
 async def prefix_ping(ctx):
     await ctx.send(f'Pong! Latency: {round(bot.latency * 1000)}ms')
@@ -328,80 +247,10 @@ async def deobf_error(ctx, error):
         await ctx.send(f'An error occurred: {str(error)[:500]}')
 
 
-@tree.command(name='deobf', description='Deobfuscate a Lua file')
-async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
-        return await interaction.response.send_message(
-            'Please attach a `.lua`, `.luau`, or `.txt` file.',
-            ephemeral=True
-        )
-    if file.size > MAX_BYTES:
-        return await interaction.response.send_message(
-            f'File too large ({file.size} bytes, max {MAX_BYTES})',
-            ephemeral=True
-        )
-
-    await interaction.response.defer(thinking=True)
-    raw = await file.read()
-    log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
-
-    res = await run_deobf(raw, file.filename)
-    await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
-    if res.get('full_diag'):
-        diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
-        diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
-        await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file)
-
-
-@tree.command(name='debug', description='Debug the Lua harness with a file')
-async def slash_debug(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
-        return await interaction.response.send_message(
-            'Please attach a `.lua`, `.luau`, or `.txt` file.',
-            ephemeral=True
-        )
-    if file.size > MAX_BYTES:
-        return await interaction.response.send_message(
-            f'File too large ({file.size} bytes, max {MAX_BYTES})',
-            ephemeral=True
-        )
-
-    await interaction.response.defer(thinking=True)
-    raw = await file.read()
-    source_b64 = base64.b64encode(raw).decode('ascii')
-
-    try:
-        async with httpx.AsyncClient(timeout=180) as c:
-            r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        return await interaction.followup.send(f'Debug request failed: {str(e)[:1000]}')
-
-    em = discord.Embed(
-        title='Harness Debug Result',
-        color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
-    )
-    em.add_field(name='Lua Found', value=str(data.get('lua_found', 'unknown')), inline=True)
-    em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
-    em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
-    em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
-
-    stdout = data.get('stdout', '')
-    stderr = data.get('stderr', '')
-    if stdout:
-        em.add_field(name='stdout', value=f'```\n{stdout[:900]}\n```', inline=False)
-    if stderr:
-        em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
-    if not stdout and not stderr:
-        em.add_field(name='Output', value='(empty)', inline=False)
-
-    await interaction.followup.send(embed=em)
-
-
 @bot.event
 async def on_ready():
     log.info(f'Ready: {bot.user} | API: {API_URL}')
+
 
 if __name__ == '__main__':
     bot.run(TOKEN)
