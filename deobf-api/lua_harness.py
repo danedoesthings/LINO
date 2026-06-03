@@ -16,7 +16,7 @@ class LuaHarness:
             return None
 
         result = self._run_symbolic(source, timeout, decoded_strings)
-        if result and len(result) > 200:
+        if result and len(result) > 200 and not self._is_raw_vm_output(result):
             return result
 
         result = self._run_dynamic(source, timeout)
@@ -24,6 +24,14 @@ class LuaHarness:
             return result
 
         return None
+
+    def _is_raw_vm_output(self, output: str) -> bool:
+        octal_count = output.count('\\07') + output.count('\\1') + output.count('\\09')
+        vm_indicators = ['while l do if l<', 'while vmState do', 'local function E(E)return R[E+']
+        for indicator in vm_indicators:
+            if indicator in output:
+                return True
+        return octal_count > 20
 
     def _run_symbolic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
