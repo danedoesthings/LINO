@@ -28,6 +28,7 @@ intents.message_content = True
 
 class DeobfBot(commands.Bot):
     def __init__(self):
+        # Do NOT set self.tree – it's a read-only property
         super().__init__(command_prefix='=', intents=intents, help_command=None)
 
     async def setup_hook(self):
