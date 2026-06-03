@@ -40,14 +40,48 @@ local function resolve_getter(n)
     return nil
 end
 
-local r_table_match = input:match('local%s+R%s*=%s*%{([^}]*)%}')
+local single_line = input:gsub("\n", " "):gsub("\r", " ")
+
+local r_table_match = single_line:match('local%s+R%s*=%s*%{([^}]*)%}')
+if not r_table_match then
+    local start_pos = single_line:find('local%s+R%s*=%s*%{')
+    if start_pos then
+        local depth = 0
+        local end_pos = start_pos
+        local in_string = false
+        local escape = false
+        for i = start_pos, #single_line do
+            local c = single_line:sub(i, i)
+            if escape then
+                escape = false
+            elseif c == '\\' then
+                escape = true
+            elseif c == '"' then
+                in_string = not in_string
+            elseif not in_string then
+                if c == '{' then
+                    depth = depth + 1
+                elseif c == '}' then
+                    depth = depth - 1
+                    if depth == 0 then
+                        end_pos = i
+                        break
+                    end
+                end
+            end
+        end
+        r_table_match = single_line:sub(start_pos, end_pos):match('local%s+R%s*=%s*%{([^}]*)%}')
+    end
+end
+
 if r_table_match then
     local raw_strings = {}
     for s in r_table_match:gmatch('"((?:[^"\\]|\\.)*)"') do
-        table.insert(raw_strings, s:gsub('\\(%d+)', function(d) return string.char(tonumber(d)) end))
+        local decoded = s:gsub('\\(%d+)', function(d) return string.char(tonumber(d)) end)
+        table.insert(raw_strings, decoded)
     end
 
-    local shuffle_match = input:match('ipairs%s*%(%s*%{([^}]+)%}%s*%)')
+    local shuffle_match = single_line:match('ipairs%s*%(%s*%{([^}]+)%}%s*%)')
     local shuffle_pairs = {}
     if shuffle_match then
         for a, b in shuffle_match:gmatch('%{([%d]+)[,;]([%d]+)%}') do
@@ -57,8 +91,8 @@ if r_table_match then
 
     for _, pair in ipairs(shuffle_pairs) do
         local lo, hi = pair[1] - 1, pair[2] - 1
-        while lo < hi do
-            raw_strings[lo + 1], raw_strings[hi + 1] = raw_strings[hi + 1], raw_strings[lo + 1]
+        while lo < hi and lo >= 1 and hi <= #raw_strings do
+            raw_strings[lo], raw_strings[hi] = raw_strings[hi], raw_strings[lo]
             lo = lo + 1
             hi = hi - 1
         end
@@ -69,15 +103,23 @@ if r_table_match then
     end
 end
 
-local getter_match = input:match('local%s+function%s+(%w+)%s*%(%s*%1%s*%)%s*return%s+R%s*%[%s*%1%s*%+%s*%(([^)]+)%)%s*%]')
-if getter_match then
-    getter_name = getter_match[1]
-    getter_offset = safe_eval(getter_match[2])
+local getter_patterns = {
+    'local%s+function%s+(%w+)%s*%(%s*%1%s*%)%s*return%s+R%s*%[%s*%1%s*%+%s*%(([^)]+)%)%s*%]',
+    'local%s+function%s+(%w+)%s*%(%s*%1%s*%)%s*return%s+R%s*%[%s*%1%s*%+%s*([%d%-%+]+)%s*%]',
+}
+
+for _, pattern in ipairs(getter_patterns) do
+    local name, offset_str = single_line:match(pattern)
+    if name and offset_str then
+        getter_name = name
+        getter_offset = safe_eval(offset_str)
+        break
+    end
 end
 
 local result = input
 
-if getter_name then
+if getter_name and getter_offset then
     result = result:gsub(getter_name .. '%s*%(%s*([^)]+)%s*%)', function(expr)
         local n = safe_eval(expr)
         local s = resolve_getter(n)
@@ -89,15 +131,24 @@ if getter_name then
 end
 
 for i, s in ipairs(decoded_strings) do
-    result = result:gsub('R%[' .. i .. '%]', '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"')
-    result = result:gsub('R%[ ' .. i .. ' %]', '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"')
+    local escaped = s:gsub('\\', '\\\\'):gsub('"', '\\"')
+    result = result:gsub('R%[' .. i .. '%]', '"' .. escaped .. '"')
+    result = result:gsub('R%[ ' .. i .. ' %]', '"' .. escaped .. '"')
+    result = result:gsub('R%["' .. i .. '"%]', '"' .. escaped .. '"')
 end
 
 local output = "-- Symbolically Evaluated Output\n"
 output = output .. "-- " .. #decoded_strings .. " strings decoded\n"
 if getter_name then
     output = output .. "-- Getter: " .. getter_name .. "(N + " .. tostring(getter_offset) .. ")\n"
+    output = output .. "-- Replaced all " .. getter_name .. "() calls with string values\n"
 end
-output = output .. "\n" .. result
+output = output .. "\n"
+output = output .. "local R = {\n"
+for i, s in ipairs(decoded_strings) do
+    output = output .. '\t[' .. i .. '] = "' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '",\n'
+end
+output = output .. "}\n\n"
+output = output .. result
 
 fs.writeFile(outFile, output)
