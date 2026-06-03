@@ -41,18 +41,20 @@ def safe_eval(expr: str) -> Optional[int]:
     for i, c in enumerate(expr):
         if c in '+-' and i > 0 and expr[i-1] not in '+-':
             if current:
-                result += sign * int(current)
+                try:
+                    result += sign * int(current)
+                except ValueError:
+                    return None
             current = ''
             sign = 1 if c == '+' else -1
         else:
             current += c
     if current:
-        result += sign * int(current)
+        try:
+            result += sign * int(current)
+        except ValueError:
+            return None
     return result
-
-
-def _token_replace(text: str, old: str, new: str) -> str:
-    return re.sub(r'(?<![a-zA-Z0-9_])' + re.escape(old) + r'(?![a-zA-Z0-9_])', new, text)
 
 
 @dataclass
@@ -120,50 +122,90 @@ class Unveiler:
                 name = m.group(1)
                 op = m.group(3)
                 offset_expr = m.group(4)
-                if op == '+':
-                    offset = safe_eval(offset_expr)
-                    if name and offset is not None:
+                offset = safe_eval(offset_expr)
+                if name and offset is not None:
+                    if op == '+':
                         getters.append((name, offset))
-                elif op == '-':
-                    offset = safe_eval(offset_expr)
-                    if name and offset is not None:
+                    elif op == '-':
                         getters.append((name, -offset))
         return getters
 
-    def _is_getter_definition(self, source: str, pos: int) -> bool:
-        before = source[max(0, pos-30):pos]
-        return bool(re.search(r'\b(function|local\s+function)\s*$', before))
+    def _resolve_getter_outside_strings(self, source: str, getter_name: str, getter_offset: int, strings: list) -> str:
+        result = []
+        in_string = False
+        string_char = None
+        escape = False
+        in_comment = False
+        i = 0
 
-    def _resolve_all_getters(self, source: str, strings: list) -> str:
-        getters = self._detect_all_getters(source)
-        result = source
-        for getter_name, getter_offset in getters:
-            pattern = re.compile(rf'(?<!\bfunction\s)(?<!\blocal\s){getter_name}\s*\(')
-            pos = 0
-            while pos < len(result):
-                m = pattern.search(result, pos)
-                if not m:
+        while i < len(source):
+            c = source[i]
+
+            if in_comment:
+                if c == '\n':
+                    in_comment = False
+                result.append(c)
+                i += 1
+                continue
+
+            if escape:
+                escape = False
+                result.append(c)
+                i += 1
+                continue
+
+            if c == '\\':
+                escape = True
+                result.append(c)
+                i += 1
+                continue
+
+            if in_string:
+                result.append(c)
+                if c == string_char:
+                    in_string = False
+                i += 1
+                continue
+
+            if c == '"' or c == "'":
+                in_string = True
+                string_char = c
+                result.append(c)
+                i += 1
+                continue
+
+            if source[i:i+2] == '--':
+                in_comment = True
+                result.append(c)
+                i += 1
+                continue
+
+            if source[i:i+2] == '--[[':
+                end_comment = source.find(']]', i + 4)
+                if end_comment == -1:
+                    result.extend(source[i:])
                     break
-                if self._is_getter_definition(result, m.start()):
-                    pos = m.end()
-                    continue
-                start = m.start()
-                paren_start = m.end()
+                result.extend(source[i:end_comment+2])
+                i = end_comment + 2
+                continue
+
+            m = re.match(rf'{getter_name}\s*\(', source[i:])
+            if m:
+                start = i
+                paren_start = i + m.end()
                 depth = 1
-                i = paren_start
-                while i < len(result):
-                    c = result[i]
-                    if c == '(':
+                j = paren_start
+                while j < len(source):
+                    if source[j] == '(':
                         depth += 1
-                    elif c == ')':
+                    elif source[j] == ')':
                         depth -= 1
                         if depth == 0:
                             break
-                    i += 1
-                if i >= len(result):
-                    break
-                expr = result[paren_start:i].strip('()')
-                try:
+                    j += 1
+
+                if j < len(source):
+                    expr = source[paren_start:j].strip('()')
                     n = safe_eval(expr)
                     if n is not None:
                         idx = n + getter_offset
@@ -171,12 +213,24 @@ class Unveiler:
                             s = strings[idx - 1]
                             if s:
                                 escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                                result = result[:start] + f'"{escaped}"' + result[i+1:]
-                                pos = start + len(escaped) + 2
+                                result.append(f'"{escaped}"')
+                                i = j + 1
                                 continue
-                except:
-                    pass
-                pos = i + 1
+
+                result.append(source[start])
+                i = start + 1
+                continue
+
+            result.append(c)
+            i += 1
+
+        return ''.join(result)
+
+    def _resolve_all_getters(self, source: str, strings: list) -> str:
+        getters = self._detect_all_getters(source)
+        result = source
+        for getter_name, getter_offset in getters:
+            result = self._resolve_getter_outside_strings(result, getter_name, getter_offset, strings)
         return result
 
     def _replace_string_table_refs(self, source: str, strings: list) -> str:
