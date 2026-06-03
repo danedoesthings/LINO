@@ -19,6 +19,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 class DeobfBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+
     async def on_ready(self):
         log.info(f'Logged in as {self.user}')
 
@@ -26,10 +29,9 @@ class DeobfBot(discord.Client):
         if message.author.bot:
             return
 
-        if message.content.startswith('.deobf'):
-            await self.handle_deobf(message)
+        if not message.content.startswith('.deobf'):
+            return
 
-    async def handle_deobf(self, message):
         raw = None
         filename = 'input.lua'
 
@@ -67,7 +69,7 @@ class DeobfBot(discord.Client):
         if result:
             await message.reply(file=discord.File(io.BytesIO(result.encode()), filename=f'deobfuscated_{filename}'))
         else:
-            await message.reply('Deobfuscation failed. The script may be corrupted or use an unsupported obfuscator.')
+            await message.reply('Deobfuscation failed.')
 
     def extract_code(self, content):
         m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
@@ -87,7 +89,6 @@ class DeobfBot(discord.Client):
         try:
             env = os.environ.copy()
             env['LUNE_PATH'] = '/usr/local/bin/lune'
-            env['DARKLUA_PATH'] = '/usr/local/bin/darklua'
 
             result = subprocess.run(
                 ['lune', 'run', 'httplog2.lua', input_path, '0', output_path],
