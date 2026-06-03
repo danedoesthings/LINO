@@ -11,8 +11,8 @@ local inputSource = fs.readFile(targetFile)
 
 local arrayName = inputSource:match("local%s+([%w_]+)%s*=%s*{")
 local arrayStart = arrayName and inputSource:find("local%s+" .. arrayName .. "%s*=%s*{")
-
 local initBlock
+
 if arrayStart then
     local tail = inputSource:sub(arrayStart)
     local depth = 0
@@ -36,9 +36,9 @@ if arrayStart then
             i = close and close + 2 or #tail + 1
         else
             local kw = tail:match('^%f[%w_](function)%f[%W_]', i)
-                    or tail:match('^%f[%w_](do)%f[%W_]', i)
-                    or tail:match('^%f[%w_](end)%f[%W_]', i)
-                    or tail:match('^%f[%w_](return)%f[%W_]', i)
+                or tail:match('^%f[%w_](do)%f[%W_]', i)
+                or tail:match('^%f[%w_](end)%f[%W_]', i)
+                or tail:match('^%f[%w_](return)%f[%W_]', i)
             if kw == 'function' or kw == 'do' then
                 depth = depth + 1
                 i = i + #kw
@@ -69,8 +69,8 @@ if not arrayName or not initBlock or initBlock == "" then
 end
 
 local cleanRunner = [[
-    local fakeEnv = ...
-    setfenv(1, fakeEnv)
+local fakeEnv = ...
+setfenv(1, fakeEnv)
 ]] .. "\n" .. initBlock .. "\nreturn " .. arrayName
 
 local fakeEnv = {
@@ -96,4 +96,15 @@ for idx, val in pairs(dictionaryTable) do
     cache[tostring(idx)] = val
 end
 
-fs.writeFile("string_cache.json", require("@lune/net").jsonEncode(cache))
+local ok, serde = pcall(require, "@lune/serde")
+if ok and serde and serde.json then
+    fs.writeFile("string_cache.json", serde.json.encode(cache))
+else
+    local parts = {}
+    for k, v in pairs(cache) do
+        local ks = '"' .. tostring(k):gsub('"', '\\"') .. '"'
+        local vs = '"' .. tostring(v):gsub('\\','\\\\'):gsub('"','\\"'):gsub('\n','\\n') .. '"'
+        parts[#parts + 1] = ks .. ": " .. vs
+    end
+    fs.writeFile("string_cache.json", "{" .. table.concat(parts, ", ") .. "}")
+end
