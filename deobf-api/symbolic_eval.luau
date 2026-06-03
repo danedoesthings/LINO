@@ -1,5 +1,6 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
+local luau = require("@lune/luau")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "deobfuscated.lua"
@@ -10,13 +11,13 @@ local input = fs.readFile(targetFile)
 local decoded_strings = {}
 
 if stringsFile and #stringsFile > 0 and fs.isFile(stringsFile) then
-    local ok, serde = pcall(require, "@lune/serde")
-    if ok and serde and serde.json then
-        decoded_strings = serde.json.decode(fs.readFile(stringsFile))
-    else
-        local raw = fs.readFile(stringsFile)
-        for s in raw:gmatch('"((?:[^"\\]|\\.)*)"') do
-            table.insert(decoded_strings, s:gsub('\\"', '"'):gsub('\\\\', '\\'))
+    local chunk, err = luau.load(fs.readFile(stringsFile))
+    if chunk then
+        local success, result = pcall(chunk)
+        if success and type(result) == "table" then
+            for _, s in ipairs(result) do
+                table.insert(decoded_strings, s)
+            end
         end
     end
 end
