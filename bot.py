@@ -5,6 +5,11 @@ import base64
 import asyncio
 import subprocess
 import tempfile
+import re
+import logging
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger('deobf-bot')
 
 TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
 if not TOKEN:
@@ -12,54 +17,107 @@ if not TOKEN:
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = discord.Client(intents=intents)
 
-def run_deobf(source_bytes):
-    with tempfile.NamedTemporaryFile(suffix='.lua', delete=False) as f:
-        f.write(source_bytes)
-        input_path = f.name
-    
-    with tempfile.NamedTemporaryFile(suffix='.lua', delete=False) as f:
-        output_path = f.name
-    
-    try:
-        env = os.environ.copy()
-        env['LUNE_PATH'] = os.path.dirname(os.path.abspath(__file__))
-        result = subprocess.run(
-            ['lune', 'run', 'httplog2.lua', input_path, '0', output_path],
-            capture_output=True, text=True, timeout=120, env=env
-        )
-        if result.returncode == 0 and os.path.exists(output_path):
-            with open(output_path, 'r', encoding='utf-8', errors='replace') as out:
-                return out.read()
-        return None
-    finally:
-        try: os.unlink(input_path)
-        except: pass
-        try: os.unlink(output_path)
-        except: pass
+class DeobfBot(discord.Client):
+    async def on_ready(self):
+        log.info(f'Logged in as {self.user}')
 
-@bot.event
-async def on_ready():
-    print(f'Ready: {bot.user}')
+    async def on_message(self, message):
+        if message.author.bot:
+            return
 
-@bot.event
-async def on_message(msg):
-    if msg.author.bot:
-        return
-    if msg.content.startswith('.deobf'):
-        if msg.attachments:
-            att = msg.attachments[0]
-            if att.filename.endswith('.lua'):
-                raw = await att.read()
-                await msg.channel.typing()
-                result = await asyncio.to_thread(run_deobf, raw)
-                if result:
-                    await msg.reply(file=discord.File(io.BytesIO(result.encode()), filename='deobfuscated.lua'))
-                else:
-                    await msg.reply('Deobfuscation failed')
+        if message.content.startswith('.deobf'):
+            await self.handle_deobf(message)
+
+    async def handle_deobf(self, message):
+        raw = None
+        filename = 'input.lua'
+
+        if message.attachments:
+            att = message.attachments[0]
+            if not att.filename.endswith(('.lua', '.luau', '.txt')):
+                await message.reply('Please attach a .lua, .luau, or .txt file.')
+                return
+            if att.size > 5 * 1024 * 1024:
+                await message.reply('File too large (max 5MB)')
+                return
+            raw = await att.read()
+            filename = att.filename
         else:
-            await msg.reply('Attach a .lua file')
+            content = message.content
+            cmd_end = content.lower().find('deobf')
+            if cmd_end != -1:
+                content = content[cmd_end + len('deobf'):].strip()
+            code = self.extract_code(content)
+            if not code:
+                await message.reply('Attach a .lua file or paste code in a codeblock.')
+                return
+            raw = code.encode('utf-8')
 
-if __name__ == '__main__':
-    bot.run(TOKEN)
+        log.info(f"Deobf request from {message.author} ({filename}, {len(raw)} bytes)")
+
+        msg = await message.reply('Deobfuscating...')
+        result = await asyncio.to_thread(self.run_deobf, raw)
+
+        try:
+            await msg.delete()
+        except:
+            pass
+
+        if result:
+            await message.reply(file=discord.File(io.BytesIO(result.encode()), filename=f'deobfuscated_{filename}'))
+        else:
+            await message.reply('Deobfuscation failed. The script may be corrupted or use an unsupported obfuscator.')
+
+    def extract_code(self, content):
+        m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        stripped = content.strip()
+        return stripped if stripped else None
+
+    def run_deobf(self, source_bytes):
+        with tempfile.NamedTemporaryFile(suffix='.lua', delete=False) as f:
+            f.write(source_bytes)
+            input_path = f.name
+
+        with tempfile.NamedTemporaryFile(suffix='.lua', delete=False) as f:
+            output_path = f.name
+
+        try:
+            env = os.environ.copy()
+            env['LUNE_PATH'] = '/usr/local/bin/lune'
+            env['DARKLUA_PATH'] = '/usr/local/bin/darklua'
+
+            result = subprocess.run(
+                ['lune', 'run', 'httplog2.lua', input_path, '0', output_path],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env
+            )
+
+            if result.returncode != 0:
+                log.error(f"Lune error: {result.stderr[:500]}")
+                return None
+
+            if os.path.exists(output_path):
+                with open(output_path, 'r', encoding='utf-8', errors='replace') as out:
+                    data = out.read().strip()
+                if data and not data.startswith('-- [ERROR]'):
+                    return data
+            return None
+        except subprocess.TimeoutExpired:
+            log.error("Timeout during deobfuscation")
+            return None
+        except Exception as e:
+            log.error(f"Deobf error: {e}")
+            return None
+        finally:
+            try: os.unlink(input_path)
+            except: pass
+            try: os.unlink(output_path)
+            except: pass
+
+bot = DeobfBot()
+bot.run(TOKEN)
