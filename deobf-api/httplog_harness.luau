@@ -2,14 +2,14 @@ local fs = require("@lune/fs")
 local process = require("@lune/process")
 local luau = require("@lune/luau")
 
-local targetfilename = process.args[1]
-local outpath = process.args[2] or "captured.lua"
+local targetFile = process.args[1]
+local outFile = process.args[2] or "captured.lua"
 
-if not fs.isFile(targetfilename) then
-    error("Target file not found: " .. targetfilename)
+if not fs.isFile(targetFile) then
+    error("Target file not found: " .. targetFile)
 end
 
-local input = fs.readFile(targetfilename)
+local input = fs.readFile(targetFile)
 
 local r = {}
 local c = 0
@@ -18,7 +18,7 @@ local function _25ms(var)
     local vartype = type(var)
     if vartype == "string" then
         c = c + 1
-        r[c] = "[" .. vartype .. "]" .. var
+        r[c] = var
     end
     return var
 end
@@ -37,6 +37,7 @@ local function spy_tbl(pre, parent)
         __tostring = function() return pre end,
         __type = "userdata",
         __len = function() return 2853638 end,
+        __metatable = "The metatable is locked",
     })
 end
 
@@ -225,7 +226,7 @@ end
 
 local chunk, err = luau.load(input)
 if err then
-    fs.writeFile(outpath, "-- [ERROR] Compile: " .. err)
+    fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
     return
 end
 
@@ -238,4 +239,4 @@ if not success then
 end
 
 local output = table.concat(r, "\n")
-fs.writeFile(outpath, output)
+fs.writeFile(outFile, output)
