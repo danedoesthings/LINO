@@ -84,43 +84,16 @@ class Unveiler:
         if not getter_name:
             return source
 
-        def repl(m):
-            try:
-                inner = m.group(1)
-                depth = 0
-                end = 0
-                for i, c in enumerate(inner):
-                    if c == '(':
-                        depth += 1
-                    elif c == ')':
-                        depth -= 1
-                        if depth < 0:
-                            end = i
-                            break
-                    elif depth == 0 and c == ',':
-                        end = i
-                        break
-                if end > 0:
-                    inner = inner[:end]
-                n = safe_eval(inner)
-                idx = n + getter_offset
-                if 1 <= idx <= len(strings):
-                    s = strings[idx - 1]
-                    if s:
-                        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                        return f'"{escaped}"'
-            except:
-                pass
-            return m.group(0)
-
         result = source
         pos = 0
+        pattern = re.compile(rf'{getter_name}\s*\(')
+        
         while pos < len(result):
-            m = re.search(rf'{getter_name}\s*\(\s*', result[pos:])
+            m = pattern.search(result, pos)
             if not m:
                 break
-            start = pos + m.start()
-            paren_start = pos + m.end()
+            start = m.start()
+            paren_start = m.end()
             depth = 0
             i = paren_start
             while i < len(result):
@@ -134,7 +107,6 @@ class Unveiler:
                 i += 1
             if i >= len(result):
                 break
-            full_match = result[start:i+1]
             expr = result[paren_start:i]
             try:
                 n = safe_eval(expr)
@@ -161,7 +133,7 @@ class Unveiler:
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
         reconstructed = self._resolve_getter_calls(source, decoder.strings)
-
+        
         for i, s in enumerate(decoder.strings):
             if s:
                 escaped = s.replace('\\', '\\\\').replace('"', '\\"')
