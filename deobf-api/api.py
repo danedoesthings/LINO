@@ -46,8 +46,18 @@ def health():
             'lua5.1': shutil.which('lua5.1'),
             'lua5.2': shutil.which('lua5.2'),
             'lua': shutil.which('lua'),
-        }
+        },
+        'lune_available': shutil.which('lune') is not None,
+        'lupa_available': _check_lupa(),
     })
+
+
+def _check_lupa():
+    try:
+        import lupa
+        return True
+    except ImportError:
+        return False
 
 
 @app.route('/debug')
@@ -190,20 +200,24 @@ def debug_harness():
     source_str = raw_bytes.decode('latin-1', errors='replace')
 
     harness = engine.harness
-    trace_result = harness.run_with_trace(source_str, timeout=30)
 
-    return jsonify({
-        'captured': trace_result.get('captured') is not None,
-        'captured_length': len(trace_result.get('captured', '')) if trace_result.get('captured') else 0,
-        'captured_preview': (trace_result.get('captured', '') or '')[:500],
-        'trace': (trace_result.get('trace', '') or '')[:4000],
-        'error': trace_result.get('error'),
-        'stdout': trace_result.get('stdout', '')[:2000],
-        'stderr': trace_result.get('stderr', '')[:2000],
-        'timed_out': trace_result.get('timed_out', False),
+    result = {
         'lua_found': harness.available,
-        'lua_path': harness._find_lua(),
-    })
+        'lune_available': harness.lune_available,
+        'lupa_available': harness.lupa_available,
+        'lua_path': shutil.which('lua5.1') or shutil.which('lua') or 'not found',
+        'lune_path': shutil.which('lune') or 'not found',
+    }
+
+    harness_output = harness.run(source_str, timeout=30)
+    if harness_output:
+        result['captured'] = harness_output[:2000]
+        result['captured_length'] = len(harness_output)
+    else:
+        result['captured'] = None
+        result['error'] = 'Harness returned no output'
+
+    return jsonify(result)
 
 
 if __name__ == '__main__':
