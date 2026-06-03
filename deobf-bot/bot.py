@@ -34,8 +34,13 @@ MAX_BYTES = 5 * 1024 * 1024
 
 SUCCESS_METHODS = (
     'lua_harness', 'static_analysis', 'wearedevs_string_substitution',
-    'wearedevs_decode', 'ast_decompile_instrumented', 'regex_fallback',
+    'ast_decompile_instrumented', 'regex_fallback',
     'wearedevs_vm_lifted', 'print_capture', 'recursive_unveil',
+    'lune_darklua', 'vm_lifted', 'vm_devirtualized', 'state_machine_lifted',
+)
+
+PARTIAL_METHODS = (
+    'wearedevs_decode', 'instr_table_dump', 'raw_string_dump',
 )
 
 async def call_api_direct(source_b64):
@@ -125,6 +130,8 @@ async def run_deobf(raw_bytes, filename):
 
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
+    elif detected in PARTIAL_METHODS:
+        title, color = 'Partial Result \u2014 String Table Dump', 0xf1c40f
     else:
         title, color = 'Deobfuscation Partial', 0xf1c40f
 
@@ -133,6 +140,7 @@ async def run_deobf(raw_bytes, filename):
         color=color,
         timestamp=datetime.datetime.utcnow()
     )
+
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
     em.add_field(name='Input', value=filename, inline=True)
     em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
@@ -142,20 +150,25 @@ async def run_deobf(raw_bytes, filename):
         short_diag = clean[:900] + ('...' if len(clean) > 900 else '')
         em.add_field(name='Diagnostic', value=f'```\n{short_diag}\n```', inline=False)
 
+    if detected in PARTIAL_METHODS:
+        em.add_field(
+            name='\U0001f6c8 What is this?',
+            value='The obfuscator could not be fully reversed. This output contains all decoded string constants and a best-effort reconstruction. The original script may use a VM layer that requires runtime execution to fully recover.',
+            inline=False,
+        )
+
     if trace:
         stages = [t.get('stage', '?') for t in trace[:10]]
         stage_text = ' -> '.join(stages)
         em.add_field(name='Pipeline', value=_truncate(stage_text, 1000), inline=False)
 
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
-
     files = []
     if result:
         files.append(discord.File(
             fp=io.BytesIO(result.encode('utf-8', errors='replace')),
             filename=f'deobfuscated_{filename}'
         ))
-
     full_diag = diagnostic if len(diagnostic) > 900 else None
     return {'embed': em, 'files': files, 'full_diag': full_diag}
 
@@ -165,7 +178,6 @@ last_results = {}
 @commands.cooldown(1, 30, commands.BucketType.user)
 async def prefix_deobf(ctx):
     raw, filename = None, 'input.lua'
-
     if ctx.message.attachments:
         att = ctx.message.attachments[0]
         if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
@@ -184,23 +196,18 @@ async def prefix_deobf(ctx):
         raw = code.encode('utf-8')
 
     log.info(f"Deobf request from {ctx.author} ({filename}, {len(raw)} bytes)")
-
     msg = await ctx.send(embed=discord.Embed(
         title='Deobfuscating...',
         description=f'Processing {filename} ({len(raw)} bytes)',
         color=0x3498db
     ))
-
     res = await run_deobf(raw, filename)
     last_results[ctx.channel.id] = res
-
     try:
         await msg.delete()
     except (discord.NotFound, discord.Forbidden):
         pass
-
     await ctx.send(embed=res['embed'], files=res.get('files', []))
-
     if res.get('full_diag'):
         await ctx.send('Diagnostic was truncated. Use `=fulldiag` to get the full diagnostic as a file.')
 
@@ -209,7 +216,6 @@ async def prefix_fulldiag(ctx):
     res = last_results.get(ctx.channel.id)
     if not res or not res.get('full_diag'):
         return await ctx.send('No truncated diagnostic available. Run `=deobf` first.')
-
     diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
     file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
     await ctx.send('Full diagnostic:', file=file)
@@ -219,22 +225,18 @@ async def prefix_fulldiag(ctx):
 async def prefix_debug(ctx):
     if not ctx.message.attachments:
         return await ctx.send('Attach a `.lua` or `.txt` file to debug.')
-
     att = ctx.message.attachments[0]
     if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
         return await ctx.send('Please attach a `.lua`, `.luau`, or `.txt` file.')
     if att.size > MAX_BYTES:
         return await ctx.send(f'File too large ({att.size} bytes, max {MAX_BYTES})')
-
     raw = await att.read()
     source_b64 = base64.b64encode(raw).decode('ascii')
-
     msg = await ctx.send(embed=discord.Embed(
         title='Debugging harness...',
         description='Running harness with debug output...',
         color=0x3498db
     ))
-
     try:
         async with httpx.AsyncClient(timeout=180) as c:
             r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
@@ -246,12 +248,10 @@ async def prefix_debug(ctx):
         except:
             pass
         return await ctx.send(f'Debug request failed: {str(e)[:1000]}')
-
     try:
         await msg.delete()
     except:
         pass
-
     em = discord.Embed(
         title='Harness Debug Result',
         color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
@@ -260,17 +260,14 @@ async def prefix_debug(ctx):
     em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
     em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
     em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
-
     stdout = data.get('stdout', '')
     stderr = data.get('stderr', '')
-
     if stdout:
         em.add_field(name='stdout', value=f'```\n{stdout[:900]}\n```', inline=False)
     if stderr:
         em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
     if not stdout and not stderr:
         em.add_field(name='Output', value='(empty)', inline=False)
-
     await ctx.send(embed=em)
 
 @bot.command(name='ping')
@@ -292,22 +289,16 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
             'Please attach a `.lua`, `.luau`, or `.txt` file.',
             ephemeral=True
         )
-
     if file.size > MAX_BYTES:
         return await interaction.response.send_message(
             f'File too large ({file.size} bytes, max {MAX_BYTES})',
             ephemeral=True
         )
-
     await interaction.response.defer(thinking=True)
-
     raw = await file.read()
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
-
     res = await run_deobf(raw, file.filename)
-
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
-
     if res.get('full_diag'):
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
         diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
@@ -320,18 +311,14 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
             'Please attach a `.lua`, `.luau`, or `.txt` file.',
             ephemeral=True
         )
-
     if file.size > MAX_BYTES:
         return await interaction.response.send_message(
             f'File too large ({file.size} bytes, max {MAX_BYTES})',
             ephemeral=True
         )
-
     await interaction.response.defer(thinking=True)
-
     raw = await file.read()
     source_b64 = base64.b64encode(raw).decode('ascii')
-
     try:
         async with httpx.AsyncClient(timeout=180) as c:
             r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
@@ -339,7 +326,6 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
             data = r.json()
     except Exception as e:
         return await interaction.followup.send(f'Debug request failed: {str(e)[:1000]}')
-
     em = discord.Embed(
         title='Harness Debug Result',
         color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
@@ -348,17 +334,14 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
     em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
     em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
     em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
-
     stdout = data.get('stdout', '')
     stderr = data.get('stderr', '')
-
     if stdout:
         em.add_field(name='stdout', value=f'```\n{stdout[:900]}\n```', inline=False)
     if stderr:
         em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
     if not stdout and not stderr:
         em.add_field(name='Output', value='(empty)', inline=False)
-
     await interaction.followup.send(embed=em)
 
 @bot.event
