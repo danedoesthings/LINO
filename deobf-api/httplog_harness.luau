@@ -15,34 +15,48 @@ local r = {}
 local c = 0
 
 local function _25ms(var)
-    local vartype = type(var)
-    if vartype == "string" then
+    if type(var) == "string" then
         c = c + 1
         r[c] = var
     end
     return var
 end
 
-local function spy_tbl(pre, parent)
-    return setmetatable({}, {
-        __index = function(_, key)
-            return spy_tbl(pre .. "." .. tostring(key), _)
-        end,
-        __newindex = function(_, key, value)
-            _25ms(value)
-        end,
-        __call = function(_, ...)
-            return spy_tbl(pre .. "(...)")
-        end,
-        __tostring = function() return pre end,
-        __type = "userdata",
+local function _spy_make(name)
+    local t = {}
+    local mt = {
+        __type = function() return "userdata" end,
+        __tostring = function() return name end,
         __len = function() return 2853638 end,
         __metatable = "The metatable is locked",
-    })
+        __add = function() return 0 end,
+        __sub = function() return 0 end,
+        __mul = function() return 0 end,
+        __div = function() return 0 end,
+        __mod = function() return 0 end,
+        __unm = function() return 0 end,
+        __concat = function(a, b) return tostring(a) .. tostring(b) end,
+        __lt = function() return false end,
+        __le = function() return false end,
+        __eq = function() return false end,
+        __gc = function() end,
+    }
+    mt.__index = function(self, k)
+        return _spy_make(name .. "." .. tostring(k))
+    end
+    mt.__newindex = function(self, k, v)
+        if type(v) == "string" then
+            _25ms(v)
+        end
+    end
+    mt.__call = function(self, ...)
+        return _spy_make(name .. "(...)")
+    end
+    setmetatable(t, mt)
+    return t
 end
 
 local cenv = {
-    _25ms = _25ms,
     pcall = function(fn, ...)
         local results = {pcall(fn, ...)}
         if not results[1] then
@@ -65,10 +79,6 @@ local cenv = {
             local fn = luau.load(src, b)
             setfenv(fn, cenv)
             return fn
-        elseif type(src) == "userdata" then
-            return function(...)
-                return spy_tbl("loadstring_result")
-            end
         end
     end,
     load = function(src, b)
@@ -78,11 +88,10 @@ local cenv = {
             setfenv(fn, cenv)
             return fn
         end
-        return function() end
     end,
-    game = spy_tbl("game"),
-    workspace = spy_tbl("workspace"),
-    script = spy_tbl("script"),
+    game = _spy_make("game"),
+    workspace = _spy_make("workspace"),
+    script = _spy_make("script"),
     shared = {},
     task = { wait = function() return 1 end, spawn = function(f) pcall(f) end, defer = function(f) pcall(f) end },
     wait = function() return 1 end,
@@ -91,25 +100,25 @@ local cenv = {
     tick = function() return 0 end,
     time = function() return 0 end,
     os = { time = function() return 0 end, clock = function() return 0 end, date = function() return "" end },
-    CFrame = spy_tbl("CFrame"),
-    Vector3 = spy_tbl("Vector3"),
-    Vector2 = spy_tbl("Vector2"),
-    Color3 = spy_tbl("Color3"),
-    UDim2 = spy_tbl("UDim2"),
-    UDim = spy_tbl("UDim"),
-    Instance = spy_tbl("Instance"),
-    Enum = spy_tbl("Enum"),
-    Drawing = spy_tbl("Drawing"),
-    Ray = spy_tbl("Ray"),
-    BrickColor = spy_tbl("BrickColor"),
-    Region3 = spy_tbl("Region3"),
-    TweenInfo = spy_tbl("TweenInfo"),
+    CFrame = _spy_make("CFrame"),
+    Vector3 = _spy_make("Vector3"),
+    Vector2 = _spy_make("Vector2"),
+    Color3 = _spy_make("Color3"),
+    UDim2 = _spy_make("UDim2"),
+    UDim = _spy_make("UDim"),
+    Instance = _spy_make("Instance"),
+    Enum = _spy_make("Enum"),
+    Drawing = _spy_make("Drawing"),
+    Ray = _spy_make("Ray"),
+    BrickColor = _spy_make("BrickColor"),
+    Region3 = _spy_make("Region3"),
+    TweenInfo = _spy_make("TweenInfo"),
     getgenv = function() return cenv end,
     getrenv = function() return _G end,
     checkcaller = function() return true end,
     identifyexecutor = function() return "Synapse X", "2.0.0" end,
     getrawmetatable = function(t) return getmetatable(t) end,
-    gethui = function() return spy_tbl("HUI") end,
+    gethui = function() return _spy_make("HUI") end,
     getnilinstances = function() return {} end,
     getinstances = function() return {} end,
     getgc = function() return {} end,
@@ -200,13 +209,13 @@ local cenv = {
         arshift = function(v, n) return math.floor(v / (2 ^ n)) end,
     },
     bit = rawget(_G, "bit") or rawget(_G, "bit32"),
-    newproxy = newproxy or function(addmeta) local p = {}; if addmeta then setmetatable(p, {}) end; return p end,
+    newproxy = function(addmeta) local p = {}; if addmeta then setmetatable(p, {}) end; return p end,
     unpack = unpack or table.unpack,
     require = function(id)
         if id == "@lune/fs" then return fs end
         if id == "@lune/process" then return process end
         if id == "@lune/luau" then return luau end
-        return spy_tbl("require." .. tostring(id))
+        return _spy_make("require." .. tostring(id))
     end,
 }
 
