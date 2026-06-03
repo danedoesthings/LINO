@@ -18,6 +18,15 @@ if not TOKEN:
 intents = discord.Intents.default()
 intents.message_content = True
 
+def decode_wearedevs(code):
+    """Decode WeAreDevs v1 decimal escape sequences"""
+    if b'wearedevs.net/obfuscator' not in code[:500]:
+        return code
+    log.info("Detected WeAreDevs v1 - decoding decimal escapes")
+    def replace_decimal(match):
+        return bytes([int(match.group(1))])
+    return re.sub(rb'\\(\d{3})', replace_decimal, code)
+
 class DeobfBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
@@ -28,7 +37,6 @@ class DeobfBot(discord.Client):
     async def on_message(self, message):
         if message.author.bot:
             return
-
         if not message.content.startswith('.deobf'):
             return
 
@@ -56,9 +64,12 @@ class DeobfBot(discord.Client):
                 return
             raw = code.encode('utf-8')
 
-        log.info(f"Deobf request from {message.author} ({filename}, {len(raw)} bytes)")
+        # Pre-process: decode WeAreDevs v1 decimal escapes before anything else
+        raw = decode_wearedevs(raw)
 
+        log.info(f"Deobf request from {message.author} ({filename}, {len(raw)} bytes)")
         msg = await message.reply('Deobfuscating...')
+
         result = await asyncio.to_thread(self.run_deobf, raw)
 
         try:
@@ -89,7 +100,6 @@ class DeobfBot(discord.Client):
         try:
             env = os.environ.copy()
             env['LUNE_PATH'] = '/usr/local/bin/lune'
-
             result = subprocess.run(
                 ['lune', 'run', 'httplog2.lua', input_path, '0', output_path],
                 capture_output=True,
@@ -105,9 +115,10 @@ class DeobfBot(discord.Client):
             if os.path.exists(output_path):
                 with open(output_path, 'r', encoding='utf-8', errors='replace') as out:
                     data = out.read().strip()
-                if data and not data.startswith('-- [ERROR]'):
-                    return data
+                    if data and not data.startswith('-- [ERROR]'):
+                        return data
             return None
+
         except subprocess.TimeoutExpired:
             log.error("Timeout during deobfuscation")
             return None
