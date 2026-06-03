@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 import subprocess
@@ -15,11 +16,13 @@ class LuaHarness:
         if not self.available:
             return None
 
-        result = self._run_symbolic(source, timeout, decoded_strings)
+        patched_source = self._patch_source_for_expression_hooks(source)
+
+        result = self._run_symbolic(patched_source, timeout, decoded_strings)
         if result and len(result) > 200 and not self._is_raw_vm_output(result):
             return result
 
-        result = self._run_dynamic(source, timeout)
+        result = self._run_dynamic(patched_source, timeout)
         if result and len(result) > 100:
             return result
 
@@ -32,6 +35,32 @@ class LuaHarness:
             if indicator in output:
                 return True
         return octal_count > 20
+
+    def _patch_source_for_expression_hooks(self, source: str) -> str:
+        source = re.sub(
+            r'(?<![a-zA-Z0-9_\.\]\)])([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^=;,\n\{\}]+)',
+            r'\1 = _log_assign("\1", \2)',
+            source
+        )
+
+        replacements = [
+            (r'(\S+)\s*\.\.\s*(\S+)', r'_raw_concat(\1, \2)'),
+            (r'(\S+)\s*==\s*(\S+)', r'_raw_eq(\1, \2)'),
+            (r'(\S+)\s*<=\s*(\S+)', r'_raw_le(\1, \2)'),
+            (r'(\S+)\s*>=\s*(\S+)', r'_raw_ge(\1, \2)'),
+            (r'(\S+)\s*<\s*(\S+)', r'_raw_lt(\1, \2)'),
+            (r'(\S+)\s*>\s*(\S+)', r'_raw_gt(\1, \2)'),
+            (r'(\S+)\s*\+\s*(\S+)', r'_raw_add(\1, \2)'),
+            (r'(\S+)\s*\-\s*(\S+)', r'_raw_sub(\1, \2)'),
+            (r'(\S+)\s*\*\s*(\S+)', r'_raw_mul(\1, \2)'),
+            (r'(\S+)\s*/\s*(\S+)', r'_raw_div(\1, \2)'),
+            (r'\bnot\s+(\S+)', r'_raw_not(\1)'),
+            (r'#(\w+)', r'_raw_len(\1)'),
+        ]
+        for pattern, replacement in replacements:
+            source = re.sub(pattern, replacement, source)
+
+        return source
 
     def _run_symbolic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
@@ -120,7 +149,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                     captured = f.read().strip()
-                if captured and len(captured) > 100 and not captured.startswith("-- [ERROR]"):
+                if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
                     return captured
             return None
         except Exception:
