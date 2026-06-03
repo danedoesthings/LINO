@@ -7,7 +7,6 @@ import httpx
 import base64
 import datetime
 import asyncio
-import json
 from discord.ext import commands
 from discord import app_commands
 
@@ -40,14 +39,16 @@ SUCCESS_METHODS = (
 )
 
 PARTIAL_METHODS = (
-    'wearedevs_decode', 'instr_table_dump', 'raw_string_dump',
+    'wearedevs_decode', 'instr_table_dump', 'raw_string_dump', 'vm_devirtualized',
 )
+
 
 async def call_api_direct(source_b64):
     async with httpx.AsyncClient(timeout=180) as client:
         response = await client.post(f'{API_URL}/deobf/direct', json={'source_b64': source_b64})
         response.raise_for_status()
         return response.json()
+
 
 def _extract_inline_code(content):
     m = re.search(r'```(?:lua|luau|txt)?\s*\n?(.*?)```', content, re.DOTALL)
@@ -56,13 +57,16 @@ def _extract_inline_code(content):
     stripped = content.strip()
     return stripped or None
 
+
 def _truncate(text, max_len):
     if len(text) <= max_len:
         return text
     return text[:max_len-3] + '...'
 
+
 def _sanitize_diag(text):
     return ''.join(c for c in text if c.isprintable() or c in '\n\t')
+
 
 async def run_deobf(raw_bytes, filename):
     if len(raw_bytes) > MAX_BYTES:
@@ -131,7 +135,7 @@ async def run_deobf(raw_bytes, filename):
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
     elif detected in PARTIAL_METHODS:
-        title, color = 'Partial Result \u2014 String Table Dump', 0xf1c40f
+        title, color = 'Partial Result – String Table Dump', 0xf1c40f
     else:
         title, color = 'Deobfuscation Partial', 0xf1c40f
 
@@ -140,7 +144,6 @@ async def run_deobf(raw_bytes, filename):
         color=color,
         timestamp=datetime.datetime.utcnow()
     )
-
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
     em.add_field(name='Input', value=filename, inline=True)
     em.add_field(name='Result Size', value=f'{len(result)} chars' if result else 'empty', inline=True)
@@ -152,8 +155,8 @@ async def run_deobf(raw_bytes, filename):
 
     if detected in PARTIAL_METHODS:
         em.add_field(
-            name='\U0001f6c8 What is this?',
-            value='The obfuscator could not be fully reversed. This output contains all decoded string constants and a best-effort reconstruction. The original script may use a VM layer that requires runtime execution to fully recover.',
+            name='Note',
+            value='This output contains decoded strings and a best-effort reconstruction. The original script may use a VM layer that requires runtime execution to fully recover.',
             inline=False,
         )
 
@@ -163,21 +166,26 @@ async def run_deobf(raw_bytes, filename):
         em.add_field(name='Pipeline', value=_truncate(stage_text, 1000), inline=False)
 
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
+
     files = []
     if result:
         files.append(discord.File(
             fp=io.BytesIO(result.encode('utf-8', errors='replace')),
             filename=f'deobfuscated_{filename}'
         ))
+
     full_diag = diagnostic if len(diagnostic) > 900 else None
     return {'embed': em, 'files': files, 'full_diag': full_diag}
 
+
 last_results = {}
+
 
 @bot.command(name='deobf')
 @commands.cooldown(1, 30, commands.BucketType.user)
 async def prefix_deobf(ctx):
     raw, filename = None, 'input.lua'
+
     if ctx.message.attachments:
         att = ctx.message.attachments[0]
         if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
@@ -196,20 +204,25 @@ async def prefix_deobf(ctx):
         raw = code.encode('utf-8')
 
     log.info(f"Deobf request from {ctx.author} ({filename}, {len(raw)} bytes)")
+
     msg = await ctx.send(embed=discord.Embed(
         title='Deobfuscating...',
         description=f'Processing {filename} ({len(raw)} bytes)',
         color=0x3498db
     ))
+
     res = await run_deobf(raw, filename)
     last_results[ctx.channel.id] = res
+
     try:
         await msg.delete()
     except (discord.NotFound, discord.Forbidden):
         pass
+
     await ctx.send(embed=res['embed'], files=res.get('files', []))
     if res.get('full_diag'):
         await ctx.send('Diagnostic was truncated. Use `=fulldiag` to get the full diagnostic as a file.')
+
 
 @bot.command(name='fulldiag')
 async def prefix_fulldiag(ctx):
@@ -220,23 +233,28 @@ async def prefix_fulldiag(ctx):
     file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
     await ctx.send('Full diagnostic:', file=file)
 
+
 @bot.command(name='debug')
 @commands.cooldown(1, 60, commands.BucketType.user)
 async def prefix_debug(ctx):
     if not ctx.message.attachments:
         return await ctx.send('Attach a `.lua` or `.txt` file to debug.')
+
     att = ctx.message.attachments[0]
     if not att.filename.lower().endswith(ALLOWED_EXTENSIONS):
         return await ctx.send('Please attach a `.lua`, `.luau`, or `.txt` file.')
     if att.size > MAX_BYTES:
         return await ctx.send(f'File too large ({att.size} bytes, max {MAX_BYTES})')
+
     raw = await att.read()
     source_b64 = base64.b64encode(raw).decode('ascii')
+
     msg = await ctx.send(embed=discord.Embed(
         title='Debugging harness...',
         description='Running harness with debug output...',
         color=0x3498db
     ))
+
     try:
         async with httpx.AsyncClient(timeout=180) as c:
             r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
@@ -248,10 +266,12 @@ async def prefix_debug(ctx):
         except:
             pass
         return await ctx.send(f'Debug request failed: {str(e)[:1000]}')
+
     try:
         await msg.delete()
     except:
         pass
+
     em = discord.Embed(
         title='Harness Debug Result',
         color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
@@ -260,6 +280,7 @@ async def prefix_debug(ctx):
     em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
     em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
     em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
+
     stdout = data.get('stdout', '')
     stderr = data.get('stderr', '')
     if stdout:
@@ -268,11 +289,14 @@ async def prefix_debug(ctx):
         em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
     if not stdout and not stderr:
         em.add_field(name='Output', value='(empty)', inline=False)
+
     await ctx.send(embed=em)
+
 
 @bot.command(name='ping')
 async def prefix_ping(ctx):
     await ctx.send(f'Pong! Latency: {round(bot.latency * 1000)}ms')
+
 
 @prefix_deobf.error
 async def deobf_error(ctx, error):
@@ -281,6 +305,7 @@ async def deobf_error(ctx, error):
     else:
         log.error(f"Command error: {error}")
         await ctx.send(f'An error occurred: {str(error)[:500]}')
+
 
 @tree.command(name='deobf', description='Deobfuscate a Lua file')
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
@@ -294,15 +319,18 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
             f'File too large ({file.size} bytes, max {MAX_BYTES})',
             ephemeral=True
         )
+
     await interaction.response.defer(thinking=True)
     raw = await file.read()
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
+
     res = await run_deobf(raw, file.filename)
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
     if res.get('full_diag'):
         diag_bytes = res['full_diag'].encode('utf-8', errors='replace')
         diag_file = discord.File(fp=io.BytesIO(diag_bytes), filename='full_diagnostic.txt')
         await interaction.followup.send('Diagnostic was truncated. Full diagnostic:', file=diag_file)
+
 
 @tree.command(name='debug', description='Debug the Lua harness with a file')
 async def slash_debug(interaction: discord.Interaction, file: discord.Attachment):
@@ -316,9 +344,11 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
             f'File too large ({file.size} bytes, max {MAX_BYTES})',
             ephemeral=True
         )
+
     await interaction.response.defer(thinking=True)
     raw = await file.read()
     source_b64 = base64.b64encode(raw).decode('ascii')
+
     try:
         async with httpx.AsyncClient(timeout=180) as c:
             r = await c.post(f'{API_URL}/debug-harness', json={'source_b64': source_b64})
@@ -326,6 +356,7 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
             data = r.json()
     except Exception as e:
         return await interaction.followup.send(f'Debug request failed: {str(e)[:1000]}')
+
     em = discord.Embed(
         title='Harness Debug Result',
         color=0x2ecc71 if data.get('lua_found') else 0xe74c3c
@@ -334,6 +365,7 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
     em.add_field(name='Lua Path', value=str(data.get('lua_path', 'none')), inline=True)
     em.add_field(name='Exit Code', value=str(data.get('exit_code', 'none')), inline=True)
     em.add_field(name='Timeout', value=str(data.get('timeout', 'unknown')), inline=True)
+
     stdout = data.get('stdout', '')
     stderr = data.get('stderr', '')
     if stdout:
@@ -342,7 +374,9 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
         em.add_field(name='stderr', value=f'```\n{stderr[:900]}\n```', inline=False)
     if not stdout and not stderr:
         em.add_field(name='Output', value='(empty)', inline=False)
+
     await interaction.followup.send(embed=em)
+
 
 @bot.event
 async def on_ready():
@@ -353,17 +387,19 @@ async def on_ready():
         log.error(f"Failed to sync commands: {e}")
     log.info(f'Ready: {bot.user} | API: {API_URL}')
 
-    async def keep_alive():
-        await bot.wait_until_ready()
-        while not bot.is_closed():
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.get(f'{API_URL}/alive')
-            except:
-                pass
-            await asyncio.sleep(60)
 
-    bot.loop.create_task(keep_alive())
+async def keep_alive():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.get(f'{API_URL}/alive')
+        except:
+            pass
+        await asyncio.sleep(60)
+
+
+bot.loop.create_task(keep_alive())
 
 if __name__ == '__main__':
     bot.run(TOKEN)
