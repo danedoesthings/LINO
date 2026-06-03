@@ -8,7 +8,7 @@ local settings={
 	hook_op=false,
 	hook_op_default_return="original",
 	log_lines=false,
-	better_functions=false
+	better_functions=false,
 }
 local unfinishedfuncs,is_unfinished={},false
 local thisfunction=debug.info(1,"f")
@@ -74,7 +74,7 @@ local _print=print
 local process = require('@25msrequireluvsu/process')
 local is_bot=not not process.args[2]
 if is_bot then
-	_print("--wow this script had an infinite loop that wasn't resolved, this output was generated at runtime and is very ba")
+	_print("--wow this script had an infinite loop that wasn't resolved, this output was generated at runtime and is very bad")
 end
 local print=function(...)
 	if is_bot and debug.info(2,"f")==simplex then
@@ -114,7 +114,7 @@ local function evaluate_single_use_variables(r)
 						local next=v:gmatch(varagstr..".")
 						r[i]=v:gsub(varagstr,".")
 					end
-					local firstname=varagstr:split("")[1]
+					local firstname=varagstr:split("",)[1]
 					if r[i]:find(firstname:sub(1,#firstname-1),1,true) then
 						varagcount+=1
 					end
@@ -187,17 +187,17 @@ local function evaluate_stuff(r)
 			local previous=r[i-1]:split("=")
 			local front=previous[1]
 			local back=table.concat(previous,"=",2)
-			if front:find(table_name,1,true) and table_name:find("%d") and not (front:find("function(",1,true) or front:find("{",1)) then
+			if front:find(table_name,1,true) and table_name:find("%d") and not (front:find("function(",1,true) or front:find("{",1,true)) then
 				local c=0
 				for ii=i,#r do
 					local _,cc = r[ii]:gsub(table_name:gsub("([%^$().[%]*+?-])","%%%1"), "")
 					c+=cc
 				end
-				if c>1 then
+				if c<=1 then
 					r[i-1]=nil
 				end
+				r[i]=r[i]:gsub(table_name,(back:gsub("%%","%%%%")))
 			end
-			r[i]=r[i]:gsub(table_name,(back:gsub("%%","%%%%")))
 		end
 	end
 	local oldr=table.clone(r)
@@ -235,8 +235,7 @@ local function hook_op(src)
 		settings.hook_op=false
 		return src
 	end
-	local funcnames=table.concat({"_25msLE","_25msGR","_25msLEEQ","_25msGREQ","_25msNEQ","_25msNOT","_25msLEN","_25msAND","_25msOR","_25msIF","_25msELSEIF","_25msWHILE","_25msREPEAT","_25msINDEX"},",")
-	return "local "..funcnames.."="..funcnames..";"..newsrc
+	return src
 end
 if not targetfilename then
 	print("lol you didnt put a filename or luarmor link")
@@ -260,7 +259,7 @@ end)() or fs.readFile(inpath..targetfilename)
 local chunk,err
 local variablecount,variable_backs,_25mspredefined,spytbl,predefined=0,{},{},{}
 local luraphcarry
-settings.ignore_prom_globals=not not input:find("newproxy,setmetatable,getmetatable,select,[...])end(...)",1,true)
+settings.ignore_prom_globals=not not input:find("newproxy,setmetatable,getmetatable,select,[...])end(...).1,true")
 if (input:find("=_ENV:[&a&d_]+=")) then
 	msecNotReady=true
 	if settings.spynilglobals then settings.spynilglobals=nil end
@@ -269,12 +268,13 @@ elseif input:find("(does your environment support load/loadstring?)",1,true) the
 	local typeof=typeof
 	local func=luau.load(input)
 	local env=getenv()
+	local env={}
 	local fenv_mt=setmetatable({},{__index=function(_,key)
-		if key=='zeenjunkie' then
+		if key=='zeenjunkie'then
 			isjunkie=true
 		elseif not predefinedfound and key=='_25mspredefine' and input:find('_25mspredefine',1,true) then
 			predefinedfound=true
-			simplelog('_','_25mspredefine','this function was referenced in the script, if you didnt do this place _25mspredefine(t) in your script')
+			simplelog('_','_25mspredefine','this function was referenced in the script, if you didnt do this place _25mspredefine(true) somewhere above your dump')
 			return function(t)
 				for i,v in t do
 					_25mspredefined[i]=v
@@ -282,9 +282,11 @@ elseif input:find("(does your environment support load/loadstring?)",1,true) the
 			end
 		end
 		return env[key] or getfenv()[key]
-	end})
+	end)
+	env.require=error
 	env.require=error
 	env.getfenv=function()return env end
+	env.getfenv=env.getfenv
 	local serde = require('@lune/serde')
 	env.Enum = {
 		CompressionAlgorithm = {
@@ -324,8 +326,15 @@ elseif input:find("(does your environment support load/loadstring?)",1,true) the
 	if not is_bot then _print(unpack(res)) end
 elseif input:find('={ \'LPS\'') then
 	specialhandle='LPS'
-elseif input:find('{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a}') then
+elseif input:find('{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},') then
 	specialhandle='moonveil'
+elseif input:find('https://wearedevs.net/obfuscator', 1, true) then
+	specialhandle = 'wearedevs_v1'
+	local decoded = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
+	chunk, err = luau.load(decoded)
+	if not err then
+		specialhandle = false
+	end
 end
 function tbl_to_s(tbl, indent, antioverflow)
 	if not next(tbl) then return "{}" end
@@ -343,7 +352,7 @@ local _pcall=pcall
 local runcode = settings.hook_op and hook_op(input) or input
 if not chunk then
 	if runcode:find("while true.+do end") and not (runcode:find("if") or runcode:find("function") or runcode:find("break")) then
-		runcode=runcode:gsub("while true.+do end","while true do task.wait(9) end")
+		return
 	end
 	chunk, err = luau.load(runcode, "sandbox")
 	if err then
@@ -354,7 +363,6 @@ end
 local env,debug_info=getfenv(chunk),debug_info
 local c=0
 local getglobalfuncname=function(func)
-	return nil
 end
 type=function(var)
 	local t=oldtype(var)
@@ -440,7 +448,7 @@ tostring_complex=function(var,ignorment,antioverflow)
 				metatables[var].mt[i]=nil
 			end
 		end
-		insert(currentR,'local '..varname..' = '..(metatables[var].mt and "setmetatable(" or "")..tostring_complex(var,true)..(metatables[var].mt and ","..tostring_complex(clonemt,false,antioverflow)..")" or ""))
+		insert(currentR,'local '..varname..' = '..(metatables[var].mt and "setmetatable(" or "")..tostring_complex(var,true)..(metatables[var].mt and ","..tostring_complex(clonemt)..")" or ""))
 		if clonemt then
 			for i,v in clonemt do
 				metatables[var].mt[i]=v
@@ -674,7 +682,7 @@ local spymt={
 		insert(currentR,'local '..varname..' ='..'-'..tostring_complex(self))
 		return spytbl(varname)
 	end,
-	__type='context_type'
+	__type='context_type',
 }
 analyzefunction = function(chunk,r,lowestlayer,...)
 	if plserror then return r end
@@ -684,7 +692,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 	cenv['25msWasHere']=true
 	spytbl=function(pre,var_type)
 		local tbl=setmetatable({
-			[__25mslocation]=pre
+			[__25mslocation]=pre,
 		},spymt)
 		if var_type then
 			types[tbl]=var_type
@@ -727,14 +735,15 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 				simplelog(varname,(tostring_complex(a)..' and '..tostring_complex(b)),Enum_NOCALL)
 				if settings.hook_op_default_return=='original' then
 					return a and b
+				else
+					return spytbl(varname)
 				end
-				return settings.hook_op_default_return=='spy' and spytbl(varname) or settings.hook_op_default_return
 			elseif a then
 				b=b()
 				if type(b)=="context_type" then
 					local varname=getnewvar()
 					simplelog(varname,(tostring_complex(a)..' and '..tostring_complex(b)),Enum_NOCALL)
-					return settings.hook_op_default_return=='spy' and spytbl(varname) or settings.hook_op_default_return=='original' and b or settings.hook_op_default_return
+					return settings.hook_op_default_return=='spy' and spytbl(varname) or settings.hook_op_default_return=='original' and b
 				end
 				return a and b
 			else
@@ -790,7 +799,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 					end
 					insert(currentR,'('..tostring_complex(tbl)..')['..tostring_complex(key)..'] = '..tostring_complex(value))
 					tbl[key]=value
-				end
+				end,
 			})
 		end
 		cenv.setmetatable=function(tbl,mt)
@@ -814,7 +823,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 			local og_index=game_meta.__index
 			game_meta.__index=function(_,key)
 				if type(key)=="string" then
-					if key:sub(1,1):lower()==key:sub(1,1) or key:sub(#key,#key):upper()==key:sub(#key,#key) then
+					if key:sub(1,1):lower()==key:sub(1,1) or key:sub(#key,#key):upper()==key:sub(#key,#key)then
 						print('dtc',key)
 						game_meta.__index=og_index
 						error'moonveil is bad'
@@ -824,10 +833,31 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 			end
 		end
 		cenv.game=setmetatable({
-			[__25mslocation]="game"
+			[__25mslocation]="game",
 		},game_meta)
 		cenv.Game=cenv.game
-		for _,name in pairs({"Instance","Drawing","UDim","CFrame","Color3","Vector3","UDim2","Vector2","workspace","ypcall","gethwid","setfpscap","rconsoleprint","rconsolewarn","package","makefolder","writefile","readfile","listfiles","mkdir","isfile","delay","clonefunction","hookmetamethod","setreadonly", "getrawmetatable", "fireproximityprompt","ColorSequence","ColorSequenceKeypoint","Font","Workspace","cloneref","TweenInfo","OverlapParams","setclipboard","toclipboard","hookmetatable","hookfunction","base64","Random","RaycastParams","Ray","restorefunction","script","hookfunction","print","request","http_request","httpRequest","HttpRequest","http","warn","getconnections","hash","NumberRange","NumberSequence","Rect","NumberSequenceKeypoint","getgc","getcustomasset","_VERSION","PhysicalProperties","queue_on_teleport","shared","gethui","fireproximityprompt","crypt","getnamecallmethod","getconstants","BrickColor","cleardrawcache","WebSocket","isrenderobj","setrenderproperty","getrenderproperty","setidentity","setthreadcontext","getidentity","getthreadcontext","getthreadidentity","setthreadidentity","getsenv","getscripts","getscripthash","getrunningscripts","queueonteleport","isrbxactive","isgameactive","cache","checkcaller","getupvalue","DeepCopy","DateTime","input","time","Vector3int16","Vector2int16"}) do
+		for _,name in {
+			"Instance","Drawing","UDim","CFrame","Color3","Vector3","UDim2","Vector2",
+			"workspace","ypcall","gethwid","setfpscap","rconsoleprint",
+			"rconsolewarn","package","makefolder","writefile","readfile","listfiles",
+			"mkdir","isfile","delay","clonefunction","hookmetamethod",
+			"setreadonly", "getrawmetatable", "fireproximityprompt",
+			"ColorSequence","ColorSequenceKeypoint","Font","Workspace","cloneref",
+			"TweenInfo","OverlapParams","setclipboard","toclipboard",
+			"hookmetatable","hookfunction","base64","Random","RaycastParams","Ray",
+			"restorefunction","script","hookfunction","print",
+			"request","http_request","httpRequest","HttpRequest","http",
+			"warn","getconnections","hash","NumberRange","NumberSequence",
+			"Rect","NumberSequenceKeypoint","getgc",
+			"getcustomasset","_VERSION","PhysicalProperties","queue_on_teleport",
+			"shared","gethui","fireproximityprompt","crypt","getnamecallmethod",
+			"getconstants","BrickColor","cleardrawcache","WebSocket","isrenderobj",
+			"setrenderproperty","getrenderproperty","setidentity","setthreadcontext",
+			"getidentity","getthreadcontext","getthreadidentity","setthreadidentity",
+			"getsenv","getscripts","getscripthash","getrunningscripts","queueonteleport",
+			"isrbxactive","isgameactive","cache","checkcaller","getupvalue","DeepCopy",
+			"DateTime","input","time","Vector3int16","Vector2int16",
+		} do
 			cenv[name]=spytbl(name)
 		end
 		cenv.tick=function()return os.clock()end
@@ -937,7 +967,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 						elseif i=='concat' and name=='table' then
 							for i,v in pairs(...) do
 								if type(v)=="context_type" then
-									(...)[i]=concat_me..tostring_complex(v)..concat_me_close
+									(...) [i]=concat_me..tostring_complex(v)..concat_me_close
 								end
 							end
 						elseif i=='create' and name=='table' then
@@ -951,7 +981,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 						local real_res=has_context and not table.find({"pack","move","unpack"},i) or {func(...)}
 						if i=="traceback" and name=="debug" and type(real_res[1])=="string" then
 							print(real_res[1])
-							real_res[1]=real_res[1]:gsub("%[string \"%.\\httplog2\"%]:%d+\n",""):gsub("%[string \"sandbox\"%]:(%d+)\n","[string \"sandbox\"]:%d+: ")
+							real_res[1]=real_res[1]:gsub("%[string \"%.\\httplog2\"%]:%d+\n",""):gsub("%[string \"sandbox\"%]:(%d+)\n","[string \"sandbox\"]:%1\n")
 						end
 						if (has_context and not table.find({"pack","move","unpack"},i) or real_res[1]=="[string \"./httplog2\"]") then
 							local vars,varstr=genvars(3)
@@ -1088,7 +1118,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 		local tsenv={}
 		cenv.getgenv=function()
 			return setmetatable({
-				[__25mslocation]="genv"
+				[__25mslocation]="genv",
 			},{
 				__index=function(_,key)
 					local varname=getnewvar()
@@ -1108,7 +1138,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 		end
 		cenv.getenv=function()
 			return setmetatable({
-				[__25mslocation]="renv"
+				[__25mslocation]="renv",
 			},{
 				__index=cenv,
 				__newindex=function(_,k,v)
@@ -1141,11 +1171,11 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 			__type='context_type'
 		})
 		cenv.task=setmetatable({
-			wait=function(...)simplelog("_","task.wait",...);return ((...)or 0)+math.random()/10 end,
+			wait=function(...)simplelog("_","task.wait",...);return ((...or 0)+math.random()/10) end,
 			[__25mslocation]='task'
 		},{
 			__index=spytbl('task'),
-			__type='context_type'
+			__type='context_type',
 		})
 		cenv.spawn=function(f,...)f(...)end
 		cenv.getenv=function(lvl)
@@ -1308,7 +1338,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 				end
 				if not predefinedfound and key=='_25mspredefine' and input:find('_25mspredefine',1,true) then
 					predefinedfound=true
-					simplelog('_','_25mspredefine','this function was referenced in the script, if you didn\'t do this place _25mspredefine(t) in your script')
+					simplelog('_','_25mspredefine','this function was referenced in the script, if you didn\'t do this place _25mspredefine(true) somewhere above your dump')
 					return function(t)
 						for i,v in t do
 							_25mspredefined[i]=v
@@ -1388,7 +1418,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 				end
 				tsenv[k]=v
 			end,
-			__metatable=false
+			__metatable=false,
 		})
 		setfenv(chunk,fenv_mt)
 	end
@@ -1406,7 +1436,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 		local function get(num)
 			if not num or num==0 then return end
 			if num>100 then
-				return nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,get(num-30)
+				return nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil
 			elseif num>10 then
 				return nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,get(num-10)
 			end
@@ -1419,7 +1449,8 @@ analyzefunction = function(chunk,r,lowestlayer,...)
 	currentR=oldR
 	return r
 end
-local r={}
+local r={
+}
 local start=clock()
 local s,re=pcall(analyzefunction,chunk,r,true)
 if not s then print("heh",s,re) end
