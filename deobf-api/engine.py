@@ -67,62 +67,112 @@ class Unveiler:
         except Exception:
             return False
 
-    def _detect_getter(self, source: str):
+    def _score_lua_quality(self, code: str) -> int:
+        score = 0
+        if not code or len(code) < 10:
+            return 0
+        if self._is_valid_lua(code):
+            score += 50
+        score += len(re.findall(r'\bfunction\b', code)) * 10
+        score += len(re.findall(r'\blocal\s+\w+\s*=', code)) * 5
+        score += len(re.findall(r'\breturn\b', code)) * 8
+        score += len(re.findall(r'\bif\b.*\bthen\b', code)) * 8
+        score += len(re.findall(r'\bwhile\b.*\bdo\b', code)) * 8
+        score += len(re.findall(r'\bfor\b.*\bdo\b', code)) * 8
+        score += len(re.findall(r'\bend\b', code)) * 5
+        vm_dispatch_count = len(re.findall(r'while\s+\w+\s+do\s+if\s+\w+\s*[<>=]+\s*-?\d+\s+then', code))
+        score -= vm_dispatch_count * 20
+        score -= len(re.findall(r'vmState\s*=\s*-?\d+', code)) * 20
+        score -= len(re.findall(r'GetStr\s*\(', code)) * 30
+        score -= len(re.findall(r'EncStr\s*\[', code)) * 15
+        return score
+
+    def _is_quality_output(self, code: str) -> bool:
+        return self._score_lua_quality(code) >= 20
+
+    def _detect_all_getters(self, source: str) -> list:
         single = source.replace('\n', ' ').replace('\r', ' ')
         patterns = [
-            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(([^)]+)\)\s*\]',
-            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*([\d\-\+]+)\s*\]',
+            r'local\s+function\s+(\w+)\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(([^)]+)\)\s*\]',
+            r'local\s+function\s+(\w+)\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*\+\s*([\d\-\+]+)\s*\]',
+            r'local\s+(\w+)\s*=\s*function\s*\((\w+)\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(?([^)]+)\)?\s*\]',
         ]
+        getters = []
         for pat in patterns:
-            m = re.search(pat, single)
-            if m:
-                return m.group(1), safe_eval(m.group(2))
-        return None, 0
+            for m in re.finditer(pat, single):
+                name = m.group(1)
+                offset = safe_eval(m.group(3))
+                if name and offset is not None:
+                    getters.append((name, offset))
+        return getters
 
-    def _resolve_getter_calls(self, source: str, strings: list) -> str:
-        getter_name, getter_offset = self._detect_getter(source)
-        if not getter_name:
-            return source
-
+    def _resolve_all_getters(self, source: str, strings: list) -> str:
+        getters = self._detect_all_getters(source)
         result = source
-        pos = 0
-        pattern = re.compile(rf'{getter_name}\s*\(')
-        
-        while pos < len(result):
-            m = pattern.search(result, pos)
-            if not m:
-                break
-            start = m.start()
-            paren_start = m.end()
-            depth = 0
-            i = paren_start
-            while i < len(result):
-                c = result[i]
-                if c == '(':
-                    depth += 1
-                elif c == ')':
-                    if depth == 0:
-                        break
-                    depth -= 1
-                i += 1
-            if i >= len(result):
-                break
-            expr = result[paren_start:i]
+        for getter_name, getter_offset in getters:
+            pattern = re.compile(rf'{getter_name}\s*\(')
+            pos = 0
+            while pos < len(result):
+                m = pattern.search(result, pos)
+                if not m:
+                    break
+                start = m.start()
+                paren_start = m.end()
+                depth = 1
+                i = paren_start
+                while i < len(result):
+                    c = result[i]
+                    if c == '(':
+                        depth += 1
+                    elif c == ')':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                if i >= len(result):
+                    break
+                expr = result[paren_start:i]
+                try:
+                    n = safe_eval(expr)
+                    idx = n + getter_offset
+                    if 1 <= idx <= len(strings):
+                        s = strings[idx - 1]
+                        if s:
+                            escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                            result = result[:start] + f'"{escaped}"' + result[i+1:]
+                            pos = start + len(escaped) + 2
+                            continue
+                except:
+                    pass
+                pos = i + 1
+        return result
+
+    def _replace_string_table_refs(self, source: str, strings: list) -> str:
+        def repl(m):
             try:
-                n = safe_eval(expr)
-                idx = n + getter_offset
+                idx = int(m.group(1))
                 if 1 <= idx <= len(strings):
                     s = strings[idx - 1]
                     if s:
-                        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                        result = result[:start] + f'"{escaped}"' + result[i+1:]
-                        pos = start + len(escaped) + 2
-                        continue
+                        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
             except:
                 pass
-            pos = i + 1
-
+            return m.group(0)
+        result = re.sub(r'R\s*\[\s*(\d+)\s*\]', repl, source)
+        result = re.sub(r'R\s*\[\s*\(\s*(\d+)\s*\)\s*\]', repl, result)
         return result
+
+    def _calculate_vm_score(self, source: str) -> int:
+        score = 0
+        indicators = [
+            (r'while\s+\w+\s+do\s+if\s+\w+\s*[<>=]+\s*-?\d+\s+then', 20),
+            (r'if\s+\w+\s*[<>=]+\s*-?\d+\s+then', 5),
+            (r'local\s+function\s+\w+\s*\([^)]*\)\s*return\s+R\s*\[.*\+\s*\d+\]', 15),
+            (r'\w+\s*=\s*\{\s*\[?\d+\]?\s*=\s*function', 10),
+        ]
+        for pattern, weight in indicators:
+            score += len(re.findall(pattern, source)) * weight
+        return score
 
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
@@ -132,17 +182,15 @@ class Unveiler:
             return '', 'unable', 'String decode failed'
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
-        reconstructed = self._resolve_getter_calls(source, decoder.strings)
+        reconstructed = self._resolve_all_getters(source, decoder.strings)
+        reconstructed = self._replace_string_table_refs(reconstructed, decoder.strings)
         
-        for i, s in enumerate(decoder.strings):
-            if s:
-                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                reconstructed = reconstructed.replace(f'R[{i + 1}]', f'"{escaped}"')
-                reconstructed = reconstructed.replace(f'R[ {i + 1} ]', f'"{escaped}"')
+        vm_score = self._calculate_vm_score(reconstructed)
+        self._log('vm_detect', True, f'VM score: {vm_score}')
 
         self._log('harness', True, 'attempting static symbolic evaluation')
         harness_result = self.harness.run(reconstructed, timeout=30, decoded_strings=decoder.strings)
-        if harness_result and len(harness_result) > 200:
+        if harness_result and self._is_quality_output(harness_result):
             self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
             return harness_result, 'lua_harness', 'Symbolic evaluation complete'
 
@@ -167,7 +215,7 @@ class Unveiler:
 
         self._log('devirtualise', True, 'attempting AST-based VM devirtualization')
         try:
-            vm_devirt = VMDevirtualizer(source, decoder, wrapper_name="GetStr")
+            vm_devirt = VMDevirtualizer(source, decoder)
             lifted = vm_devirt.devirtualize()
             if lifted and self._is_valid_lua(lifted):
                 self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
