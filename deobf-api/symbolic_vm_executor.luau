@@ -79,85 +79,201 @@ local function resolve_getter_calls(code)
     end)
 end
 
-local output_lines = {}
-table.insert(output_lines, "-- Deobfuscated Output")
-table.insert(output_lines, "-- " .. #decoded_strings .. " strings decoded")
-table.insert(output_lines, "")
-
-local resolved = resolve_getter_calls(input)
-
-for i, s in ipairs(decoded_strings) do
-    local escaped = s:gsub('\\', '\\\\'):gsub('"', '\\"')
-    resolved = resolved:gsub('R%[' .. i .. '%]', '"' .. escaped .. '"')
-    resolved = resolved:gsub('R%[ ' .. i .. ' %]', '"' .. escaped .. '"')
-end
-
-local function try_evaluate_expression(expr_str)
-    local n = safe_eval(expr_str)
-    if n then return tostring(n) end
-    local s = resolve_string(expr_str)
-    if s then return '"' .. s .. '"' end
-    return expr_str
-end
-
-local payload_start = resolved:find('return%(function%(')
-if payload_start then
-    local pre_payload = resolved:sub(1, payload_start - 1)
-    local payload_and_rest = resolved:sub(payload_start)
+local function classify_handler(code)
+    if not code then return nil end
     
-    local string_match = pre_payload:match('local%s+function%s+%w+%s*%([^)]*%)%s*return%s+R%s*%[%w+%+[^%]]+%]%s*end')
-    if string_match then
-        pre_payload = pre_payload:gsub('local%s+function%s+%w+%s*%([^)]*%)%s*return%s+R%s*%[%w+%+[^%]]+%]%s*end', '')
+    local strings_found = {}
+    for s in code:gmatch('"([^"]+)"') do
+        table.insert(strings_found, s)
     end
     
-    local shuffle_match = pre_payload:match('for%s+%w+[,]%w+%s+in%s+ipairs.-end%s*end%s*end')
-    if shuffle_match then
-        pre_payload = pre_payload:gsub('for%s+%w+[,]%w+%s+in%s+ipairs.-end%s*end%s*end', '-- [shuffle removed]')
-    end
-    
-    local decoder_match = pre_payload:match('do%s+local%s+%w+=table%.concat.-end%s*end%s*end')
-    if decoder_match then
-        pre_payload = pre_payload:gsub('do%s+local%s+%w+=table%.concat.-end%s*end%s*end', '-- [decoder removed]')
-    end
-    
-    table.insert(output_lines, "-- Bootstrap code:")
-    table.insert(output_lines, pre_payload:gsub('%s+', ' '):sub(1, 500) .. "...")
-    table.insert(output_lines, "")
-    
-    table.insert(output_lines, "-- VM Dispatcher (with resolved strings):")
-    
-    local dispatcher = payload_and_rest:match('while%s+%w+%s+do(.-)end%s*end%s*%w+%s*=%s*#')
-    if dispatcher then
-        local clean_dispatcher = dispatcher:gsub('(%w+)%[([^%]]+)%]%s*=%s*(%w+)%[([^%]]+)%]', function(t1, k1, t2, k2)
-            return t1 .. "[" .. k1 .. "] = " .. t2 .. "[" .. k2 .. "]  -- MOVE"
-        end)
-        clean_dispatcher = clean_dispatcher:gsub('(%w+)%[([^%]]+)%]%s*=%s*"([^"]+)"', function(t, k, v)
-            return t .. "[" .. k .. "] = \"" .. v .. "\"  -- LOADK"
-        end)
-        clean_dispatcher = clean_dispatcher:gsub('(%w+)%[([^%]]+)%]%s*=%s*(%w+)%s*%(', function(t, k, f)
-            return t .. "[" .. k .. "] = " .. f .. "(...)  -- CLOSURE"
-        end)
-        
-        for line in clean_dispatcher:gmatch("[^\n]+") do
-            if line:find('"print"') or line:find('"pcall"') or line:find('"tostring"') 
-                or line:find('"tonumber"') or line:find('"error"') or line:find('"table"')
-                or line:find('"math"') or line:find('"floor"') or line:find('"char"')
-                or line:find('"concat"') or line:find('"gsub"') or line:find('"byte"')
-                or line:find('"len"') or line:find('"unpack"') or line:find('"gmatch"') then
-                table.insert(output_lines, line)
+    if code:find('I%[.-%]%s*=%s*"[^"]*"') then
+        for reg, val in code:gmatch('I%[([^%]]+)%]%s*=%s*"([^"]*)"') do
+            if val and #val > 0 then
+                return 'LOADK  ' .. reg .. ' = "' .. val .. '"'
             end
         end
     end
     
-    table.insert(output_lines, "")
-    table.insert(output_lines, "-- String Table:")
-    table.insert(output_lines, "local R = {")
-    for i, s in ipairs(decoded_strings) do
-        table.insert(output_lines, '  [' .. i .. '] = "' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '",')
+    if code:find('I%[.-%]%s*=%s*.-%[.-%]') then
+        for reg1, reg2 in code:gmatch('I%[([^%]]+)%]%s*=%s*I%[([^%]]+)%]') do
+            return 'MOVE   ' .. reg1 .. ' = ' .. reg2
+        end
     end
-    table.insert(output_lines, "}")
+    
+    if code:find('=%s*.-%s*%(') then
+        for func, args in code:gmatch('=%s*(%w+)%s*%(([^)]*)%)') do
+            return 'CLOSURE ' .. func .. '(' .. args .. ')'
+        end
+    end
+    
+    if strings_found and #strings_found > 0 then
+        return 'STRINGS ' .. table.concat(strings_found, ', ')
+    end
+    
+    return 'CALC   ' .. (code:sub(1, 80))
+end
+
+local function find_vm_loop(text)
+    local vm_var = nil
+    local loop_body = nil
+    
+    for var in text:gmatch('while%s+(%w+)%s+do') do
+        vm_var = var
+        break
+    end
+    
+    if not vm_var then
+        return nil, nil
+    end
+    
+    local while_pos = text:find('while%s+' .. vm_var .. '%s+do')
+    if while_pos then
+        local depth = 1
+        local pos = while_pos + #('while ' .. vm_var .. ' do')
+        local end_pos = pos
+        while pos <= #text and depth > 0 do
+            local c = text:sub(pos, pos)
+            if c == 'e' and text:sub(pos, pos+2) == 'end' then
+                local before = text:sub(pos-1, pos-1)
+                local after = text:sub(pos+3, pos+3)
+                if (before == ' ' or before == '\n' or before == ';') and
+                   (after == ' ' or after == '\n' or after == ';' or after == '' or pos+3 > #text) then
+                    depth = depth - 1
+                    if depth == 0 then
+                        end_pos = pos + 2
+                        break
+                    end
+                end
+            elseif text:sub(pos, pos+4) == 'while' then
+                depth = depth + 1
+            elseif text:sub(pos, pos+1) == 'if' then
+                depth = depth + 1
+            elseif text:sub(pos, pos+1) == 'do' then
+                depth = depth + 1
+            end
+            pos = pos + 1
+        end
+        loop_body = text:sub(while_pos, end_pos)
+    end
+    
+    return vm_var, loop_body
+end
+
+local vm_var, loop_body = find_vm_loop(input)
+
+local output_lines = {}
+table.insert(output_lines, "-- Deobfuscated Output (Symbolic VM Execution)")
+table.insert(output_lines, "-- " .. #decoded_strings .. " strings decoded")
+if getter_name then
+    table.insert(output_lines, "-- Getter: " .. getter_name .. "(N + " .. tostring(getter_offset) .. ")")
+end
+table.insert(output_lines, "")
+
+if vm_var and loop_body then
+    table.insert(output_lines, "-- VM State Machine Traced Execution")
+    table.insert(output_lines, "-- Variable: " .. vm_var)
+    table.insert(output_lines, "")
+    
+    local resolved_loop = resolve_getter_calls(loop_body)
+    
+    local states = {}
+    local state_order = {}
+    
+    for state_num, body, next_state in resolved_loop:gmatch('if%s+' .. vm_var .. '%s*<%s*(-?%d+)%s+then%s*(.-)%s*' .. vm_var .. '%s*=%s*(-?%d+)') do
+        local num = tonumber(state_num)
+        local next = tonumber(next_state)
+        if num and next then
+            local handler = classify_handler(body)
+            states[num] = {
+                body = body:gsub('%s+', ' '):sub(1, 120),
+                handler = handler or '(unknown)',
+                next_state = next,
+            }
+            table.insert(state_order, num)
+        end
+    end
+    
+    table.sort(state_order)
+    
+    local entry = nil
+    for _, s in ipairs(state_order) do
+        if s > 0 and not entry then
+            entry = s
+            break
+        end
+    end
+    
+    if entry then
+        local current = entry
+        local visited = {}
+        local depth = 0
+        local max_depth = 100
+        
+        table.insert(output_lines, "-- Execution trace (entry: " .. tostring(entry) .. "):")
+        table.insert(output_lines, "")
+        
+        while current and not visited[current] and depth < max_depth do
+            visited[current] = true
+            depth = depth + 1
+            local info = states[current]
+            if info then
+                table.insert(output_lines, "[" .. current .. "] " .. info.handler)
+                table.insert(output_lines, "    -> state " .. tostring(info.next_state))
+                table.insert(output_lines, "")
+                current = info.next_state
+            else
+                table.insert(output_lines, "[" .. current .. "] (unknown state)")
+                break
+            end
+        end
+        
+        table.insert(output_lines, "-- Total states traced: " .. depth)
+    end
+    
+    table.insert(output_lines, "")
+    table.insert(output_lines, "-- Notable states (containing known strings):")
+    table.insert(output_lines, "")
+    
+    local notable = {}
+    for _, num in ipairs(state_order) do
+        local info = states[num]
+        if info then
+            local body = info.body
+            for s in body:gmatch('"([^"]+)"') do
+                if s == 'print' or s == 'pcall' or s == 'tostring' or s == 'tonumber'
+                    or s == 'error' or s == 'table' or s == 'concat' or s == 'math'
+                    or s == 'floor' or s == 'char' or s == 'gsub' or s == 'byte'
+                    or s == 'Tamper Detected!' then
+                    if not notable[num] then
+                        notable[num] = {}
+                    end
+                    table.insert(notable[num], s)
+                end
+            end
+        end
+    end
+    
+    for num, strings in pairs(notable) do
+        table.insert(output_lines, "  State " .. tostring(num) .. ": " .. table.concat(strings, ", "))
+    end
 else
+    table.insert(output_lines, "-- VM dispatcher not found in standard format")
+    table.insert(output_lines, "-- Falling back to string-resolved output")
+    table.insert(output_lines, "")
+    
+    local resolved = resolve_getter_calls(input)
+    for i, s in ipairs(decoded_strings) do
+        local escaped = s:gsub('\\', '\\\\'):gsub('"', '\\"')
+        resolved = resolved:gsub('R%[' .. i .. '%]', '"' .. escaped .. '"')
+    end
     table.insert(output_lines, resolved)
+end
+
+table.insert(output_lines, "")
+table.insert(output_lines, "-- Decoded String Table:")
+for i, s in ipairs(decoded_strings) do
+    table.insert(output_lines, "  [" .. i .. '] = "' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"')
 end
 
 local output = table.concat(output_lines, "\n")
