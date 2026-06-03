@@ -1,7 +1,6 @@
 import discord
 import io
 import os
-import base64
 import asyncio
 import subprocess
 import tempfile
@@ -18,14 +17,14 @@ if not TOKEN:
 intents = discord.Intents.default()
 intents.message_content = True
 
-def decode_wearedevs(code):
-    """Decode WeAreDevs v1 decimal escape sequences"""
-    if b'wearedevs.net/obfuscator' not in code[:500]:
+def decode_wearedevs(code: bytes) -> bytes:
+    """Decode WeAreDevs v1 decimal escape sequences before deobfuscation."""
+    if b'wearedevs.net/obfuscator' not in code:
         return code
     log.info("Detected WeAreDevs v1 - decoding decimal escapes")
-    def replace_decimal(match):
-        return bytes([int(match.group(1))])
-    return re.sub(rb'\\(\d{3})', replace_decimal, code)
+    # Correct regex: match backslash followed by exactly 3 digits
+    return re.sub(rb'\\(\d{3})', lambda m: bytes([int(m.group(1))]), code)
+
 
 class DeobfBot(discord.Client):
     def __init__(self):
@@ -64,13 +63,13 @@ class DeobfBot(discord.Client):
                 return
             raw = code.encode('utf-8')
 
-        # Pre-process: decode WeAreDevs v1 decimal escapes before anything else
+        # ---- Pre-process: decode WeAreDevs v1 decimal escapes ----
         raw = decode_wearedevs(raw)
 
         log.info(f"Deobf request from {message.author} ({filename}, {len(raw)} bytes)")
         msg = await message.reply('Deobfuscating...')
 
-        result = await asyncio.to_thread(self.run_deobf, raw)
+        result = await asyncio.to_thread(self.run_deobf, raw, filename)
 
         try:
             await msg.delete()
@@ -78,7 +77,12 @@ class DeobfBot(discord.Client):
             pass
 
         if result:
-            await message.reply(file=discord.File(io.BytesIO(result.encode()), filename=f'deobfuscated_{filename}'))
+            await message.reply(
+                file=discord.File(
+                    io.BytesIO(result.encode()),
+                    filename=f'deobfuscated_{filename}'
+                )
+            )
         else:
             await message.reply('Deobfuscation failed.')
 
@@ -89,19 +93,20 @@ class DeobfBot(discord.Client):
         stripped = content.strip()
         return stripped if stripped else None
 
-    def run_deobf(self, source_bytes):
-        with tempfile.NamedTemporaryFile(suffix='.lua', delete=False) as f:
+    def run_deobf(self, source_bytes, original_filename='input.lua'):
+        # Write input file as plain filename in current working directory
+        input_name = f'input_{original_filename}'
+        with open(input_name, 'wb') as f:
             f.write(source_bytes)
-            input_path = f.name
 
-        with tempfile.NamedTemporaryFile(suffix='.lua', delete=False) as f:
-            output_path = f.name
+        output_name = f'output_{original_filename}'
 
         try:
             env = os.environ.copy()
             env['LUNE_PATH'] = '/usr/local/bin/lune'
+
             result = subprocess.run(
-                ['lune', 'run', 'httplog2.lua', input_path, '0', output_path],
+                ['lune', 'run', 'httplog2.lua', input_name, '0', output_name],
                 capture_output=True,
                 text=True,
                 timeout=180,
@@ -112,11 +117,16 @@ class DeobfBot(discord.Client):
                 log.error(f"Lune error: {result.stderr[:500]}")
                 return None
 
-            if os.path.exists(output_path):
-                with open(output_path, 'r', encoding='utf-8', errors='replace') as out:
+            # httplog2.lua now writes to output_name in CWD (we use commercial mode)
+            if os.path.exists(output_name):
+                with open(output_name, 'r', encoding='utf-8', errors='replace') as out:
                     data = out.read().strip()
                     if data and not data.startswith('-- [ERROR]'):
                         return data
+            # Fallback: check stdout for printed result (httplog2 prints it)
+            if result.stdout.strip():
+                return result.stdout.strip()
+
             return None
 
         except subprocess.TimeoutExpired:
@@ -126,10 +136,15 @@ class DeobfBot(discord.Client):
             log.error(f"Deobf error: {e}")
             return None
         finally:
-            try: os.unlink(input_path)
-            except: pass
-            try: os.unlink(output_path)
-            except: pass
+            try:
+                os.remove(input_name)
+            except:
+                pass
+            try:
+                os.remove(output_name)
+            except:
+                pass
+
 
 bot = DeobfBot()
 bot.run(TOKEN)
