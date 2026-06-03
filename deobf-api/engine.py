@@ -86,8 +86,23 @@ class Unveiler:
 
         def repl(m):
             try:
-                expr = m.group(1).strip()
-                n = safe_eval(expr)
+                inner = m.group(1)
+                depth = 0
+                end = 0
+                for i, c in enumerate(inner):
+                    if c == '(':
+                        depth += 1
+                    elif c == ')':
+                        depth -= 1
+                        if depth < 0:
+                            end = i
+                            break
+                    elif depth == 0 and c == ',':
+                        end = i
+                        break
+                if end > 0:
+                    inner = inner[:end]
+                n = safe_eval(inner)
                 idx = n + getter_offset
                 if 1 <= idx <= len(strings):
                     s = strings[idx - 1]
@@ -98,7 +113,44 @@ class Unveiler:
                 pass
             return m.group(0)
 
-        return re.sub(rf'{getter_name}\s*\(\s*([^)]+?)\s*\)', repl, source)
+        result = source
+        pos = 0
+        while pos < len(result):
+            m = re.search(rf'{getter_name}\s*\(\s*', result[pos:])
+            if not m:
+                break
+            start = pos + m.start()
+            paren_start = pos + m.end()
+            depth = 0
+            i = paren_start
+            while i < len(result):
+                c = result[i]
+                if c == '(':
+                    depth += 1
+                elif c == ')':
+                    if depth == 0:
+                        break
+                    depth -= 1
+                i += 1
+            if i >= len(result):
+                break
+            full_match = result[start:i+1]
+            expr = result[paren_start:i]
+            try:
+                n = safe_eval(expr)
+                idx = n + getter_offset
+                if 1 <= idx <= len(strings):
+                    s = strings[idx - 1]
+                    if s:
+                        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                        result = result[:start] + f'"{escaped}"' + result[i+1:]
+                        pos = start + len(escaped) + 2
+                        continue
+            except:
+                pass
+            pos = i + 1
+
+        return result
 
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
@@ -109,6 +161,7 @@ class Unveiler:
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
         reconstructed = self._resolve_getter_calls(source, decoder.strings)
+
         for i, s in enumerate(decoder.strings):
             if s:
                 escaped = s.replace('\\', '\\\\').replace('"', '\\"')
