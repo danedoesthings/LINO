@@ -25,7 +25,28 @@ if not TOKEN:
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='=', intents=intents, help_command=None)
+
+class DeobfBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='=', intents=intents, help_command=None)
+        self.tree = self.tree
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        log.info('Synced commands globally')
+        self.loop.create_task(self.keep_alive())
+
+    async def keep_alive(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.get(f'{API_URL}/alive')
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+
+bot = DeobfBot()
 tree = bot.tree
 
 ALLOWED_EXTENSIONS = ('.lua', '.txt', '.luau')
@@ -380,26 +401,7 @@ async def slash_debug(interaction: discord.Interaction, file: discord.Attachment
 
 @bot.event
 async def on_ready():
-    try:
-        await tree.sync()
-        log.info('Synced commands globally')
-    except Exception as e:
-        log.error(f"Failed to sync commands: {e}")
     log.info(f'Ready: {bot.user} | API: {API_URL}')
-
-
-async def keep_alive():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.get(f'{API_URL}/alive')
-        except:
-            pass
-        await asyncio.sleep(60)
-
-
-bot.loop.create_task(keep_alive())
 
 if __name__ == '__main__':
     bot.run(TOKEN)
