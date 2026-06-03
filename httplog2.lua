@@ -211,9 +211,10 @@ end
 local original_globals=getenv()
 local clock=os.clock
 local startt=clock()
-local commercial=false
-local inpath=commercial and "" or "dumps\\original\\"
-local outpath=commercial and "" or "dumps\\dumped\\"
+-- Set commercial=true to use relative paths and not mess with input path
+local commercial=true
+local inpath=commercial and "" or "dumps/original/"
+local outpath=commercial and "" or "dumps/dumped/"
 local fs = require("@25msrequireluvsu/fs")
 local luau = require("@25msrequireluvsu/luau")
 local JsonDecode=require("@25msrequireluvsu/net").jsonDecode
@@ -330,6 +331,7 @@ elseif input:find('{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},') then
 	specialhandle='moonveil'
 elseif input:find('https://wearedevs.net/obfuscator', 1, true) then
 	specialhandle = 'wearedevs_v1'
+	-- Decode decimal escapes and unwrap
 	local decoded = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
 	local outer_func, loaderr = luau.load(decoded)
 	if outer_func then
@@ -1516,7 +1518,13 @@ else
 		end
 	end
 end
-fs.writeFile(outpath..targetfilename:gsub(".lua","")..post,table.concat(r,"\n"))
-local endt=clock()-startt
-print("success in",endt,"seconds!\nWritten to "..outpath..targetfilename:gsub(".lua","")..post)
+-- Write to output file if args[3] provided (bot passes it), otherwise to outpath
+local output_file = process.args[3]
+if output_file and output_file ~= "" then
+	fs.writeFile(output_file, table.concat(r,"\n"))
+	print("success in",clock()-startt,"seconds!\nWritten to",output_file)
+else
+	fs.writeFile(outpath..targetfilename:gsub(".lua","")..post, table.concat(r,"\n"))
+	print("success in",clock()-startt,"seconds!\nWritten to "..outpath..targetfilename:gsub(".lua","")..post)
+end
 print(table.concat(r,"\n"))
