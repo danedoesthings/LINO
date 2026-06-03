@@ -70,9 +70,9 @@ class InstructionTableDumper:
                 except:
                     pass
                 return m.group(0)
-            source = re.sub(rf'{getter_name}\s*\(\s*([^)]+?)\s*\)', repl, source)
+            source = re.sub(rf'{getter_name}\s*\(\s*([^)]+)\s*\)', repl, source)
 
-        if 'R[' in source or 'GetStr(' in source or 'E(' in source or 'l1(' in source or 'l2(' in source:
+        if 'E(' in source or 'l1(' in source or 'l2(' in source:
             return None
         if 'function' in source or 'local' in source or 'print' in source:
             return source
@@ -80,15 +80,38 @@ class InstructionTableDumper:
 
     def _eval_arithmetic(self, expr: str) -> Optional[int]:
         try:
-            expr = expr.replace(' ', '')
-            return int(eval(expr))
-        except:
-            pass
-        try:
-            from math_fold import safe_eval_int
-            return safe_eval_int(expr)
+            cleaned = expr.replace(' ', '').replace('\t', '').replace('\n', '')
+            return self._simple_eval(cleaned)
         except:
             return None
+
+    def _simple_eval(self, expr: str) -> int:
+        expr = expr.strip()
+        
+        while '(' in expr:
+            expr = re.sub(r'\(([^()]+)\)', lambda m: str(self._eval_simple_expr(m.group(1))), expr)
+        
+        return self._eval_simple_expr(expr)
+
+    def _eval_simple_expr(self, expr: str) -> int:
+        expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
+        
+        tokens = re.findall(r'[+\-]?\d+', expr)
+        if tokens:
+            return sum(int(t) for t in tokens)
+        
+        tokens = re.split(r'([+\-])', expr)
+        result = 0
+        sign = 1
+        for token in tokens:
+            token = token.strip()
+            if token == '+':
+                sign = 1
+            elif token == '-':
+                sign = -1
+            elif token:
+                result += sign * int(token)
+        return result
 
     def _strip_bootstrap(self, code: str) -> str:
         markers = [
