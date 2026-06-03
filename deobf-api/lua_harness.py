@@ -1,5 +1,4 @@
 import os
-import json
 import shutil
 import tempfile
 import subprocess
@@ -27,7 +26,7 @@ class LuaHarness:
         input_path = os.path.join(tmpdir, "input.lua")
         strings_path = os.path.join(tmpdir, "strings.lua")
         output_path = os.path.join(tmpdir, "deobfuscated.lua")
-        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbolic_eval.luau")
+        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbolic_vm_executor.luau")
 
         if not os.path.isfile(harness_path):
             shutil.rmtree(tmpdir, ignore_errors=True)
