@@ -24,9 +24,13 @@ class LuaHarness:
 
     def run(self, source: str, timeout: int = 30) -> Optional[str]:
         if self.lune_available:
-            return self._run_lune(source, timeout)
+            result = self._run_lune(source, timeout)
+            if result:
+                return result
         if self.lupa_available:
-            return self._run_lupa(source, timeout)
+            result = self._run_lupa(source, timeout)
+            if result:
+                return result
         return None
 
     def _run_lune(self, source: str, timeout: int = 30) -> Optional[str]:
@@ -34,6 +38,10 @@ class LuaHarness:
         input_path = os.path.join(tmpdir, "input.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
         harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "httplog_harness.luau")
+
+        if not os.path.isfile(harness_path):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return None
 
         try:
             with open(input_path, "w", encoding="utf-8") as f:
@@ -58,7 +66,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     captured = f.read().strip()
-                if captured and len(captured) > 10:
+                if captured and len(captured) > 10 and not captured.startswith("-- [ERROR]"):
                     return captured
             return None
         except Exception:
