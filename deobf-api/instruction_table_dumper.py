@@ -57,22 +57,38 @@ class InstructionTableDumper:
         if getter_name:
             def repl(m):
                 try:
-                    n = int(m.group(1))
+                    expr = m.group(1).strip()
+                    n = self._eval_arithmetic(expr)
+                    if n is None:
+                        return m.group(0)
                     idx = n + offset_const
                     if 1 <= idx <= len(self.strings):
                         s = self.strings[idx - 1]
                         if s:
-                            return f'"{s}"'
+                            escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                            return f'"{escaped}"'
                 except:
                     pass
                 return m.group(0)
-            source = re.sub(rf'{getter_name}\s*\(\s*(-?\d+)\s*\)', repl, source)
+            source = re.sub(rf'{getter_name}\s*\(\s*([^)]+?)\s*\)', repl, source)
 
-        if 'R[' in source or 'GetStr(' in source or 'E(' in source:
+        if 'R[' in source or 'GetStr(' in source or 'E(' in source or 'l1(' in source or 'l2(' in source:
             return None
         if 'function' in source or 'local' in source or 'print' in source:
             return source
         return None
+
+    def _eval_arithmetic(self, expr: str) -> Optional[int]:
+        try:
+            expr = expr.replace(' ', '')
+            return int(eval(expr))
+        except:
+            pass
+        try:
+            from math_fold import safe_eval_int
+            return safe_eval_int(expr)
+        except:
+            return None
 
     def _strip_bootstrap(self, code: str) -> str:
         markers = [
@@ -101,13 +117,16 @@ class InstructionTableDumper:
 
     def _find_string_context(self) -> List[str]:
         lines = []
-        for pattern in ['EncStr', 'R[', 'E(', 'GetStr(', 'l1(', 'l2(']:
+        seen = set()
+        for pattern in ['E(', 'l1(', 'l2(', 'GetStr(', 'R[', 'EncStr']:
             for m in re.finditer(re.escape(pattern), self.source):
-                start = max(0, m.start() - 30)
+                start = max(0, m.start() - 40)
                 end = min(len(self.source), m.end() + 80)
-                ctx = self.source[start:end].replace('\n', ' ')
-                lines.append(f"-- {ctx}")
-                if len(lines) > 20:
+                ctx = self.source[start:end].replace('\n', ' ').strip()
+                if ctx not in seen:
+                    seen.add(ctx)
+                    lines.append(f"-- {ctx}")
+                if len(lines) >= 15:
                     break
             if lines:
                 break
