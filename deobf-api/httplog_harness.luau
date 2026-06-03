@@ -55,6 +55,45 @@ local function _spy_make(name)
     return t
 end
 
+local _bit32 = rawget(_G, "bit32")
+if not _bit32 then
+    _bit32 = {
+        bxor = function(a, b)
+            local r, m = 0, 1
+            while a > 0 or b > 0 do
+                if (a % 2) ~= (b % 2) then r = r + m end
+                a = math.floor(a / 2)
+                b = math.floor(b / 2)
+                m = m * 2
+            end
+            return r
+        end,
+        band = function(a, b)
+            local r, m = 0, 1
+            while a > 0 and b > 0 do
+                if (a % 2) + (b % 2) == 2 then r = r + m end
+                a = math.floor(a / 2)
+                b = math.floor(b / 2)
+                m = m * 2
+            end
+            return r
+        end,
+        bor = function(a, b)
+            local r, m = 0, 1
+            while a > 0 or b > 0 do
+                if (a % 2) + (b % 2) > 0 then r = r + m end
+                a = math.floor(a / 2)
+                b = math.floor(b / 2)
+                m = m * 2
+            end
+            return r
+        end,
+        lshift = function(v, n) return math.floor(v * (2 ^ n)) % 4294967296 end,
+        rshift = function(v, n) return math.floor(v / (2 ^ n)) end,
+        arshift = function(v, n) return math.floor(v / (2 ^ n)) end,
+    }
+end
+
 local _cenv = {}
 setmetatable(_cenv, { __index = _G })
 
@@ -74,10 +113,7 @@ end
 _cenv.xpcall = xpcall or function(f, errh, ...) return pcall(f, ...) end
 
 _cenv.getfenv = function(lvl)
-    if lvl then
-        local res = getfenv(lvl)
-        return res
-    end
+    if lvl then return getfenv(lvl) end
     return _cenv
 end
 
@@ -138,16 +174,8 @@ _cenv.coroutine.yield = coroutine.yield or function() end
 _cenv.math = math
 _cenv.string = string
 _cenv.table = table
-
-_cenv.bit32 = rawget(_G, "bit32") or {
-    bxor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) ~= (b % 2) then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
-    band = function(a, b) local r, m = 0, 1; while a > 0 and b > 0 do if (a % 2) + (b % 2) == 2 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
-    bor = function(a, b) local r, m = 0, 1; while a > 0 or b > 0 do if (a % 2) + (b % 2) > 0 then r = r + m end; a = math.floor(a / 2); b = math.floor(b / 2); m = m * 2 end; return r end,
-    lshift = function(v, n) return math.floor(v * (2 ^ n)) % 4294967296 end,
-    rshift = function(v, n) return math.floor(v / (2 ^ n)) end,
-    arshift = function(v, n) return math.floor(v / (2 ^ n)) end,
-}
-_cenv.bit = _cenv.bit32
+_cenv.bit32 = _bit32
+_cenv.bit = _bit32
 
 _cenv.newproxy = function(addmeta)
     local p = {}
@@ -236,9 +264,12 @@ _cenv.iswindowactive = function() return true end
 _cenv.setclipboard = function(s) end
 _cenv.toclipboard = function(s) end
 _cenv.crypt = {
-    encrypt = function(d) return d end, decrypt = function(d) return d end,
-    hash = function(d) return "hash" end, generatekey = function() return "key" end,
-    base64encode = function(d) return d end, base64decode = function(d) return d end,
+    encrypt = function(d) return d end,
+    decrypt = function(d) return d end,
+    hash = function(d) return "hash" end,
+    generatekey = function() return "key" end,
+    base64encode = function(d) return d end,
+    base64decode = function(d) return d end,
     base64 = { encode = function(d) return d end, decode = function(d) return d end },
     custom = { encrypt = function(d) return d end, decrypt = function(d) return d end },
 }
