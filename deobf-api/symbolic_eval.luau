@@ -90,16 +90,14 @@ end
 
 for i, s in ipairs(decoded_strings) do
     result = result:gsub('R%[' .. i .. '%]', '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"')
+    result = result:gsub('R%[ ' .. i .. ' %]', '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"')
 end
 
-local output_lines = {}
-table.insert(output_lines, "-- Symbolically Evaluated Output")
-table.insert(output_lines, "-- " .. #decoded_strings .. " strings decoded")
+local output = "-- Symbolically Evaluated Output\n"
+output = output .. "-- " .. #decoded_strings .. " strings decoded\n"
 if getter_name then
-    table.insert(output_lines, "-- Getter: " .. getter_name .. "(N + " .. tostring(getter_offset) .. ")")
+    output = output .. "-- Getter: " .. getter_name .. "(N + " .. tostring(getter_offset) .. ")\n"
 end
-table.insert(output_lines, "")
-table.insert(output_lines, result)
+output = output .. "\n" .. result
 
-local output = table.concat(output_lines, "\n")
 fs.writeFile(outFile, output)
