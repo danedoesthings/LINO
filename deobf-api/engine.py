@@ -28,6 +28,16 @@ JOB_STORAGE_DIR = '/data'
 JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
 os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
 
+
+def safe_eval(expr: str) -> int:
+    expr = re.sub(r'\s+', '', expr)
+    expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
+    tokens = re.findall(r'[+\-]?\d+', expr)
+    if tokens:
+        return sum(int(t) for t in tokens)
+    return 0
+
+
 @dataclass
 class DiagnosticEvent:
     stage: str
@@ -38,6 +48,7 @@ class DiagnosticEvent:
     snippet: Optional[str] = None
     exception_type: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
+
 
 class Unveiler:
     def __init__(self, harness: LuaHarness) -> None:
@@ -56,6 +67,39 @@ class Unveiler:
         except Exception:
             return False
 
+    def _detect_getter(self, source: str):
+        single = source.replace('\n', ' ').replace('\r', ' ')
+        patterns = [
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(([^)]+)\)\s*\]',
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*([\d\-\+]+)\s*\]',
+        ]
+        for pat in patterns:
+            m = re.search(pat, single)
+            if m:
+                return m.group(1), safe_eval(m.group(2))
+        return None, 0
+
+    def _resolve_getter_calls(self, source: str, strings: list) -> str:
+        getter_name, getter_offset = self._detect_getter(source)
+        if not getter_name:
+            return source
+
+        def repl(m):
+            try:
+                expr = m.group(1).strip()
+                n = safe_eval(expr)
+                idx = n + getter_offset
+                if 1 <= idx <= len(strings):
+                    s = strings[idx - 1]
+                    if s:
+                        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                        return f'"{escaped}"'
+            except:
+                pass
+            return m.group(0)
+
+        return re.sub(rf'{getter_name}\s*\(\s*([^)]+?)\s*\)', repl, source)
+
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
         decoder = StringTableDecoder(source)
@@ -64,8 +108,15 @@ class Unveiler:
             return '', 'unable', 'String decode failed'
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
-        self._log('harness', True, 'attempting static symbolic evaluation with decoded strings')
-        harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
+        reconstructed = self._resolve_getter_calls(source, decoder.strings)
+        for i, s in enumerate(decoder.strings):
+            if s:
+                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                reconstructed = reconstructed.replace(f'R[{i + 1}]', f'"{escaped}"')
+                reconstructed = reconstructed.replace(f'R[ {i + 1} ]', f'"{escaped}"')
+
+        self._log('harness', True, 'attempting static symbolic evaluation')
+        harness_result = self.harness.run(reconstructed, timeout=30, decoded_strings=decoder.strings)
         if harness_result and len(harness_result) > 200:
             self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
             return harness_result, 'lua_harness', 'Symbolic evaluation complete'
@@ -146,6 +197,7 @@ class Unveiler:
         lines = [f'-- [{i}] {json.dumps(str(s))}' for i, s in enumerate(decoder.strings) if s]
         return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
 
+
 class DeobfEngine:
     def __init__(self) -> None:
         self.unluac_path = UNLUAC_LOCAL_PATH
@@ -184,8 +236,10 @@ class DeobfEngine:
             logger.finish(result, method, diagnostic)
         return result, method, diagnostic, [vars(t) for t in self.trace]
 
+
 job_store: Dict[str, Any] = {}
 job_lock = threading.Lock()
+
 
 def _save_jobs() -> None:
     try:
@@ -195,6 +249,7 @@ def _save_jobs() -> None:
     except Exception:
         pass
 
+
 def _load_jobs() -> None:
     try:
         if os.path.exists(JOB_STORAGE_FILE):
@@ -202,6 +257,7 @@ def _load_jobs() -> None:
                 job_store.update(json.load(f))
     except Exception:
         pass
+
 
 def _cleanup_old_jobs() -> None:
     while True:
@@ -216,9 +272,11 @@ def _cleanup_old_jobs() -> None:
         except Exception:
             pass
 
+
 _load_jobs()
 _cleanup_thread = threading.Thread(target=_cleanup_old_jobs, daemon=True)
 _cleanup_thread.start()
+
 
 def _run_job(job_id: str, source: str) -> None:
     engine = DeobfEngine()
@@ -251,12 +309,14 @@ def _run_job(job_id: str, source: str) -> None:
             }
         _save_jobs()
 
+
 def submit_job(source: str) -> str:
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
     threading.Thread(target=_run_job, args=(job_id, source), daemon=True).start()
     return job_id
+
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     with job_lock:
