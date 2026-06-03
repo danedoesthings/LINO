@@ -66,9 +66,9 @@ class Unveiler:
 
         self._log('harness', True, 'executing Lua harness')
         harness_result = self.harness.run(source)
-        if harness_result and looks_like_real_code(harness_result):
+        if harness_result and len(harness_result) > 50:
             self._log('harness_success', True, f'captured {len(harness_result)} chars')
-            return harness_result, 'lua_harness', 'Harness captured original source'
+            return harness_result, 'lua_harness', 'Harness captured strings'
 
         self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
         lune_result = run_lune_darklua_pipeline(source)
@@ -83,11 +83,9 @@ class Unveiler:
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
             dumped = dumper.dump()
-            if dumped and looks_like_real_code(dumped):
+            if dumped:
                 self._log('devirtualise_success', True, 'instruction table dumped')
                 return dumped, 'instr_table_dump', 'Instruction table and all decoded strings dumped'
-            elif dumped:
-                self._log('devirtualise', False, 'instruction table dump is comment-only, continuing pipeline')
         except Exception as e:
             self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
 
