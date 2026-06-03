@@ -702,7 +702,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
      return spytbl(varname)
     elseif setting=='original' then
      local success,result=pcall(actual)
-     return if success then result else 1
+     return success and result or 1
     else
      if operation=='not' then
       return not setting
@@ -995,7 +995,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
   if name~="debug" then table.freeze(cenv[name]) end
  end
  cenv.Enum=spytbl("Enum")
- cenv.pcall=pcall,function(...)
+ cenv.pcall=function(...)
   if plserror then plserror=nil;error("<25ms: forcederror>") end
   local res={_pcall(...)}
   if res[1] == false then
@@ -1170,7 +1170,7 @@ analyzefunction = function(chunk,r,lowestlayer,...)
   __index=spytbl('task'),
   __type='context_type',
  })
- cenv.spawn=spytbl('spawn'),function(f,...)f(...)end
+ cenv.spawn=function(f,...)f(...)end
  cenv.getenv=function(lvl)
   local originvl=lvl
   if type(lvl)=='number' and lvl<0 then return error('invalid argument #1 to \'getenv\' (level must be non-negative)') end
