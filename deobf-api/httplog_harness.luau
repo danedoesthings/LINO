@@ -215,6 +215,32 @@ _cenv.typeof = function(obj)
     end
     return type(obj)
 end
+_cenv.select = select or function(n, ...)
+    if n == "#" then return select("#", ...) end
+    local args = {...}
+    local result = {}
+    for i = n, #args do
+        result[#result + 1] = args[i]
+    end
+    return unpack(result)
+end
+_cenv.setmetatable = setmetatable
+_cenv.getmetatable = getmetatable
+_cenv.rawequal = rawequal or function(a, b) return a == b end
+_cenv.rawget = rawget or function(t, k) return t[k] end
+_cenv.rawset = rawset or function(t, k, v) t[k] = v; return t end
+_cenv.next = next
+_cenv.ipairs = ipairs
+_cenv.pairs = pairs
+_cenv.error = error
+_cenv.assert = assert
+_cenv.collectgarbage = collectgarbage or function() return 0 end
+_cenv.xpcall = xpcall or function(f, errh, ...) return pcall(f, ...) end
+_cenv.coroutine = coroutine or {}
+_cenv.coroutine.create = coroutine.create or function(f) return f end
+_cenv.coroutine.resume = coroutine.resume or function(co, ...) return true, pcall(co, ...) end
+_cenv.coroutine.wrap = coroutine.wrap or function(f) return function(...) return pcall(f, ...) end
+_cenv.coroutine.yield = coroutine.yield or function() end
 _cenv.math = math
 _cenv.string = string
 _cenv.table = table
