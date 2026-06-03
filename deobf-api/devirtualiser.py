@@ -17,7 +17,7 @@ def strip_bootstrap(source: str) -> str:
             return source[pos:]
     return source
 
-_CALL_PAT = re.compile(r'\b(?:E|GetStr|GetString)\s*\(\s*([^)]+?)\s*\)')
+_CALL_PAT = re.compile(r'\b(?:E|GetStr|GetString|l1|l2)\s*\(\s*([^)]+?)\s*\)')
 
 def substitute_string_calls(source: str, decoder: StringTableDecoder) -> str:
     def _repl(m: re.Match) -> str:
@@ -124,7 +124,7 @@ class Devirtualiser:
             if n is None:
                 return 'nil'
             return f'({n})'
-        return _CALL_PAT.sub(_repl, source)
+        return re.sub(r'\b(?:E|GetStr|GetString|l1|l2)\s*\(\s*([^)]+?)\s*\)', _repl, source)
 
     def _annotate_vm(self, source: str) -> str:
         unflat = DispatcherUnflattener(source)
