@@ -56,27 +56,19 @@ class Unveiler:
         except Exception:
             return False
 
-    def _raw_string_dump(self, source: str) -> str:
-        lines = ["-- Raw string dump (decode failed)"]
-        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', source)
-        for i, s in enumerate(strings[:100]):
-            lines.append(f'-- [{i}] "{s}"')
-        return '\n'.join(lines)
-
     def unveil(self, source: str) -> Tuple[str, str, str]:
         self.trace = []
         decoder = StringTableDecoder(source)
         if not decoder.ok:
             self._log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
-            return self._raw_string_dump(source), 'raw_string_dump', 'String decode failed, returning raw dump'
-
+            return '', 'unable', 'String decode failed'
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
 
-        self._log('harness', True, 'executing Lua harness')
+        self._log('harness', True, 'attempting static symbolic evaluation')
         harness_result = self.harness.run(source)
         if harness_result and len(harness_result) > 50:
-            self._log('harness_success', True, f'captured {len(harness_result)} chars')
-            return harness_result, 'lua_harness', 'Harness captured strings'
+            self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
+            return harness_result, 'lua_harness', 'Symbolic evaluation complete'
 
         self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
         lune_result = run_lune_darklua_pipeline(source)
@@ -175,6 +167,7 @@ class DeobfEngine:
             'vm_instruction_lifter': True,
             'vm_devirtualizer': True,
             'instruction_table_dumper': True,
+            'symbolic_eval': True,
         }
 
     def _trace(self, stage: str, success: bool, message: str) -> None:
