@@ -330,10 +330,22 @@ elseif input:find('{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},') then
 	specialhandle='moonveil'
 elseif input:find('https://wearedevs.net/obfuscator', 1, true) then
 	specialhandle = 'wearedevs_v1'
-	local decoded = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
-	chunk, err = luau.load(decoded)
-	if not err then
-		specialhandle = false
+	local function decode_wad(s)
+		return (s:gsub("\\(%d%d%d)", function(n)
+			return string.char(tonumber(n))
+		end))
+	end
+	local decoded = decode_wad(input)
+	local func, loaderr = luau.load(decoded)
+	if func then
+		local success, result = pcall(func)
+		if success and type(result) == "function" then
+			local success2, final = pcall(result)
+			if success2 and type(final) == "string" then
+				chunk, err = luau.load(final)
+				specialhandle = false
+			end
+		end
 	end
 end
 function tbl_to_s(tbl, indent, antioverflow)
