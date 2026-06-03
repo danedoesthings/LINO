@@ -16,7 +16,7 @@ class LuaHarness:
             return None
 
         result = self._run_symbolic(source, timeout)
-        if result and len(result) > 100:
+        if result and len(result) > 200:
             return result
 
         result = self._run_dynamic(source, timeout)
@@ -58,7 +58,7 @@ class LuaHarness:
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                     captured = f.read().strip()
-                if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
+                if captured and len(captured) > 100 and not captured.startswith("-- [ERROR]"):
                     return captured
             return None
         except Exception:
