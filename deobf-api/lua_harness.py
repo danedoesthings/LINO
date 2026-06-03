@@ -1,10 +1,6 @@
 import os
-import shutil
-import tempfile
-import subprocess
-import signal
 import re
-from typing import Optional, Dict
+from typing import Optional
 
 
 class LuaHarness:
@@ -30,19 +26,16 @@ class LuaHarness:
         from lupa import LuaRuntime
 
         lua = LuaRuntime(unpack_returned_tuples=True)
-        seen = set()
-        accumulated = []
+        captured_payload = []
 
-        def _accumulate(s):
+        def _capture_payload(s):
             try:
-                if isinstance(s, str) and len(s) > 0:
-                    if s not in seen:
-                        seen.add(s)
-                        accumulated.append(s)
+                if isinstance(s, str) and len(s) > 10:
+                    captured_payload.append(s)
             except:
                 pass
 
-        lua.globals()._py_accumulate = _accumulate
+        lua.globals()._py_capture_payload = _capture_payload
 
         lua.execute(r'''
         local _orig_type = type
@@ -57,11 +50,7 @@ class LuaHarness:
                 __index = function(self, k)
                     return _spy_make(name .. "." .. tostring(k))
                 end,
-                __newindex = function(self, k, v)
-                    if type(v) == "string" and #v > 0 then
-                        _py_accumulate(v)
-                    end
-                end,
+                __newindex = function() end,
                 __call = function(self, ...)
                     return _spy_make(name .. "(...)")
                 end,
@@ -99,6 +88,31 @@ class LuaHarness:
         }
         _G.bit32 = bit32
         _G.bit = bit32
+
+        local _orig_loadstring = loadstring or load
+        local _orig_load = load or loadstring
+
+        loadstring = function(src, name)
+            if type(src) == "string" and #src > 10 then
+                _py_capture_payload(src)
+            end
+            if _orig_loadstring then
+                return _orig_loadstring(src, name)
+            end
+            return _orig_load(src, name)
+        end
+
+        load = function(src, name)
+            if type(src) == "string" and #src > 10 then
+                _py_capture_payload(src)
+            end
+            if _orig_load then
+                return _orig_load(src, name)
+            end
+            if _orig_loadstring then
+                return _orig_loadstring(src, name)
+            end
+        end
 
         game = _spy_make("game")
         workspace = _spy_make("workspace")
@@ -233,8 +247,8 @@ class LuaHarness:
         except Exception:
             pass
 
-        if accumulated:
-            return "".join(accumulated)
+        if captured_payload:
+            return captured_payload[0]
         return None
 
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
