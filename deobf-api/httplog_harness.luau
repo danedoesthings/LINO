@@ -1,6 +1,5 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
-local luau = require("@lune/luau")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "captured.lua"
@@ -14,7 +13,7 @@ local input = fs.readFile(targetFile)
 
 local decoded_strings = {}
 if stringsFile and #stringsFile > 0 and fs.isFile(stringsFile) then
-	local chunk, load_err = luau.load(fs.readFile(stringsFile))
+	local chunk, load_err = load(fs.readFile(stringsFile))
 	if chunk then
 		local ok, data = pcall(chunk)
 		if ok and type(data) == "table" then
@@ -39,8 +38,7 @@ local function _spy_make(name)
 	local mt = {}
 	mt.__type = function() return "userdata" end
 	mt.__tostring = function() return name end
-	mt.__len = function() return 2853638 end
-	mt.__metatable = "The metatable is locked"
+	mt.__len = function() return 0 end
 	mt.__add = function() return 0 end
 	mt.__sub = function() return 0 end
 	mt.__mul = function() return 0 end
@@ -51,7 +49,6 @@ local function _spy_make(name)
 	mt.__lt = function() return false end
 	mt.__le = function() return false end
 	mt.__eq = function() return false end
-	mt.__gc = function() end
 	mt.__index = function(self, k)
 		return _spy_make(name .. "." .. tostring(k))
 	end
@@ -211,19 +208,17 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local fn = luau.load(src, b)
-		setfenv(fn, _cenv)
-		return fn
+		local opts = (type(b) == "string") and {debugName = b} or nil
+		local fn, err = load(src, opts)
+		if fn then
+			setfenv(fn, _cenv)
+		end
+		return fn, err
 	end
+	return nil, "source must be a string"
 end
-_cenv.load = function(src, b)
-	if type(src) == "string" then
-		_25ms(src)
-		local fn = luau.load(src, b)
-		setfenv(fn, _cenv)
-		return fn
-	end
-end
+_cenv.load = _cenv.loadstring
+
 _cenv.select = select or function(n, ...)
 	if n == "#" then return select("#", ...) end
 	local args = {...}
@@ -300,7 +295,6 @@ _cenv.os = {
 _cenv.require = function(id)
 	if id == "@lune/fs" then return fs end
 	if id == "@lune/process" then return process end
-	if id == "@lune/luau" then return luau end
 	return _spy_make("require." .. tostring(id))
 end
 
@@ -773,8 +767,7 @@ string.char = function(...)
 	return r
 end
 
-local stripped = input:gsub("^%s*return%s*", "")
-local chunk, err = luau.load(stripped)
+local chunk, err = load(input)
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
