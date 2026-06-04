@@ -106,6 +106,15 @@ class Unveiler:
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
         vm_score = self._calculate_vm_score(source)
         self._log('vm_detect', True, f'VM score: {vm_score}')
+        if vm_score >= 10:
+            self._log('harness', True, 'VM detected, attempting dynamic harness execution')
+            harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
+            if harness_result and self._is_quality_output(harness_result):
+                self._log('harness_success', True, f'dynamic harness produced {len(harness_result)} chars')
+                renamer = VarRenamer()
+                harness_result = renamer.rename(harness_result)
+                harness_result = beautify(harness_result)
+                return harness_result, 'dynamic_harness', 'Dynamic harness execution complete'
         if vm_score >= 15:
             self._log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
             try:
