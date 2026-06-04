@@ -4,12 +4,23 @@ local luau = require("@lune/luau")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "captured.lua"
+local stringsFile = process.args[4]
 
 if not fs.isFile(targetFile) then
 	error("Target file not found: " .. targetFile)
 end
 
 local input = fs.readFile(targetFile)
+
+local decoded_strings = {}
+if stringsFile and #stringsFile > 0 and fs.isFile(stringsFile) then
+	local serde = require("@lune/serde")
+	local json_str = fs.readFile(stringsFile)
+	local ok, data = pcall(serde.json.decode, serde, json_str)
+	if ok and type(data) == "table" then
+		decoded_strings = data
+	end
+end
 
 local r = {}
 local c = 0
@@ -289,6 +300,7 @@ _cenv.require = function(id)
 	if id == "@lune/fs" then return fs end
 	if id == "@lune/process" then return process end
 	if id == "@lune/luau" then return luau end
+	if id == "@lune/serde" then return require("@lune/serde") end
 	return _spy_make("require." .. tostring(id))
 end
 
@@ -708,6 +720,44 @@ _cenv.debug = {
 }
 
 _cenv.drawing = _spy_make("Drawing")
+
+if #decoded_strings > 0 then
+	_cenv.R = setmetatable({}, {
+		__index = function(t, k)
+			local idx = tonumber(k)
+			if idx and idx >= 1 and idx <= #decoded_strings then
+				return decoded_strings[idx]
+			end
+			for i, s in ipairs(decoded_strings) do
+				if s == k then
+					return _G[s] or _cenv[s]
+				end
+			end
+			return nil
+		end
+	})
+	_cenv.EncStr = _cenv.R
+	_cenv.table = setmetatable({}, {
+		__index = function(t, k)
+			local real_val = rawget(table, k) or rawget(_G, k)
+			if real_val ~= nil then
+				return real_val
+			end
+			for i, s in ipairs(decoded_strings) do
+				if s == k then
+					local resolved = _G[s] or _cenv[s]
+					if resolved ~= nil then
+						return resolved
+					end
+				end
+			end
+			return _spy_make("table." .. tostring(k))
+		end,
+		__newindex = function(t, k, v)
+			rawset(table, k, v)
+		end,
+	})
+end
 
 local _orig_table_concat = table.concat
 table.concat = function(t, sep, i, j)
