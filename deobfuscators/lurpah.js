@@ -1,74 +1,24 @@
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-async function deobfuscateLuraph(code) {
-    const tempDir = path.join(__dirname, '../temp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+async function deobfuscate(code) {
+    let result = code;
     
-    const inputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}.lua`);
-    fs.writeFileSync(inputFile, code, 'utf8');
+    result = result.replace(/Luraph Obfuscator[^\n]*\n/i, '');
+    result = result.replace(/local\s+L0\s*=\s*\(\(\(\)\)\)/g, '');
     
-    return new Promise((resolve, reject) => {
-        const luaProcess = spawn('lua', [
-            path.join(__dirname, '../scripts/luraph_deobf.lua'),
-            inputFile
-        ]);
-        
-        let stdout = '', stderr = '';
-        luaProcess.stdout.on('data', (data) => { stdout += data.toString(); });
-        luaProcess.stderr.on('data', (data) => { stderr += data.toString(); });
-        
-        luaProcess.on('close', (code) => {
-            cleanup(inputFile);
-            
-            if (stdout.includes('Deobfuscated successfully') || stdout.includes('Done')) {
-                const extracted = extractLuraphCode(stdout);
-                if (extracted) resolve(extracted);
-                else resolve(stdout);
-            } else if (stderr) {
-                const extracted = extractFromError(stderr);
-                if (extracted) resolve(extracted);
-                else reject(new Error(`Luraph deobfuscation failed: ${stderr}`));
-            } else {
-                reject(new Error('Luraph deobfuscation failed'));
-            }
-        });
+    const wrapperPattern = /return\s+function\(([^)]*)\)\s*([\s\S]*?)\s*end\s*$/;
+    const match = result.match(wrapperPattern);
+    if (match) {
+        result = match[2];
+    }
+    
+    result = result.replace(/local\s+function\s+[a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)[^{]*\{/g, 'function(');
+    result = result.replace(/_0x[a-f0-9]+/g, 'var');
+    
+    const xorPattern = /bit32\.bxor\((\d+),\s*(\d+)\)/g;
+    result = result.replace(xorPattern, (_, a, b) => {
+        return String(parseInt(a) ^ parseInt(b));
     });
-}
-
-function extractLuraphCode(output) {
-    const lines = output.split('\n');
-    const codeLines = [];
-    let capturing = false;
     
-    for (const line of lines) {
-        if (line.includes('--[[ Deobfuscated') || line.includes('-- Original')) {
-            capturing = true;
-        }
-        if (capturing && (line.includes('return ') || line.includes('function('))) {
-            codeLines.push(line);
-        }
-        if (capturing && line.includes('end') && codeLines.length > 10) {
-            capturing = false;
-        }
-    }
-    
-    if (codeLines.length > 0) return codeLines.join('\n');
-    return null;
+    return result;
 }
 
-function extractFromError(stderr) {
-    const match = stderr.match(/\[string "([^"]+)"\]/);
-    if (match) return match[1];
-    return null;
-}
-
-function cleanup(...files) {
-    for (const file of files) {
-        if (fs.existsSync(file)) fs.unlinkSync(file);
-    }
-}
-
-module.exports = { deobfuscate: deobfuscateLuraph };
+module.exports = { deobfuscate };
