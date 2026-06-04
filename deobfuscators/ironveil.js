@@ -1,67 +1,34 @@
-
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-async function deobfuscateIronVeil(code) {
-    const tempDir = path.join(__dirname, '../temp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+async function deobfuscate(code) {
+    let result = code;
     
-    const inputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}.lua`);
-    fs.writeFileSync(inputFile, code, 'utf8');
+    result = result.replace(/ironveil[^\n]*\n/i, '');
+    result = result.replace(/IronVeil[^\n]*\n/i, '');
     
-    const outputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}_deobf.lua`);
-    
-    return new Promise((resolve, reject) => {
-        const nodeProcess = spawn('node', [
-            path.join(__dirname, '../node_modules/ironveil-deobf/deobfuscator/index.js'),
-            inputFile,
-            outputFile
-        ]);
-        
-        let stderr = '';
-        nodeProcess.stderr.on('data', (data) => { stderr += data.toString(); });
-        
-        nodeProcess.on('close', (code) => {
-            if (fs.existsSync(outputFile)) {
-                const result = fs.readFileSync(outputFile, 'utf8');
-                cleanup(inputFile, outputFile);
-                resolve(result);
-            } else {
-                const extracted = extractFromOutput(stderr);
-                cleanup(inputFile, outputFile);
-                if (extracted) resolve(extracted);
-                else reject(new Error('IronVeil deobfuscation failed'));
+    const stringArrayPattern = /local\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*{((?:[^,}]+,?)+)}/g;
+    let match;
+    while ((match = stringArrayPattern.exec(result)) !== null) {
+        const strings = [];
+        const content = match[2];
+        const strMatches = content.match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g);
+        if (strMatches) {
+            for (const sm of strMatches) {
+                strings.push(JSON.parse(sm));
             }
-        });
+            const arrayName = match[1];
+            const accessPattern = new RegExp(`${arrayName}\\[(\\d+)\\]`, 'g');
+            result = result.replace(accessPattern, (_, idx) => {
+                const index = parseInt(idx);
+                return JSON.stringify(strings[index - 1] || 'unknown');
+            });
+        }
+    }
+    
+    const xorPattern = /bit32\.bxor\((\d+),\s*(\d+)\)/g;
+    result = result.replace(xorPattern, (_, a, b) => {
+        return String(parseInt(a) ^ parseInt(b));
     });
-}
-
-function extractFromOutput(output) {
-    const lines = output.split('\n');
-    const codeLines = [];
-    let inCode = false;
     
-    for (const line of lines) {
-        if (line.includes('Successfully deobfuscated')) {
-            inCode = true;
-        }
-        if (inCode && line.trim().startsWith('-- deobfuscated')) {
-            codeLines.push(line);
-        }
-        if (inCode && line.trim().length > 0 && !line.includes('ironveil')) {
-            codeLines.push(line);
-        }
-    }
-    
-    return codeLines.length > 0 ? codeLines.join('\n') : null;
+    return result;
 }
 
-function cleanup(...files) {
-    for (const file of files) {
-        if (fs.existsSync(file)) fs.unlinkSync(file);
-    }
-}
-
-module.exports = { deobfuscate: deobfuscateIronVeil };
+module.exports = { deobfuscate };
