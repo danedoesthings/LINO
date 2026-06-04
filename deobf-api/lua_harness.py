@@ -26,7 +26,7 @@ class LuaHarness:
             result = self._run_dynamic(source, timeout, decoded_strings)
             if result and len(result) > 100:
                 return result
-            return None
+            return result
         patched_source = self._patch_source_for_expression_hooks(source)
         result = self._run_symbolic(patched_source, timeout, decoded_strings)
         if result and len(result) > 200 and not self._is_raw_vm_output(result):
@@ -34,7 +34,7 @@ class LuaHarness:
         result = self._run_dynamic(patched_source, timeout)
         if result and len(result) > 100:
             return result
-        return None
+        return result
 
     def _is_wearedevs_vm(self, source: str) -> bool:
         indicators = [
@@ -176,7 +176,7 @@ class LuaHarness:
                 start_new_session=True
             )
             try:
-                proc.communicate(timeout=timeout)
+                _, stderr_data = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
                     if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
@@ -185,14 +185,21 @@ class LuaHarness:
                         proc.kill()
                 except Exception:
                     pass
+                return f"[Harness] TIMEOUT after {timeout}s"
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                     captured = f.read().strip()
                     if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
                         return captured
+                    elif captured:
+                        return captured
+            if stderr_data:
+                stderr_str = stderr_data.decode('utf-8', errors='replace').strip()
+                if stderr_str:
+                    return f"[Harness] Lune error: {stderr_str[:2000]}"
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            return f"[Harness] Exception: {str(e)}"
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
