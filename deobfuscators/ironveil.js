@@ -1,3 +1,4 @@
+
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -50,3 +51,17 @@ function extractFromOutput(output) {
             codeLines.push(line);
         }
         if (inCode && line.trim().length > 0 && !line.includes('ironveil')) {
+            codeLines.push(line);
+        }
+    }
+    
+    return codeLines.length > 0 ? codeLines.join('\n') : null;
+}
+
+function cleanup(...files) {
+    for (const file of files) {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+}
+
+module.exports = { deobfuscate: deobfuscateIronVeil };
