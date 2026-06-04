@@ -1,15 +1,13 @@
-FROM ghcr.io/railwayapp/nixpacks:ubuntu-1745885067
+FROM node:20-slim
 
 WORKDIR /app
 
-COPY . .
+COPY package*.json ./
 
 RUN npm install --omit=dev
 
-ENV DISCORD_TOKEN=${DISCORD_TOKEN}
-ENV NODE_ENV=production
-ENV PORT=3000
+COPY . .
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+CMD ["node", "index.js"]
