@@ -91,12 +91,19 @@ class WeAreDevsVMLifter:
         return None, 0
 
     def _resolve_inline_instruction_pairs(self, source):
-        ipairs_match = re.search(r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*(\{\{.*?\}\})\s*\)', source, re.DOTALL)
+        ipairs_match = re.search(
+            r'for\s+(\w+)\s*,\s*(\w+)\s+in\s+ipairs\s*\(\s*(\{\{.*?\}\})\s*\)\s*do\s*(.*?)\nend',
+            source,
+            re.DOTALL
+        )
         if not ipairs_match:
             return source
-        outer_body = ipairs_match.group(1)
+        index_var = ipairs_match.group(1)
+        value_var = ipairs_match.group(2)
+        outer_body = ipairs_match.group(3)
+        loop_body = ipairs_match.group(4)
         pairs = re.findall(r'\{([^}]+)\}', outer_body)
-        resolved_pairs = []
+        resolved_entries = {}
         for pair in pairs:
             parts = re.split(r'[;,]', pair)
             resolved = []
@@ -106,15 +113,40 @@ class WeAreDevsVMLifter:
                     continue
                 n = safe_eval_int(part)
                 if n is not None:
-                    resolved.append(str(n))
+                    resolved.append(n)
                 else:
                     resolved.append(part)
             if len(resolved) >= 2:
-                resolved_pairs.append('{' + ', '.join(resolved) + '}')
-        if not resolved_pairs:
+                idx = resolved[0]
+                val = resolved[1]
+                if isinstance(idx, int):
+                    resolved_entries[idx] = val
+        if not resolved_entries:
             return source
-        new_outer = '{' + ', '.join(resolved_pairs) + '}'
-        source = source[:ipairs_match.start(1)] + new_outer + source[ipairs_match.end(1):]
+        target_var = None
+        assign_pattern = re.compile(
+            rf'(\w+)\s*\[\s*{re.escape(index_var)}\s*\]\s*=\s*{re.escape(value_var)}'
+        )
+        assign_match = assign_pattern.search(loop_body)
+        if assign_match:
+            target_var = assign_match.group(1)
+        else:
+            assign_pattern2 = re.compile(
+                rf'(\w+)\s*\[\s*{re.escape(value_var)}\s*\]\s*=\s*{re.escape(index_var)}'
+            )
+            assign_match2 = assign_pattern2.search(loop_body)
+            if assign_match2:
+                target_var = assign_match2.group(1)
+                resolved_entries = {v: k for k, v in resolved_entries.items()}
+        if not target_var:
+            return source
+        max_idx = max(resolved_entries.keys())
+        flat_entries = []
+        for i in range(1, max_idx + 1):
+            val = resolved_entries.get(i, 0)
+            flat_entries.append(str(val))
+        new_decl = f'local {target_var} = {{{", ".join(flat_entries)}}}'
+        source = source[:ipairs_match.start()] + new_decl + source[ipairs_match.end():]
         return source
 
     def _fold_instruction_array(self, source):
