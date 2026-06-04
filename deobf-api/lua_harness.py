@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import subprocess
 import signal
+import json
 from typing import Optional
 
 _STR_COMMENT = re.compile(
@@ -23,7 +24,7 @@ class LuaHarness:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
-            result = self._run_dynamic(source, timeout)
+            result = self._run_dynamic(source, timeout, decoded_strings)
             if result and len(result) > 100:
                 return result
             return None
@@ -143,9 +144,10 @@ class LuaHarness:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _run_dynamic(self, source: str, timeout: int = 30) -> Optional[str]:
+    def _run_dynamic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
+        strings_path = os.path.join(tmpdir, "strings.json")
         output_path = os.path.join(tmpdir, "captured.lua")
         harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "httplog_harness.luau")
         if not os.path.isfile(harness_path):
@@ -154,8 +156,15 @@ class LuaHarness:
         try:
             with open(input_path, "w", encoding="utf-8") as f:
                 f.write(source)
+            args = ["lune", "run", harness_path, input_path, output_path]
+            if decoded_strings:
+                with open(strings_path, "w", encoding="utf-8") as f:
+                    json.dump(decoded_strings, f)
+                args.append(strings_path)
+            else:
+                args.append("")
             proc = subprocess.Popen(
-                ["lune", "run", harness_path, input_path, output_path],
+                args,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True
             )
