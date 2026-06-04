@@ -1,9 +1,10 @@
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { Worker } = require('worker_threads');
 const crypto = require('crypto');
+const axios = require('axios');
 
 const client = new Client({
     intents: [
@@ -72,24 +73,23 @@ function getAvailableWorker() {
 }
 
 function detectObfuscator(code) {
-    const signatures = {
-        moonsec: /This file was protected with MoonSec|MoonSec V3|local _ENV=setmetatable|function\(\.\.\.\)local [a-z]={/i,
-        luaobfuscator: /LuaObfuscator\.com|local _0x[a-f0-9]+|local function\(\)local [a-z]="\\[0-9]+"/i,
-        ironbrew: /IronBrew|local Il1l1l1l1l1l1l1l|local function oOOo0O0oO0oO0o/i,
-        luraph: /Luraph Obfuscator|local L0=[(][(][)]|local function L0O0O0O0O0O0O/i,
-        prometheus: /Prometheus Obfuscator|WeAreDevs|return\(function\(\.\.\.\)local [a-z]={}/i,
-        ironveil: /ironveil|IronVeil|local function 0o0Oo0o0O0o/i,
-        boronide: /Boronide|Hercules Obfuscator|local function Boronide/i,
-        star: /STAR OBFUSCATOR|Star Obfuscator|local function Star/i,
-        holylua: /holylua|HolyLua|--\[\[holylua/i,
-        twenty5ms: /25ms|_25ms\d+|local _25ms|hookop/i,
-        flamecoder: /Flamecoder|_HOOKOP|local _hp_n/,
-        unknown: null
-    };
+    const signatures = [
+        { name: 'moonsec', pattern: /This file was protected with MoonSec|MoonSec V3|local _ENV=setmetatable/i },
+        { name: 'luaobfuscator', pattern: /LuaObfuscator\.com|local _0x[a-f0-9]+/i },
+        { name: 'ironbrew', pattern: /IronBrew|local Il1l1l1l1l1l1l1l/i },
+        { name: 'luraph', pattern: /Luraph Obfuscator|local L0=[(][(][)]/i },
+        { name: 'prometheus', pattern: /Prometheus Obfuscator|WeAreDevs/i },
+        { name: 'ironveil', pattern: /ironveil|IronVeil/i },
+        { name: 'boronide', pattern: /Boronide|Hercules Obfuscator/i },
+        { name: 'star', pattern: /STAR OBFUSCATOR/i },
+        { name: 'holylua', pattern: /holylua|HolyLua/i },
+        { name: 'twenty5ms', pattern: /25ms|_25ms\d+|hookop/i },
+        { name: 'flamecoder', pattern: /Flamecoder|_HOOKOP/i }
+    ];
     
-    for (const [name, pattern] of Object.entries(signatures)) {
-        if (pattern && pattern.test(code)) {
-            return name;
+    for (const sig of signatures) {
+        if (sig.pattern.test(code)) {
+            return sig.name;
         }
     }
     return 'unknown';
@@ -108,7 +108,6 @@ function extractCodeBlock(content) {
 }
 
 async function fetchFromUrl(url) {
-    const axios = require('axios');
     try {
         const response = await axios.get(url, { 
             timeout: 15000,
@@ -166,9 +165,6 @@ client.on('messageCreate', async (message) => {
                 { name: '.moonsec <code>', value: 'Moonsec V3 deobfuscation', inline: true },
                 { name: '.luaobf <code>', value: 'LuaObfuscator.com deobf', inline: true },
                 { name: '.ironbrew <code>', value: 'Ironbrew 2 deobf', inline: true },
-                { name: '.luraph <code>', value: 'Luraph deobfuscation', inline: true },
-                { name: '.prometheus <code>', value: 'Prometheus/WeAreDevs deobf', inline: true },
-                { name: '.ironveil <code>', value: 'IronVeil deobfuscation', inline: true },
                 { name: '.status', value: 'Check bot status', inline: false }
             )
             .setFooter({ text: 'Deobfuscation may take 30-120 seconds' });
@@ -199,12 +195,6 @@ client.on('messageCreate', async (message) => {
     else if (content.startsWith('.ironbrew')) { command = '.ironbrew'; obfuscatorType = 'ironbrew'; }
     else if (content.startsWith('.luraph')) { command = '.luraph'; obfuscatorType = 'luraph'; }
     else if (content.startsWith('.prometheus')) { command = '.prometheus'; obfuscatorType = 'prometheus'; }
-    else if (content.startsWith('.ironveil')) { command = '.ironveil'; obfuscatorType = 'ironveil'; }
-    else if (content.startsWith('.boronide')) { command = '.boronide'; obfuscatorType = 'boronide'; }
-    else if (content.startsWith('.star')) { command = '.star'; obfuscatorType = 'star'; }
-    else if (content.startsWith('.holylua')) { command = '.holylua'; obfuscatorType = 'holylua'; }
-    else if (content.startsWith('.25ms')) { command = '.25ms'; obfuscatorType = 'twenty5ms'; }
-    else if (content.startsWith('.flamecoder')) { command = '.flamecoder'; obfuscatorType = 'flamecoder'; }
     else if (content.startsWith('.deobf')) { command = '.deobf'; obfuscatorType = 'auto'; }
     
     if (!command) return;
@@ -229,8 +219,8 @@ client.on('messageCreate', async (message) => {
         if (attachment.name.endsWith('.lua') || attachment.name.endsWith('.luau') || attachment.name.endsWith('.txt')) {
             const statusMsg = await message.reply('Downloading attachment...');
             try {
-                const response = await fetch(attachment.url);
-                scriptCode = await response.text();
+                const response = await axios.get(attachment.url, { responseType: 'text' });
+                scriptCode = response.data;
                 await statusMsg.delete();
             } catch (error) {
                 await message.reply(`Failed to download attachment: ${error.message}`);
@@ -252,12 +242,12 @@ client.on('messageCreate', async (message) => {
     if (obfuscatorType === 'auto') {
         obfuscatorType = detectObfuscator(scriptCode);
         if (obfuscatorType === 'unknown') {
-            await message.reply('Could not auto-detect obfuscator type. Please specify manually using one of the specific commands.');
+            await message.reply('Could not auto-detect obfuscator type. Please specify manually.');
             return;
         }
     }
     
-    const statusMsg = await message.reply(`Deobfuscating ${obfuscatorType} script... This may take up to 120 seconds.`);
+    const statusMsg = await message.reply(`Deobfuscating ${obfuscatorType} script... This may take up to 60 seconds.`);
     
     try {
         const deobfuscator = deobfuscators[obfuscatorType];
