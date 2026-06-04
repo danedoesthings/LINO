@@ -1,0 +1,29 @@
+{
+    "bot": {
+        "prefix": ".",
+        "maxFileSize": 5242880,
+        "timeoutSeconds": 120,
+        "maxConcurrentJobs": 4
+    },
+    "deobfuscators": {
+        "moonsec": { "enabled": true, "priority": 1 },
+        "luaobfuscator": { "enabled": true, "priority": 2 },
+        "ironbrew": { "enabled": true, "priority": 3 },
+        "luraph": { "enabled": true, "priority": 4 },
+        "prometheus": { "enabled": true, "priority": 5 },
+        "ironveil": { "enabled": true, "priority": 6 },
+        "boronide": { "enabled": true, "priority": 7 },
+        "star": { "enabled": true, "priority": 8 },
+        "holylua": { "enabled": true, "priority": 9 },
+        "twenty5ms": { "enabled": true, "priority": 10 },
+        "flamecoder": { "enabled": true, "priority": 11 }
+    },
+    "temp": {
+        "cleanupInterval": 3600000,
+        "maxAge": 3600000
+    },
+    "api": {
+        "port": 3000,
+        "rateLimit": 10
+    }
+}
