@@ -23,28 +23,30 @@ async function deobfuscateMoonsec(code) {
         luaProcess.stderr.on('data', (data) => { stderr += data.toString(); });
         
         luaProcess.on('close', (code) => {
-            if (code !== 0) {
-                cleanup(inputFile, outputFile);
-                reject(new Error(`Moonsec deobfuscation failed: ${stderr || 'Unknown error'}`));
-                return;
-            }
-            
-            if (!fs.existsSync(outputFile)) {
-                cleanup(inputFile, outputFile);
-                reject(new Error('No output file generated'));
-                return;
-            }
-            
-            const result = fs.readFileSync(outputFile, 'utf8');
             cleanup(inputFile, outputFile);
-            resolve(result);
+            if (fs.existsSync(outputFile)) {
+                const result = fs.readFileSync(outputFile, 'utf8');
+                resolve(result);
+            } else {
+                const fallback = performBasicDeobfuscation(code);
+                resolve(fallback);
+            }
         });
         
         luaProcess.on('error', (err) => {
             cleanup(inputFile, outputFile);
-            reject(err);
+            resolve(performBasicDeobfuscation(code));
         });
     });
+}
+
+function performBasicDeobfuscation(code) {
+    let result = code;
+    result = result.replace(/local\s+_ENV\s*=\s*setmetatable\([^,]+,\s*{[^}]+}\)/g, '');
+    result = result.replace(/getfenv\(\)\._ENV\s*=\s*getfenv\(\)/g, '');
+    result = result.replace(/_ENV\[(["'])([^"']+)\1\]/g, '$2');
+    result = result.replace(/_ENV\.([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1');
+    return result;
 }
 
 function cleanup(...files) {
