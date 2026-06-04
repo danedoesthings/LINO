@@ -32,16 +32,40 @@ const deobfuscators = {
 const activeJobs = new Map();
 const workerPool = [];
 const MAX_WORKERS = 4;
+let workerIdCounter = 0;
 
 for (let i = 0; i < MAX_WORKERS; i++) {
     const worker = new Worker('./workers/processor.js');
+    worker.id = workerIdCounter++;
+    worker.busy = false;
+    
+    worker.on('message', (result) => {
+        const job = activeJobs.get(worker.id);
+        if (job) {
+            clearTimeout(job.timeout);
+            activeJobs.delete(worker.id);
+            worker.busy = false;
+            job.resolve(result.output);
+        }
+    });
+    
+    worker.on('error', (error) => {
+        const job = activeJobs.get(worker.id);
+        if (job) {
+            clearTimeout(job.timeout);
+            activeJobs.delete(worker.id);
+            worker.busy = false;
+            job.reject(error);
+        }
+    });
+    
     workerPool.push(worker);
 }
 
 function getAvailableWorker() {
-    for (let i = 0; i < workerPool.length; i++) {
-        if (!activeJobs.has(workerPool[i].threadId)) {
-            return workerPool[i];
+    for (const worker of workerPool) {
+        if (!worker.busy) {
+            return worker;
         }
     }
     return null;
@@ -104,44 +128,32 @@ async function processDeobfuscation(code, obfuscatorType, userId) {
             return;
         }
         
-        const jobId = crypto.randomBytes(8).toString('hex');
-        activeJobs.set(worker.threadId, { resolve, reject, timeout: null });
+        worker.busy = true;
         
         const timeout = setTimeout(() => {
-            if (activeJobs.has(worker.threadId)) {
-                activeJobs.delete(worker.threadId);
+            if (activeJobs.has(worker.id)) {
+                activeJobs.delete(worker.id);
+                worker.busy = false;
                 reject(new Error('Deobfuscation timeout exceeded (120 seconds).'));
             }
         }, 120000);
         
-        activeJobs.get(worker.threadId).timeout = timeout;
+        activeJobs.set(worker.id, { resolve, reject, timeout });
         
-        worker.postMessage({ jobId, code, obfuscatorType, userId });
-        
-        worker.once('message', (result) => {
-            if (activeJobs.has(worker.threadId)) {
-                clearTimeout(activeJobs.get(worker.threadId).timeout);
-                activeJobs.delete(worker.threadId);
-            }
-            if (result.error) {
-                reject(new Error(result.error));
-            } else {
-                resolve(result.output);
-            }
-        });
+        worker.postMessage({ jobId: worker.id, code, obfuscatorType, userId });
     });
 }
 
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag}`);
     console.log(`Loaded ${Object.keys(deobfuscators).length} deobfuscators`);
+    console.log(`Worker pool size: ${workerPool.length}`);
 });
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
     const content = message.content;
-    const isDM = message.channel.type === 1;
     
     if (content === '.help' || content === '.commands') {
         const embed = new EmbedBuilder()
@@ -166,20 +178,16 @@ client.on('messageCreate', async (message) => {
     }
     
     if (content === '.status') {
+        const availableWorkers = workerPool.filter(w => !w.busy).length;
         const embed = new EmbedBuilder()
             .setTitle('Bot Status')
             .setColor(0x00ff00)
             .addFields(
-                { name: 'Workers', value: `${workerPool.filter(w => !activeJobs.has(w.threadId)).length}/${MAX_WORKERS} available`, inline: true },
+                { name: 'Workers', value: `${availableWorkers}/${MAX_WORKERS} available`, inline: true },
                 { name: 'Active Jobs', value: `${activeJobs.size}`, inline: true },
                 { name: 'Deobfuscators', value: `${Object.keys(deobfuscators).length}`, inline: true }
             );
         await message.reply({ embeds: [embed] });
-        return;
-    }
-    
-    if (content === '.detect') {
-        await message.reply('Please provide code to detect. Example: `.detect \\`\\`\\`lua your code here \\`\\`\\``');
         return;
     }
     
