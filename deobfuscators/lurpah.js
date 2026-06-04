@@ -3,58 +3,66 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-async function deobfuscateIronVeil(code) {
+async function deobfuscateLuraph(code) {
     const tempDir = path.join(__dirname, '../temp');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     
     const inputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}.lua`);
     fs.writeFileSync(inputFile, code, 'utf8');
     
-    const outputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}_deobf.lua`);
-    
     return new Promise((resolve, reject) => {
-        const nodeProcess = spawn('node', [
-            path.join(__dirname, '../node_modules/ironveil-deobf/deobfuscator/index.js'),
-            inputFile,
-            outputFile
+        const luaProcess = spawn('lua', [
+            path.join(__dirname, '../scripts/luraph_deobf.lua'),
+            inputFile
         ]);
         
-        let stderr = '';
-        nodeProcess.stderr.on('data', (data) => { stderr += data.toString(); });
+        let stdout = '', stderr = '';
+        luaProcess.stdout.on('data', (data) => { stdout += data.toString(); });
+        luaProcess.stderr.on('data', (data) => { stderr += data.toString(); });
         
-        nodeProcess.on('close', (code) => {
-            if (fs.existsSync(outputFile)) {
-                const result = fs.readFileSync(outputFile, 'utf8');
-                cleanup(inputFile, outputFile);
-                resolve(result);
-            } else {
-                const extracted = extractFromOutput(stderr);
-                cleanup(inputFile, outputFile);
+        luaProcess.on('close', (code) => {
+            cleanup(inputFile);
+            
+            if (stdout.includes('Deobfuscated successfully') || stdout.includes('Done')) {
+                const extracted = extractLuraphCode(stdout);
                 if (extracted) resolve(extracted);
-                else reject(new Error('IronVeil deobfuscation failed'));
+                else resolve(stdout);
+            } else if (stderr) {
+                const extracted = extractFromError(stderr);
+                if (extracted) resolve(extracted);
+                else reject(new Error(`Luraph deobfuscation failed: ${stderr}`));
+            } else {
+                reject(new Error('Luraph deobfuscation failed'));
             }
         });
     });
 }
 
-function extractFromOutput(output) {
+function extractLuraphCode(output) {
     const lines = output.split('\n');
     const codeLines = [];
-    let inCode = false;
+    let capturing = false;
     
     for (const line of lines) {
-        if (line.includes('Successfully deobfuscated')) {
-            inCode = true;
+        if (line.includes('--[[ Deobfuscated') || line.includes('-- Original')) {
+            capturing = true;
         }
-        if (inCode && line.trim().startsWith('-- deobfuscated')) {
+        if (capturing && (line.includes('return ') || line.includes('function('))) {
             codeLines.push(line);
         }
-        if (inCode && line.trim().length > 0 && !line.includes('ironveil')) {
-            codeLines.push(line);
+        if (capturing && line.includes('end') && codeLines.length > 10) {
+            capturing = false;
         }
     }
     
-    return codeLines.length > 0 ? codeLines.join('\n') : null;
+    if (codeLines.length > 0) return codeLines.join('\n');
+    return null;
+}
+
+function extractFromError(stderr) {
+    const match = stderr.match(/\[string "([^"]+)"\]/);
+    if (match) return match[1];
+    return null;
 }
 
 function cleanup(...files) {
@@ -63,4 +71,4 @@ function cleanup(...files) {
     }
 }
 
-module.exports = { deobfuscate: deobfuscateIronVeil };
+module.exports = { deobfuscate: deobfuscateLuraph };
