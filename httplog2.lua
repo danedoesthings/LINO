@@ -330,7 +330,7 @@ elseif input:find('{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},') then
 	specialhandle='moonveil'
 elseif (function()
 	local _, count = input:gsub("\\(%d%d%d)", "")
-	return count > 10 and input:find("local .-={", 1, true) and input:find("table%.concat", 1, true) and input:find("table%.insert", 1, true) and input:find("string%.char", 1, true) and input:find("string%.sub", 1, true) and input:find("math%.floor", 1, true)
+	return count > 10 and input:find("table%.concat", 1, true) and input:find("table%.insert", 1, true) and input:find("string%.char", 1, true) and input:find("string%.sub", 1, true) and input:find("math%.floor", 1, true)
 end)() then
 	specialhandle = 'wearedevs_v1'
 	input = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
