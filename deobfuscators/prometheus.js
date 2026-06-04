@@ -1,72 +1,37 @@
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-async function deobfuscatePrometheus(code) {
-    const tempDir = path.join(__dirname, '../temp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+async function deobfuscate(code) {
+    let result = code;
     
-    const inputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}.lua`);
-    fs.writeFileSync(inputFile, code, 'utf8');
+    result = result.replace(/Prometheus Obfuscator[^\n]*\n/i, '');
+    result = result.replace(/WeAreDevs[^\n]*\n/i, '');
     
-    const outputFile = path.join(tempDir, `${crypto.randomBytes(8).toString('hex')}_decrypted.lua`);
+    const returnPattern = /return\(function\(\.\.\.\)local\s+([a-z])\s*=\s*{}([\s\S]*)$/;
+    const match = result.match(returnPattern);
+    if (match) {
+        result = match[2];
+    }
     
-    return new Promise((resolve, reject) => {
-        const luaProcess = spawn('lua', [
-            path.join(__dirname, '../scripts/prometheus_decrypt.lua'),
-            inputFile,
-            outputFile
-        ]);
-        
-        let stdout = '', stderr = '';
-        luaProcess.stdout.on('data', (data) => { stdout += data.toString(); });
-        luaProcess.stderr.on('data', (data) => { stderr += data.toString(); });
-        
-        luaProcess.on('close', (code) => {
-            cleanup(inputFile, outputFile);
-            
-            if (fs.existsSync(outputFile)) {
-                const result = fs.readFileSync(outputFile, 'utf8');
-                resolve(result);
-            } else if (stdout.includes('success') || stdout.includes('Done')) {
-                const extracted = extractStringsFromOutput(stdout);
-                if (extracted) resolve(extracted);
-                else reject(new Error('Failed to extract deobfuscated code'));
-            } else {
-                reject(new Error(`Prometheus deobfuscation failed: ${stderr || stdout || 'Unknown error'}`));
+    result = result.replace(/local\s+function\s+[a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)[^{]*\{/g, 'function(');
+    
+    const stringArrayPattern = /local\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*{((?:[^,}]+,?)+)}/g;
+    let arrMatch;
+    while ((arrMatch = stringArrayPattern.exec(result)) !== null) {
+        const strings = [];
+        const content = arrMatch[2];
+        const strMatches = content.match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g);
+        if (strMatches) {
+            for (const sm of strMatches) {
+                strings.push(JSON.parse(sm));
             }
-        });
-        
-        luaProcess.on('error', (err) => {
-            cleanup(inputFile, outputFile);
-            reject(err);
-        });
-    });
-}
-
-function extractStringsFromOutput(output) {
-    const lines = output.split('\n');
-    const codeLines = [];
-    let inCode = false;
-    
-    for (const line of lines) {
-        if (line.includes('--[[ Deobfuscated') || line.includes('-- Generated')) {
-            inCode = true;
-        }
-        if (inCode && !line.includes('Decrypting') && !line.includes('string')) {
-            codeLines.push(line);
+            const arrayName = arrMatch[1];
+            const accessPattern = new RegExp(`${arrayName}\\[(\\d+)\\]`, 'g');
+            result = result.replace(accessPattern, (_, idx) => {
+                const index = parseInt(idx);
+                return JSON.stringify(strings[index - 1] || 'unknown');
+            });
         }
     }
     
-    if (codeLines.length > 0) return codeLines.join('\n');
-    return null;
+    return result;
 }
 
-function cleanup(...files) {
-    for (const file of files) {
-        if (fs.existsSync(file)) fs.unlinkSync(file);
-    }
-}
-
-module.exports = { deobfuscate: deobfuscatePrometheus };
+module.exports = { deobfuscate };
