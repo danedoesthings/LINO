@@ -13,7 +13,6 @@ import signal
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from engine import DeobfEngine, submit_job, get_job
-
 try:
     from luaparser import ast as lua_ast
     HAS_LUAPARSER = True
@@ -29,8 +28,8 @@ log = logging.getLogger('deobf-api')
 
 app = Flask(__name__)
 CORS(app)
-engine = DeobfEngine()
 
+engine = DeobfEngine()
 
 @app.route('/health')
 def health():
@@ -51,11 +50,9 @@ def health():
         'lupa_available': _check_lupa(),
     })
 
-
 @app.route('/alive')
 def alive():
     return 'ok'
-
 
 def _check_lupa():
     try:
@@ -63,7 +60,6 @@ def _check_lupa():
         return True
     except ImportError:
         return False
-
 
 @app.route('/debug')
 def debug():
@@ -75,7 +71,6 @@ def debug():
         return jsonify({'engine_sha': sha, 'engine_size': len(code)})
     except Exception as e:
         return jsonify({'error': str(e)})
-
 
 @app.route('/deobf/direct', methods=['POST'])
 def deobf_direct():
@@ -111,7 +106,6 @@ def deobf_direct():
             'traceback': traceback.format_exc()[:4000]
         }), 500
 
-
 @app.route('/deobf', methods=['POST'])
 def deobf():
     data = request.get_json(silent=True)
@@ -135,7 +129,6 @@ def deobf():
         'status': 'processing',
         'check_url': f'/deobf/{job_id}'
     })
-
 
 @app.route('/deobf/<job_id>', methods=['GET'])
 def deobf_status(job_id):
@@ -167,11 +160,9 @@ def deobf_status(job_id):
         'result_length': job.get('result_length', 0)
     })
 
-
 @app.route('/deobf/sync', methods=['POST'])
 def deobf_sync():
     return deobf_direct()
-
 
 @app.route('/jobs')
 def list_jobs():
@@ -186,7 +177,6 @@ def list_jobs():
             'result_length': job.get('result_length', 0) if job.get('status') == 'complete' else None
         })
     return jsonify({'jobs': jobs, 'total': len(job_store)})
-
 
 @app.route('/debug-harness', methods=['POST'])
 def debug_harness():
@@ -203,27 +193,29 @@ def debug_harness():
     if len(raw_bytes) > 5 * 1024 * 1024:
         return jsonify({'error': f'Source exceeds 5MB limit ({len(raw_bytes)} bytes)'}), 413
     source_str = raw_bytes.decode('latin-1', errors='replace')
-
     harness = engine.harness
-
     result = {
         'lua_found': harness.available,
-        'lune_available': harness.lune_available,
-        'lupa_available': harness.lupa_available,
+        'lune_available': harness.available,
+        'lupa_available': False,
         'lua_path': shutil.which('lua5.1') or shutil.which('lua') or 'not found',
         'lune_path': shutil.which('lune') or 'not found',
     }
-
-    harness_output = harness.run(source_str, timeout=30)
-    if harness_output:
-        result['captured'] = harness_output[:2000]
-        result['captured_length'] = len(harness_output)
-    else:
+    try:
+        from string_decoder import StringTableDecoder
+        decoder = StringTableDecoder(source_str)
+        harness_output = harness.run(source_str, timeout=30, decoded_strings=decoder.strings if decoder.ok else None)
+        if harness_output:
+            result['captured'] = harness_output[:5000]
+            result['captured_length'] = len(harness_output)
+        else:
+            result['captured'] = None
+            result['error'] = 'Harness returned no output'
+    except Exception as e:
         result['captured'] = None
-        result['error'] = 'Harness returned no output'
-
+        result['error'] = str(e)
+        result['traceback'] = traceback.format_exc()[:2000]
     return jsonify(result)
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
