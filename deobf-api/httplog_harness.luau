@@ -773,8 +773,7 @@ string.char = function(...)
 	return r
 end
 
-local wrapped_input = "local _fn = " .. input .. "\nreturn _fn"
-local chunk, err = luau.load(wrapped_input)
+local chunk, err = luau.load(input)
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
@@ -794,42 +793,33 @@ end
 
 debug.sethook(instruction_guard, "", 1000)
 
-local success, outer_fn = pcall(chunk)
+local success, result = pcall(chunk)
 
 if not success then
 	c = c + 1
 	local trace = debug.traceback("", 2)
-	r[c] = "[Error] " .. tostring(outer_fn) .. "\n[Trace] " .. trace .. "\n[Harness] executed " .. instruction_count .. " instructions before failure"
-elseif type(outer_fn) == "function" then
-	local success2, result = pcall(outer_fn)
-	if not success2 then
-		c = c + 1
-		local trace = debug.traceback("", 2)
-		r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace .. "\n[Harness] executed " .. instruction_count .. " instructions before failure"
-	else
-		if type(result) == "string" and #result > 10 then
-			_25ms(result)
-		elseif type(result) == "function" then
-			local ok3, result3 = pcall(result)
-			if ok3 and type(result3) == "string" and #result3 > 10 then
-				_25ms(result3)
-			elseif ok3 and type(result3) == "table" then
-				for _, v in pairs(result3) do
-					if type(v) == "string" and #v > 10 then
-						_25ms(v)
-					end
-				end
-			end
-		elseif type(result) == "table" then
-			for _, v in pairs(result) do
+	r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace .. "\n[Harness] executed " .. instruction_count .. " instructions before failure"
+else
+	if type(result) == "string" and #result > 10 then
+		_25ms(result)
+	elseif type(result) == "function" then
+		local ok2, result2 = pcall(result)
+		if ok2 and type(result2) == "string" and #result2 > 10 then
+			_25ms(result2)
+		elseif ok2 and type(result2) == "table" then
+			for _, v in pairs(result2) do
 				if type(v) == "string" and #v > 10 then
 					_25ms(v)
 				end
 			end
 		end
+	elseif type(result) == "table" then
+		for _, v in pairs(result) do
+			if type(v) == "string" and #v > 10 then
+				_25ms(v)
+			end
+		end
 	end
-elseif type(outer_fn) == "string" and #outer_fn > 10 then
-	_25ms(outer_fn)
 end
 
 local output_lines = {}
@@ -851,9 +841,9 @@ end
 
 local output
 if #output_lines == 0 and #r == 0 then
-	output = "[Harness] No output captured. success=" .. tostring(success) .. " result_type=" .. type(outer_fn)
-	if outer_fn ~= nil then
-		local preview = tostring(outer_fn):sub(1, 500)
+	output = "[Harness] No output captured. success=" .. tostring(success) .. " result_type=" .. type(result)
+	if result ~= nil then
+		local preview = tostring(result):sub(1, 500)
 		output = output .. " result_preview=" .. preview
 	end
 	output = output .. " instructions=" .. instruction_count
