@@ -211,7 +211,6 @@ end
 local original_globals=getenv()
 local clock=os.clock
 local startt=clock()
--- Set commercial=true to use relative paths and not mess with input path
 local commercial=true
 local inpath=commercial and "" or "dumps/original/"
 local outpath=commercial and "" or "dumps/dumped/"
@@ -331,20 +330,7 @@ elseif input:find('{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},{d,d,&a},') then
 	specialhandle='moonveil'
 elseif input:find('https://wearedevs.net/obfuscator', 1, true) then
 	specialhandle = 'wearedevs_v1'
-	-- Decode decimal escapes and unwrap
-	local decoded = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
-	local outer_func, loaderr = luau.load(decoded)
-	if outer_func then
-		local success, inner = pcall(outer_func)
-		if success and type(inner) == "function" then
-			local success2, result = pcall(inner)
-			if success2 and type(result) == "string" then
-				input = result
-				chunk, err = luau.load(input)
-				specialhandle = false
-			end
-		end
-	end
+	input = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
 end
 function tbl_to_s(tbl, indent, antioverflow)
 	if not next(tbl) then return "{}" end
@@ -1518,7 +1504,6 @@ else
 		end
 	end
 end
--- Write to output file if args[3] provided (bot passes it), otherwise to outpath
 local output_file = process.args[3]
 if output_file and output_file ~= "" then
 	fs.writeFile(output_file, table.concat(r,"\n"))
