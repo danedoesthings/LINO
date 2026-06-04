@@ -2,7 +2,6 @@ const { Client, GatewayIntentBits, Partials, EmbedBuilder, AttachmentBuilder } =
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { Worker } = require('worker_threads');
 const crypto = require('crypto');
 const axios = require('axios');
 
@@ -16,74 +15,43 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
+function loadDeobfuscator(name) {
+    try {
+        return require(`./deobfuscators/${name}`);
+    } catch (e) {
+        console.log(`Failed to load ${name}, using fallback`);
+        return { deobfuscate: async (code) => code };
+    }
+}
+
 const deobfuscators = {
-    moonsec: require('./deobfuscators/moonsec'),
-    luaobfuscator: require('./deobfuscators/luaobfuscator'),
-    ironbrew: require('./deobfuscators/ironbrew'),
-    luraph: require('./deobfuscators/luraph'),
-    prometheus: require('./deobfuscators/prometheus'),
-    ironveil: require('./deobfuscators/ironveil'),
-    boronide: require('./deobfuscators/boronide'),
-    star: require('./deobfuscators/star'),
-    holylua: require('./deobfuscators/holylua'),
-    twenty5ms: require('./deobfuscators/twenty5ms'),
-    flamecoder: require('./deobfuscators/flamecoder')
+    moonsec: loadDeobfuscator('moonsec'),
+    luaobfuscator: loadDeobfuscator('luaobfuscator'),
+    ironbrew: loadDeobfuscator('ironbrew'),
+    luraph: loadDeobfuscator('luraph'),
+    prometheus: loadDeobfuscator('prometheus'),
+    ironveil: loadDeobfuscator('ironveil'),
+    boronide: loadDeobfuscator('boronide'),
+    star: loadDeobfuscator('star'),
+    holylua: loadDeobfuscator('holylua'),
+    twenty5ms: loadDeobfuscator('twenty5ms'),
+    flamecoder: loadDeobfuscator('flamecoder')
 };
 
-const activeJobs = new Map();
-const workerPool = [];
-const MAX_WORKERS = 4;
-let workerIdCounter = 0;
-
-for (let i = 0; i < MAX_WORKERS; i++) {
-    const worker = new Worker('./workers/processor.js');
-    worker.id = workerIdCounter++;
-    worker.busy = false;
-    
-    worker.on('message', (result) => {
-        const job = activeJobs.get(worker.id);
-        if (job) {
-            clearTimeout(job.timeout);
-            activeJobs.delete(worker.id);
-            worker.busy = false;
-            job.resolve(result.output);
-        }
-    });
-    
-    worker.on('error', (error) => {
-        const job = activeJobs.get(worker.id);
-        if (job) {
-            clearTimeout(job.timeout);
-            activeJobs.delete(worker.id);
-            worker.busy = false;
-            job.reject(error);
-        }
-    });
-    
-    workerPool.push(worker);
-}
-
-function getAvailableWorker() {
-    for (const worker of workerPool) {
-        if (!worker.busy) {
-            return worker;
-        }
-    }
-    return null;
-}
+console.log('Loaded deobfuscators:', Object.keys(deobfuscators));
 
 function detectObfuscator(code) {
     const signatures = [
-        { name: 'moonsec', pattern: /This file was protected with MoonSec|MoonSec V3|local _ENV=setmetatable/i },
-        { name: 'luaobfuscator', pattern: /LuaObfuscator\.com|local _0x[a-f0-9]+/i },
-        { name: 'ironbrew', pattern: /IronBrew|local Il1l1l1l1l1l1l1l/i },
-        { name: 'luraph', pattern: /Luraph Obfuscator|local L0=[(][(][)]/i },
-        { name: 'prometheus', pattern: /Prometheus Obfuscator|WeAreDevs/i },
+        { name: 'moonsec', pattern: /MoonSec|local _ENV=setmetatable/i },
+        { name: 'luaobfuscator', pattern: /LuaObfuscator\.com|_0x[a-f0-9]+/i },
+        { name: 'ironbrew', pattern: /IronBrew|Il1l1l1l1l1l1l1l/i },
+        { name: 'luraph', pattern: /Luraph/i },
+        { name: 'prometheus', pattern: /Prometheus|WeAreDevs/i },
         { name: 'ironveil', pattern: /ironveil|IronVeil/i },
-        { name: 'boronide', pattern: /Boronide|Hercules Obfuscator/i },
+        { name: 'boronide', pattern: /Boronide|Hercules/i },
         { name: 'star', pattern: /STAR OBFUSCATOR/i },
         { name: 'holylua', pattern: /holylua|HolyLua/i },
-        { name: 'twenty5ms', pattern: /25ms|_25ms\d+|hookop/i },
+        { name: 'twenty5ms', pattern: /25ms|_25ms/i },
         { name: 'flamecoder', pattern: /Flamecoder|_HOOKOP/i }
     ];
     
@@ -119,34 +87,9 @@ async function fetchFromUrl(url) {
     }
 }
 
-async function processDeobfuscation(code, obfuscatorType, userId) {
-    return new Promise((resolve, reject) => {
-        const worker = getAvailableWorker();
-        if (!worker) {
-            reject(new Error('No workers available. Please try again later.'));
-            return;
-        }
-        
-        worker.busy = true;
-        
-        const timeout = setTimeout(() => {
-            if (activeJobs.has(worker.id)) {
-                activeJobs.delete(worker.id);
-                worker.busy = false;
-                reject(new Error('Deobfuscation timeout exceeded (120 seconds).'));
-            }
-        }, 120000);
-        
-        activeJobs.set(worker.id, { resolve, reject, timeout });
-        
-        worker.postMessage({ jobId: worker.id, code, obfuscatorType, userId });
-    });
-}
-
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag}`);
     console.log(`Loaded ${Object.keys(deobfuscators).length} deobfuscators`);
-    console.log(`Worker pool size: ${workerPool.length}`);
 });
 
 client.on('messageCreate', async (message) => {
@@ -154,60 +97,45 @@ client.on('messageCreate', async (message) => {
     
     const content = message.content;
     
-    if (content === '.help' || content === '.commands') {
+    if (content === '.help') {
         const embed = new EmbedBuilder()
             .setTitle('Lua Deobfuscation Bot')
-            .setDescription('Advanced deobfuscation for various Lua obfuscators')
-            .setColor(0x00ff00)
-            .addFields(
-                { name: '.deobf <code/file/link>', value: 'Auto-detect and deobfuscate', inline: false },
-                { name: '.detect <code>', value: 'Detect obfuscator type', inline: false },
-                { name: '.moonsec <code>', value: 'Moonsec V3 deobfuscation', inline: true },
-                { name: '.luaobf <code>', value: 'LuaObfuscator.com deobf', inline: true },
-                { name: '.ironbrew <code>', value: 'Ironbrew 2 deobf', inline: true },
-                { name: '.status', value: 'Check bot status', inline: false }
-            )
-            .setFooter({ text: 'Deobfuscation may take 30-120 seconds' });
-        
+            .setDescription('Commands:\n.deobf <code> - Auto-detect and deobfuscate\n.detect <code> - Detect obfuscator type\n.status - Bot status')
+            .setColor(0x00ff00);
         await message.reply({ embeds: [embed] });
         return;
     }
     
     if (content === '.status') {
-        const availableWorkers = workerPool.filter(w => !w.busy).length;
         const embed = new EmbedBuilder()
             .setTitle('Bot Status')
             .setColor(0x00ff00)
             .addFields(
-                { name: 'Workers', value: `${availableWorkers}/${MAX_WORKERS} available`, inline: true },
-                { name: 'Active Jobs', value: `${activeJobs.size}`, inline: true },
-                { name: 'Deobfuscators', value: `${Object.keys(deobfuscators).length}`, inline: true }
+                { name: 'Deobfuscators', value: `${Object.keys(deobfuscators).length}`, inline: true },
+                { name: 'Node Version', value: process.version, inline: true }
             );
         await message.reply({ embeds: [embed] });
         return;
     }
     
-    let command = null;
     let obfuscatorType = null;
     
-    if (content.startsWith('.moonsec')) { command = '.moonsec'; obfuscatorType = 'moonsec'; }
-    else if (content.startsWith('.luaobf')) { command = '.luaobf'; obfuscatorType = 'luaobfuscator'; }
-    else if (content.startsWith('.ironbrew')) { command = '.ironbrew'; obfuscatorType = 'ironbrew'; }
-    else if (content.startsWith('.luraph')) { command = '.luraph'; obfuscatorType = 'luraph'; }
-    else if (content.startsWith('.prometheus')) { command = '.prometheus'; obfuscatorType = 'prometheus'; }
-    else if (content.startsWith('.deobf')) { command = '.deobf'; obfuscatorType = 'auto'; }
+    if (content.startsWith('.moonsec')) obfuscatorType = 'moonsec';
+    else if (content.startsWith('.luaobf')) obfuscatorType = 'luaobfuscator';
+    else if (content.startsWith('.ironbrew')) obfuscatorType = 'ironbrew';
+    else if (content.startsWith('.luraph')) obfuscatorType = 'luraph';
+    else if (content.startsWith('.prometheus')) obfuscatorType = 'prometheus';
+    else if (content.startsWith('.deobf')) obfuscatorType = 'auto';
     
-    if (!command) return;
+    if (!obfuscatorType) return;
     
-    const userInput = content.slice(command.length).trim();
+    const userInput = content.slice(content.indexOf(' ')).trim();
     
     let scriptCode = extractCodeBlock(userInput);
     
     if (!scriptCode && userInput.match(/^https?:\/\//i)) {
-        const statusMsg = await message.reply('Fetching from URL...');
         try {
             scriptCode = await fetchFromUrl(userInput);
-            await statusMsg.delete();
         } catch (error) {
             await message.reply(`Failed to fetch URL: ${error.message}`);
             return;
@@ -216,16 +144,12 @@ client.on('messageCreate', async (message) => {
     
     if (!scriptCode && message.attachments.size > 0) {
         const attachment = message.attachments.first();
-        if (attachment.name.endsWith('.lua') || attachment.name.endsWith('.luau') || attachment.name.endsWith('.txt')) {
-            const statusMsg = await message.reply('Downloading attachment...');
-            try {
-                const response = await axios.get(attachment.url, { responseType: 'text' });
-                scriptCode = response.data;
-                await statusMsg.delete();
-            } catch (error) {
-                await message.reply(`Failed to download attachment: ${error.message}`);
-                return;
-            }
+        try {
+            const response = await axios.get(attachment.url, { responseType: 'text' });
+            scriptCode = response.data;
+        } catch (error) {
+            await message.reply(`Failed to download attachment: ${error.message}`);
+            return;
         }
     }
     
@@ -235,7 +159,7 @@ client.on('messageCreate', async (message) => {
     }
     
     if (scriptCode.length > 5000000) {
-        await message.reply('File too large (max 5MB). Please provide a smaller file.');
+        await message.reply('File too large (max 5MB).');
         return;
     }
     
@@ -247,20 +171,14 @@ client.on('messageCreate', async (message) => {
         }
     }
     
-    const statusMsg = await message.reply(`Deobfuscating ${obfuscatorType} script... This may take up to 60 seconds.`);
+    const statusMsg = await message.reply(`Deobfuscating ${obfuscatorType} script...`);
     
     try {
         const deobfuscator = deobfuscators[obfuscatorType];
-        if (!deobfuscator) {
-            await statusMsg.edit(`No deobfuscator available for: ${obfuscatorType}`);
-            return;
-        }
-        
         const result = await deobfuscator.deobfuscate(scriptCode);
         
         const outputFileName = `deobfuscated_${Date.now()}.lua`;
-        const outputBuffer = Buffer.from(result, 'utf8');
-        const attachment = new AttachmentBuilder(outputBuffer, { name: outputFileName });
+        const attachment = new AttachmentBuilder(Buffer.from(result, 'utf8'), { name: outputFileName });
         
         await statusMsg.delete();
         
@@ -269,15 +187,13 @@ client.on('messageCreate', async (message) => {
             .setColor(0x00ff00)
             .addFields(
                 { name: 'Obfuscator', value: obfuscatorType, inline: true },
-                { name: 'Input Size', value: `${(scriptCode.length / 1024).toFixed(2)} KB`, inline: true },
-                { name: 'Output Size', value: `${(result.length / 1024).toFixed(2)} KB`, inline: true }
+                { name: 'Size', value: `${(result.length / 1024).toFixed(2)} KB`, inline: true }
             );
         
         await message.reply({ embeds: [embed], files: [attachment] });
         
     } catch (error) {
-        console.error(`Deobfuscation error for ${obfuscatorType}:`, error);
-        await statusMsg.edit(`Deobfuscation failed: ${error.message || 'Unknown error'}`);
+        await statusMsg.edit(`Deobfuscation failed: ${error.message}`);
     }
 });
 
