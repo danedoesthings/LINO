@@ -773,7 +773,8 @@ string.char = function(...)
 	return r
 end
 
-local chunk, err = luau.load(input)
+local stripped = input:gsub("^%s*return%s*", "")
+local chunk, err = luau.load(stripped)
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
