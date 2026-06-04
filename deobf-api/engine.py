@@ -1,17 +1,6 @@
-import os
-import re
-import shutil
-import time
-import uuid
-import json
-import threading
-import traceback
-import subprocess
-import tempfile
-import base64
+import os, re, shutil, time, uuid, threading, json, traceback, subprocess, tempfile, base64, urllib.request
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
-
 from string_decoder import StringTableDecoder
 from devirtualiser import Devirtualiser, strip_bootstrap
 from state_machine_devirt import StateMachineLifter
@@ -24,7 +13,6 @@ from lua_harness import LuaHarness
 from lune_pipeline import run_lune_darklua_pipeline
 from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
 from instruction_decoder import WeAreDevsVMLifter
-
 try:
     from luaparser import ast as lua_ast
     HAS_LUAPARSER = True
@@ -33,6 +21,7 @@ except ImportError:
 
 UNLUAC_JAR_URL = "https://github.com/scratchminer/unluac/releases/download/v2023.03.22/unluac.jar"
 UNLUAC_LOCAL_PATH = os.environ.get('UNLUAC_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unluac.jar')
+
 JOB_STORAGE_DIR = '/data'
 JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
 os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
@@ -47,7 +36,6 @@ class DiagnosticEvent:
     snippet: Optional[str] = None
     exception_type: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
-
 
 class Unveiler:
     def __init__(self, harness: LuaHarness) -> None:
@@ -87,7 +75,7 @@ class Unveiler:
         return score
 
     def _is_quality_output(self, code: str) -> bool:
-        return len(code) > 200 and ('function' in code or 'local' in code or 'end' in code)
+        return self._score_lua_quality(code) >= 20
 
     def _calculate_vm_score(self, source: str) -> int:
         score = 0
@@ -96,6 +84,14 @@ class Unveiler:
             (r'if\s+\w+\s*[<>=]+\s*-?\d+\s+then', 5),
             (r'local\s+function\s+\w+\s*\([^)]*\)\s*return\s+R\s*\[[^\]]*[+\-*/%][^\]]*\d+\]', 15),
             (r'\w+\s*=\s*\{\s*\[?\d+\]?\s*=\s*function', 10),
+            (r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs', 15),
+            (r'return\s*\(function\s*\(', 10),
+            (r'instrTbl', 10),
+            (r'callEnvA', 10),
+            (r'callEnvB', 10),
+            (r'vmStack', 10),
+            (r'allocSlot', 10),
+            (r'funcWrap', 10),
         ]
         for pattern, weight in indicators:
             score += len(re.findall(pattern, source)) * weight
@@ -107,57 +103,85 @@ class Unveiler:
         if not decoder.ok:
             self._log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
             return '', 'unable', 'String decode failed'
-
         self._log('decode', True, f'decoded {len(decoder.strings)} strings')
-
         vm_score = self._calculate_vm_score(source)
         self._log('vm_detect', True, f'VM score: {vm_score}')
-
-        if self.harness.lune_available:
-            self._log('harness', True, 'attempting Lune runtime capture')
-            harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
-            if harness_result and self._is_quality_output(harness_result):
-                self._log('harness_success', True, f'captured {len(harness_result)} chars')
-                renamer = VarRenamer()
-                cleaned = renamer.rename(harness_result)
-                cleaned = beautify(cleaned)
-                return cleaned, 'lua_harness', 'Runtime capture successful'
-
-        if vm_score >= 30:
-            self._log('devirtualise', True, 'VM detected, attempting VM devirtualization')
+        if vm_score >= 15:
+            self._log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
             try:
                 vm_devirt = VMDevirtualizer(source, decoder)
                 lifted = vm_devirt.devirtualize()
                 if lifted and self._is_valid_lua(lifted):
-                    self._log('devirtualise_success', True, f'VM lifted, {len(vm_devirt.states)} states')
+                    self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
                     renamer = VarRenamer()
                     lifted = renamer.rename(lifted)
                     lifted = beautify(lifted)
-                    return lifted, 'vm_devirtualized', 'VM successfully devirtualized'
+                    return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
+                else:
+                    diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'returned None/empty'
+                    self._log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
             except Exception as e:
                 self._log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
-
-        self._log('devirtualise', True, 'attempting static devirtualisation')
-        devirt = Devirtualiser(decoder, annotate=True)
-        processed = devirt.process(source)
-        if processed and self._is_quality_output(processed):
+        if vm_score >= 10:
+            self._log('devirtualise', True, 'attempting instruction-level VM lifting')
+            vm_lifter = WeAreDevsVMLifter(decoder.strings, offset=decoder.offset)
+            lifted = vm_lifter.lift(source)
+            if lifted and self._is_valid_lua(lifted):
+                renamer = VarRenamer()
+                lifted = renamer.rename(lifted)
+                lifted = beautify(lifted)
+                self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
+                return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
+        self._log('harness', True, 'attempting static symbolic evaluation')
+        harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
+        if harness_result and self._is_quality_output(harness_result):
+            self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
+            return harness_result, 'lua_harness', 'Symbolic evaluation complete'
+        self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
+        lune_result = run_lune_darklua_pipeline(source)
+        if lune_result and looks_like_real_code(lune_result):
             renamer = VarRenamer()
-            result = renamer.rename(processed)
-            result = beautify(result)
-            return result, 'static_analysis', 'Static devirtualisation complete'
-
+            lune_result = renamer.rename(lune_result)
+            lune_result = beautify(lune_result)
+            self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
+            return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
+        self._log('devirtualise', True, 'dumping instruction table from decoded strings')
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
             dumped = dumper.dump()
             if dumped and len(dumped) > 200:
-                self._log('devirtualise_success', True, 'instruction table dumped')
-                return dumped, 'instr_table_dump', 'String table with reconstruction'
+                self._log('devirtualise_success', True, 'instruction table dumped with reconstruction')
+                return dumped, 'instr_table_dump', 'String table with source reconstruction'
         except Exception as e:
             self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
-
+        self._log('devirtualise', True, 'attempting state-machine lifting via regex')
+        sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
+        lifted = sm_lifter.lift()
+        if lifted and self._is_valid_lua(lifted):
+            self._log('devirtualise_success', True, 'state machine lifted')
+            renamer = VarRenamer()
+            lifted = renamer.rename(lifted)
+            lifted = beautify(lifted)
+            return lifted, 'state_machine_lifted', 'State machine lifted'
+        self._log('devirtualise', True, 'falling back to static devirtualisation')
+        devirt = Devirtualiser(decoder, annotate=True)
+        processed = devirt.process(source)
+        if processed:
+            renamer = VarRenamer()
+            result = renamer.rename(processed)
+            result = beautify(result)
+            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
+            return header + result, 'static_analysis', 'Static devirtualisation complete'
+        self._log('devirtualise', False, 'all stages failed, returning string dump')
+        try:
+            dumper = InstructionTableDumper(source, decoder.strings)
+            dumped = dumper.dump()
+            if dumped:
+                return dumped, 'wearedevs_decode', 'Decoded string table (best effort)'
+        except:
+            pass
         lines = [f'-- [{i}] {json.dumps(str(s))}' for i, s in enumerate(decoder.strings) if s]
         return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
-
 
 class DeobfEngine:
     def __init__(self) -> None:
@@ -180,6 +204,7 @@ class DeobfEngine:
             'vm_instruction_lifter': True,
             'vm_devirtualizer': True,
             'instruction_table_dumper': True,
+            'symbolic_eval': True,
         }
 
     def _trace(self, stage: str, success: bool, message: str) -> None:
@@ -196,10 +221,8 @@ class DeobfEngine:
             logger.finish(result, method, diagnostic)
         return result, method, diagnostic, [vars(t) for t in self.trace]
 
-
 job_store: Dict[str, Any] = {}
 job_lock = threading.Lock()
-
 
 def _save_jobs() -> None:
     try:
@@ -209,7 +232,6 @@ def _save_jobs() -> None:
     except Exception:
         pass
 
-
 def _load_jobs() -> None:
     try:
         if os.path.exists(JOB_STORAGE_FILE):
@@ -218,25 +240,22 @@ def _load_jobs() -> None:
     except Exception:
         pass
 
-
 def _cleanup_old_jobs() -> None:
     while True:
         try:
             time.sleep(3600)
             now = time.time()
-            old = [k for k, v in job_store.items() if now - v.get('created', 0) > 86400]
             with job_lock:
+                old = [k for k, v in job_store.items() if now - v.get('created', 0) > 86400]
                 for k in old:
                     del job_store[k]
                 _save_jobs()
         except Exception:
             pass
 
-
 _load_jobs()
 _cleanup_thread = threading.Thread(target=_cleanup_old_jobs, daemon=True)
 _cleanup_thread.start()
-
 
 def _run_job(job_id: str, source: str) -> None:
     engine = DeobfEngine()
@@ -255,7 +274,7 @@ def _run_job(job_id: str, source: str) -> None:
                 'created': job_store.get(job_id, {}).get('created', time.time()),
                 'log_json': logger.to_json(),
             }
-            _save_jobs()
+        _save_jobs()
     except Exception as e:
         logger.add_error(str(e), e)
         logger.finish()
@@ -267,8 +286,7 @@ def _run_job(job_id: str, source: str) -> None:
                 'created': job_store.get(job_id, {}).get('created', time.time()),
                 'log_json': logger.to_json(),
             }
-            _save_jobs()
-
+        _save_jobs()
 
 def submit_job(source: str) -> str:
     job_id = str(uuid.uuid4())
@@ -276,7 +294,6 @@ def submit_job(source: str) -> str:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
     threading.Thread(target=_run_job, args=(job_id, source), daemon=True).start()
     return job_id
-
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     with job_lock:
