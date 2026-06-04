@@ -260,6 +260,7 @@ local chunk,err
 local variablecount,variable_backs,_25mspredefined,spytbl,predefined=0,{},{},{}
 local luraphcarry
 settings.ignore_prom_globals=not not input:find("newproxy,setmetatable,getmetatable,select,[...])end(...).1,true")
+local is_wearedevs = false
 if (input:find("=_ENV:[&a&d_]+=")) then
 	msecNotReady=true
 	if settings.spynilglobals then settings.spynilglobals=nil end
@@ -332,8 +333,44 @@ elseif (function()
 	local _, count = input:gsub("\\(%d%d%d)", "")
 	return count > 10 and input:find("table%.concat", 1, true) and input:find("table%.insert", 1, true) and input:find("string%.char", 1, true) and input:find("string%.sub", 1, true) and input:find("math%.floor", 1, true)
 end)() then
-	specialhandle = 'wearedevs_v1'
+	is_wearedevs = true
 	input = input:gsub("\\(%d+)", function(n) return string.char(tonumber(n)) end)
+end
+if is_wearedevs then
+	local function extract_string_table(src)
+		local strings = {}
+		local array_match = src:match("local%s+%w+%s*=%s*(%{.-%});")
+		if not array_match then
+			array_match = src:match("local%s+%w+%s*=%s*(%{.-%})")
+		end
+		if array_match then
+			for str in array_match:gmatch('"([^"]*)"') do
+				strings[#strings + 1] = str
+			end
+		end
+		if #strings == 0 then
+			for str in src:gmatch('"(\\?[^"]*)"') do
+				if #str > 0 then
+					strings[#strings + 1] = str
+				end
+			end
+		end
+		return strings
+	end
+	local strings = extract_string_table(input)
+	if #strings > 0 then
+		local result = {}
+		result[#result + 1] = "-- WeAreDevs v1 Deobfuscated"
+		result[#result + 1] = "-- " .. #strings .. " strings decoded"
+		result[#result + 1] = ""
+		result[#result + 1] = "local EncryptedStrings = {"
+		for i, s in ipairs(strings) do
+			result[#result + 1] = string.format("\t[%d] = %q,", i, s)
+		end
+		result[#result + 1] = "}"
+		chunk, err = luau.load(table.concat(result, "\n"))
+		specialhandle = false
+	end
 end
 function tbl_to_s(tbl, indent, antioverflow)
 	if not next(tbl) then return "{}" end
