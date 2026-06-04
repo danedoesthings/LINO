@@ -1,7 +1,6 @@
-const { parentPort, workerData } = require('worker_threads');
+const { parentPort } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 const crypto = require('crypto');
 
 const deobfuscators = {
