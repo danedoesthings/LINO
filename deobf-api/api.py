@@ -194,28 +194,33 @@ def debug_harness():
         return jsonify({'error': f'Source exceeds 5MB limit ({len(raw_bytes)} bytes)'}), 413
     source_str = raw_bytes.decode('latin-1', errors='replace')
     harness = engine.harness
-    result = {
-        'lua_found': harness.available,
-        'lune_available': harness.available,
-        'lupa_available': False,
-        'lua_path': shutil.which('lua5.1') or shutil.which('lua') or 'not found',
-        'lune_path': shutil.which('lune') or 'not found',
-    }
+
+    stdout = ""
+    stderr = ""
+    exit_code = "0"
+    timeout = False
+
     try:
         from string_decoder import StringTableDecoder
         decoder = StringTableDecoder(source_str)
         harness_output = harness.run(source_str, timeout=30, decoded_strings=decoder.strings if decoder.ok else None)
         if harness_output:
-            result['captured'] = harness_output[:5000]
-            result['captured_length'] = len(harness_output)
+            stdout = harness_output
         else:
-            result['captured'] = None
-            result['error'] = 'Harness returned no output'
+            stderr = "Harness returned no output"
+            exit_code = "1"
     except Exception as e:
-        result['captured'] = None
-        result['error'] = str(e)
-        result['traceback'] = traceback.format_exc()[:2000]
-    return jsonify(result)
+        stderr = str(e) + "\n" + traceback.format_exc()
+        exit_code = "1"
+
+    return jsonify({
+        'lua_found': harness.available,
+        'lua_path': shutil.which('lua5.1') or shutil.which('lua') or 'not found',
+        'exit_code': exit_code,
+        'timeout': timeout,
+        'stdout': stdout[:5000],
+        'stderr': stderr[:5000],
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
