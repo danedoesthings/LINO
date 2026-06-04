@@ -43,6 +43,7 @@ class WeAreDevsVMLifter:
         source = self._resolve_getter_calls(source)
         if not source:
             return None
+        source = self._fold_instruction_array(source)
         self._extract_handler_table(source)
         self._extract_instructions(source)
         if len(self.instructions) < 10:
@@ -87,6 +88,28 @@ class WeAreDevsVMLifter:
                 if offset is not None:
                     return name, offset
         return None, 0
+
+    def _fold_instruction_array(self, source):
+        inst_match = re.search(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', source)
+        if not inst_match:
+            return source
+        var_name = inst_match.group(1)
+        body = inst_match.group(2)
+        tokens = re.split(r'[,;]', body)
+        resolved = []
+        for token in tokens:
+            token = token.strip()
+            if not token:
+                continue
+            n = safe_eval_int(token)
+            if n is not None:
+                resolved.append(str(n))
+            else:
+                resolved.append(token)
+        new_body = ', '.join(resolved)
+        new_decl = f'local {var_name} = {{{new_body}}}'
+        source = source[:inst_match.start()] + new_decl + source[inst_match.end():]
+        return source
 
     def _extract_handler_table(self, source):
         handler_pattern = r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;]'
