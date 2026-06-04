@@ -43,6 +43,7 @@ class WeAreDevsVMLifter:
         source = self._resolve_getter_calls(source)
         if not source:
             return None
+        source = self._resolve_inline_instruction_pairs(source)
         source = self._fold_instruction_array(source)
         self._extract_handler_table(source)
         self._extract_instructions(source)
@@ -88,6 +89,33 @@ class WeAreDevsVMLifter:
                 if offset is not None:
                     return name, offset
         return None, 0
+
+    def _resolve_inline_instruction_pairs(self, source):
+        ipairs_match = re.search(r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*(\{\{.*?\}\})\s*\)', source, re.DOTALL)
+        if not ipairs_match:
+            return source
+        outer_body = ipairs_match.group(1)
+        pairs = re.findall(r'\{([^}]+)\}', outer_body)
+        resolved_pairs = []
+        for pair in pairs:
+            parts = re.split(r'[;,]', pair)
+            resolved = []
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                n = safe_eval_int(part)
+                if n is not None:
+                    resolved.append(str(n))
+                else:
+                    resolved.append(part)
+            if len(resolved) >= 2:
+                resolved_pairs.append('{' + ', '.join(resolved) + '}')
+        if not resolved_pairs:
+            return source
+        new_outer = '{' + ', '.join(resolved_pairs) + '}'
+        source = source[:ipairs_match.start(1)] + new_outer + source[ipairs_match.end(1):]
+        return source
 
     def _fold_instruction_array(self, source):
         inst_match = re.search(r'local\s+(\w+)\s*=\s*\{([^}]+)\}', source)
