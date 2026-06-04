@@ -1,0 +1,7 @@
+flask
+flask-cors
+gunicorn
+httpx
+discord.py
+luaparser
+lupa
