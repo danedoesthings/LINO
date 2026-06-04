@@ -4,7 +4,6 @@ import shutil
 import tempfile
 import subprocess
 import signal
-import json
 from typing import Optional
 
 _STR_COMMENT = re.compile(
@@ -147,7 +146,7 @@ class LuaHarness:
     def _run_dynamic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
-        strings_path = os.path.join(tmpdir, "strings.json")
+        strings_path = os.path.join(tmpdir, "strings.lua")
         output_path = os.path.join(tmpdir, "captured.lua")
         harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "httplog_harness.luau")
         if not os.path.isfile(harness_path):
@@ -158,8 +157,16 @@ class LuaHarness:
                 f.write(source)
             args = ["lune", "run", harness_path, input_path, output_path]
             if decoded_strings:
+                escaped = []
+                for s in decoded_strings:
+                    if s:
+                        esc = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                        escaped.append(f'"{esc}"')
+                    else:
+                        escaped.append('""')
+                lua_table = "return {\n" + ",\n".join(escaped) + "\n}"
                 with open(strings_path, "w", encoding="utf-8") as f:
-                    json.dump(decoded_strings, f)
+                    f.write(lua_table)
                 args.append(strings_path)
             else:
                 args.append("")
