@@ -91,21 +91,48 @@ class WeAreDevsVMLifter:
         return None, 0
 
     def _resolve_inline_instruction_pairs(self, source):
-        ipairs_match = re.search(
-            r'for\s+(\w+)\s*,\s*(\w+)\s+in\s+ipairs\s*\(\s*(\{\{.*?\}\})\s*\)\s*do\s*(.*?)\nend',
-            source,
-            re.DOTALL
-        )
-        if not ipairs_match:
+        ipairs_pos = source.find('in ipairs(')
+        if ipairs_pos == -1:
+            ipairs_pos = source.find('in  ipairs(')
+        if ipairs_pos == -1:
             return source
-        index_var = ipairs_match.group(1)
-        value_var = ipairs_match.group(2)
-        outer_body = ipairs_match.group(3)
-        loop_body = ipairs_match.group(4)
-        pairs = re.findall(r'\{([^}]+)\}', outer_body)
+
+        brace_start = source.find('{{', ipairs_pos)
+        if brace_start == -1:
+            return source
+
+        depth = 1
+        pos = brace_start + 1
+        while pos < len(source) and depth > 0:
+            if source[pos] == '{':
+                depth += 1
+            elif source[pos] == '}':
+                depth -= 1
+            pos += 1
+        outer_end = pos
+
+        outer_body = source[brace_start:outer_end]
+
+        pairs = []
+        i = 0
+        while i < len(outer_body):
+            if outer_body[i] == '{':
+                depth = 1
+                j = i + 1
+                while j < len(outer_body) and depth > 0:
+                    if outer_body[j] == '{':
+                        depth += 1
+                    elif outer_body[j] == '}':
+                        depth -= 1
+                    j += 1
+                pairs.append(outer_body[i+1:j-1])
+                i = j
+            else:
+                i += 1
+
         resolved_entries = {}
-        for pair in pairs:
-            parts = re.split(r'[;,]', pair)
+        for pair_str in pairs:
+            parts = re.split(r'[;,]', pair_str)
             resolved = []
             for part in parts:
                 part = part.strip()
@@ -121,32 +148,70 @@ class WeAreDevsVMLifter:
                 val = resolved[1]
                 if isinstance(idx, int):
                     resolved_entries[idx] = val
+
         if not resolved_entries:
             return source
-        target_var = None
-        assign_pattern = re.compile(
-            rf'(\w+)\s*\[\s*{re.escape(index_var)}\s*\]\s*=\s*{re.escape(value_var)}'
-        )
-        assign_match = assign_pattern.search(loop_body)
-        if assign_match:
-            target_var = assign_match.group(1)
-        else:
-            assign_pattern2 = re.compile(
-                rf'(\w+)\s*\[\s*{re.escape(value_var)}\s*\]\s*=\s*{re.escape(index_var)}'
-            )
-            assign_match2 = assign_pattern2.search(loop_body)
-            if assign_match2:
-                target_var = assign_match2.group(1)
-                resolved_entries = {v: k for k, v in resolved_entries.items()}
-        if not target_var:
-            return source
+
         max_idx = max(resolved_entries.keys())
         flat_entries = []
         for i in range(1, max_idx + 1):
             val = resolved_entries.get(i, 0)
             flat_entries.append(str(val))
-        new_decl = f'local {target_var} = {{{", ".join(flat_entries)}}}'
-        source = source[:ipairs_match.start()] + new_decl + source[ipairs_match.end():]
+
+        for_var = 'I'
+        for_match = re.search(r'for\s+(\w+)\s*,\s*(\w+)\s+in\s+ipairs', source)
+        if for_match:
+            index_var = for_match.group(1)
+            value_var = for_match.group(2)
+            loop_search_start = outer_end
+            assign_pattern = re.compile(
+                rf'(\w+)\s*\[\s*{re.escape(index_var)}\s*\]\s*=\s*{re.escape(value_var)}'
+            )
+            body_region = source[loop_search_start:loop_search_start + 200]
+            assign_match = assign_pattern.search(body_region)
+            if assign_match:
+                for_var = assign_match.group(1)
+            else:
+                assign_pattern2 = re.compile(
+                    rf'(\w+)\s*\[\s*{re.escape(value_var)}\s*\]\s*=\s*{re.escape(index_var)}'
+                )
+                assign_match2 = assign_pattern2.search(body_region)
+                if assign_match2:
+                    for_var = assign_match2.group(1)
+                    resolved_entries = {v: k for k, v in resolved_entries.items()}
+                    max_idx = max(resolved_entries.keys())
+                    flat_entries = []
+                    for i in range(1, max_idx + 1):
+                        val = resolved_entries.get(i, 0)
+                        flat_entries.append(str(val))
+
+        new_decl = f'local {for_var} = {{{", ".join(flat_entries)}}}'
+
+        for_start = source.rfind('for', 0, ipairs_pos)
+        if for_start == -1:
+            return source
+
+        do_pos = source.find('do', ipairs_pos)
+        if do_pos == -1:
+            return source
+
+        pos = do_pos + 2
+        depth = 1
+        while pos < len(source) and depth > 0:
+            if source[pos:pos+2] == 'do' and not (pos > 0 and source[pos-1:pos].isalpha()):
+                depth += 1
+                pos += 2
+            elif source[pos:pos+3] == 'end' and not (pos+3 < len(source) and source[pos+3:pos+4].isalpha()):
+                depth -= 1
+                if depth == 0:
+                    pos += 3
+                    break
+                pos += 3
+            else:
+                pos += 1
+
+        for_end = pos
+        source = source[:for_start] + new_decl + source[for_end:]
         return source
 
     def _fold_instruction_array(self, source):
