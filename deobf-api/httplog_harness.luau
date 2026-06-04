@@ -246,22 +246,6 @@ _cenv.assert = assert
 _cenv.collectgarbage = collectgarbage or function() return 0 end
 _cenv.math = math
 _cenv.string = string
-_cenv.table = table
-_cenv.bit32 = _bit32
-_cenv.bit = _bit32
-_cenv.newproxy = function(addmeta)
-	local p = {}
-	if addmeta then setmetatable(p, {}) end
-	return p
-end
-_cenv.typeof = function(obj)
-	local mt = getmetatable(obj)
-	if mt and mt.__type and mt.__type() == "userdata" then
-		return "userdata"
-	end
-	return type(obj)
-end
-
 _cenv.coroutine = coroutine or {
 	create = function(f) return { __func = f } end,
 	resume = function(co, ...)
@@ -304,8 +288,22 @@ _cenv.require = function(id)
 	return _spy_make("require." .. tostring(id))
 end
 
-_cenv.script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
+_cenv.bit32 = _bit32
+_cenv.bit = _bit32
+_cenv.newproxy = newproxy or function(addmeta)
+	local p = {}
+	if addmeta then setmetatable(p, {}) end
+	return p
+end
+_cenv.typeof = function(obj)
+	local mt = getmetatable(obj)
+	if mt and mt.__type and mt.__type() == "userdata" then
+		return "userdata"
+	end
+	return type(obj)
+end
 
+_cenv.script_key = "c4ce76cd36f2afee4dcee7e87576e5fa"
 _cenv.game = _spy_make("game")
 _cenv.workspace = _spy_make("workspace")
 _cenv.script = _spy_make("script")
@@ -721,6 +719,9 @@ _cenv.debug = {
 
 _cenv.drawing = _spy_make("Drawing")
 
+_cenv.table = table
+_cenv.string = string
+
 if #decoded_strings > 0 then
 	_cenv.R = setmetatable({}, {
 		__index = function(t, k)
@@ -737,37 +738,17 @@ if #decoded_strings > 0 then
 		end
 	})
 	_cenv.EncStr = _cenv.R
-	_cenv.table = setmetatable({}, {
-		__index = function(t, k)
-			local real_val = rawget(table, k) or rawget(_G, k)
-			if real_val ~= nil then
-				return real_val
-			end
-			for i, s in ipairs(decoded_strings) do
-				if s == k then
-					local resolved = _G[s] or _cenv[s]
-					if resolved ~= nil then
-						return resolved
-					end
-				end
-			end
-			return _spy_make("table." .. tostring(k))
-		end,
-		__newindex = function(t, k, v)
-			rawset(table, k, v)
-		end,
-	})
 end
 
-local _orig_table_concat = table.concat
-table.concat = function(t, sep, i, j)
+local _orig_table_concat = _cenv.table.concat
+_cenv.table.concat = function(t, sep, i, j)
 	local r = _orig_table_concat(t, sep, i, j)
 	if type(r) == "string" and #r > 5 then _25ms(r) end
 	return r
 end
 
-local _orig_string_char = string.char
-string.char = function(...)
+local _orig_string_char = _cenv.string.char
+_cenv.string.char = function(...)
 	local r = _orig_string_char(...)
 	if select("#", ...) >= 3 then _25ms(r) end
 	return r
@@ -829,6 +810,16 @@ end
 
 if success then
 	_25ms("[Harness] executed " .. instruction_count .. " instructions")
+end
+
+if #output_lines == 0 and #r == 0 then
+	local output = "[Harness] No output captured. success=" .. tostring(success) .. " result_type=" .. type(result)
+	if result then
+		output = output .. " result_preview=" .. tostring(result):sub(1, 200)
+	end
+	output = output .. " instructions=" .. instruction_count
+	fs.writeFile(outFile, output)
+	return
 end
 
 if #_captured_lines > 0 and #r > 0 then
