@@ -205,23 +205,20 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local opts = {
+		local stripped = src
+		local ret_pos = stripped:find("return")
+		if ret_pos then
+			local after_ret = stripped:sub(ret_pos + 6)
+			local paren_pos = after_ret:find("%(")
+			if paren_pos then
+				stripped = after_ret:sub(paren_pos)
+			end
+		end
+		local fn, load_err = luau.load(stripped, {
 			debugName = type(b) == "string" and b or "=(load)",
 			environment = _cenv,
 			injectGlobals = true,
-		}
-		local fn, load_err = luau.load(src, opts)
-		if not fn then
-			local stripped = src:match("^%s*(.-)%s*$")
-			if stripped:match("^return%s+") then
-				stripped = stripped:gsub("^return%s+", "", 1)
-			elseif stripped:match("^return%(") then
-				stripped = stripped:gsub("^return", "", 1)
-			end
-			if stripped ~= src then
-				fn, load_err = luau.load(stripped, opts)
-			end
-		end
+		})
 		return fn, load_err
 	end
 	return nil, "source must be a string"
@@ -779,11 +776,14 @@ string.char = function(...)
 	return r
 end
 
-local loadable_input = input:match("^%s*(.-)%s*$")
-if loadable_input:match("^return%s+") then
-	loadable_input = loadable_input:gsub("^return%s+", "", 1)
-elseif loadable_input:match("^return%(") then
-	loadable_input = loadable_input:gsub("^return", "", 1)
+local loadable_input = input
+local ret_pos = loadable_input:find("return")
+if ret_pos then
+	local after_ret = loadable_input:sub(ret_pos + 6)
+	local paren_pos = after_ret:find("%(")
+	if paren_pos then
+		loadable_input = after_ret:sub(paren_pos)
+	end
 end
 
 local chunk, err = luau.load(loadable_input, {
