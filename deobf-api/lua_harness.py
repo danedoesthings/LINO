@@ -55,7 +55,9 @@ local function capture(val)
     captured[captured_count] = val
 end
 
-local old_loadstring = loadstring
+local old_loadstring = rawget(_G, "loadstring") or function(s, n)
+    return nil, "loadstring unavailable"
+end
 loadstring = function(src, name)
     capture(src)
     capture("[Payload: " .. #src .. " bytes]")
@@ -99,7 +101,7 @@ if decoded_source == "" then
     return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 end
 
-local obfuscated_chunk, err = loadstring(decoded_source, "obfuscated")
+local obfuscated_chunk, err = old_loadstring(decoded_source, "obfuscated")
 if not obfuscated_chunk then
     capture("[Error loading obfuscated: " .. tostring(err) .. "]")
     local HttpService = game:GetService("HttpService")
