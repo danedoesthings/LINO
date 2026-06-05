@@ -56,6 +56,9 @@ local function _spy_make(name)
 	mt.__le = function() return false end
 	mt.__eq = function() return false end
 	mt.__index = function(self, k)
+		if k == "Parent" then
+			return nil
+		end
 		return _spy_make(name .. "." .. tostring(k))
 	end
 	mt.__newindex = function(self, k, v)
@@ -199,7 +202,7 @@ _cenv.pcall = function(fn, ...)
 	if not results[1] then
 		local err = results[2]
 		local trace = debug.traceback("", 2)
-		_25ms("[Error] " .. tostring(err))
+		_25ms("[Error] " .. native_tostring(err))
 		_25ms("[Trace] " .. trace)
 	end
 	return _unpack(results)
@@ -484,7 +487,7 @@ _cenv.getsynasset = function(s) return "content" end
 _cenv.httpget = function(u) return "" end
 _cenv.httpspost = function(u, d) return "" end
 _cenv.request = function(o)
-	_25ms(tostring(o.Url))
+	_25ms(native_tostring(o.Url))
 	return {
 		StatusCode = 200,
 		Body = "--REMOTE_PAYLOAD",
@@ -819,7 +822,9 @@ local chunk, err = luau.load(loadable_input, {
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
-endlocal success, result = native_pcall(chunk)
+end
+
+local success, result = native_pcall(chunk)
 
 if not success then
 	c = c + 1
