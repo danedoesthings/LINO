@@ -24,17 +24,16 @@ class LuaHarness:
         self.unluac_path = unluac_path
         self.lune_available = shutil.which('lune') is not None
         self.lua51_available = os.path.isfile('/usr/bin/lua5.1') or shutil.which('lua5.1') is not None
-        self.lua51_path = '/usr/bin/lua5.1' if os.path.isfile('/usr/bin/lua5.1') else shutil.which('lua5.1') or 'lua5.1'
+        self.lua51_path = '/usr/bin/lua5.1' if os.path.isfile('/usr/bin/lua5.1') else (shutil.which('lua5.1') or 'lua5.1')
         self.available = self.lune_available or self.lua51_available
 
     def run(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
-            if self.lua51_available and decoded_strings:
-                result = self._run_lua51(source, timeout, decoded_strings)
-                if result and len(result) > 100:
-                    return result
+            result = self._run_lua51(source, timeout, decoded_strings)
+            if result and len(result) > 100:
+                return result
             if self.lune_available:
                 result = self._run_dynamic(source, timeout, decoded_strings)
                 if result and len(result) > 100:
