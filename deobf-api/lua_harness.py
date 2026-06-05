@@ -23,20 +23,23 @@ class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
         self.unluac_path = unluac_path
         self.lune_available = shutil.which('lune') is not None
-        self.lua51_available = shutil.which('lua5.1') is not None
+        self.lua51_available = os.path.isfile('/usr/bin/lua5.1') or shutil.which('lua5.1') is not None
+        self.lua51_path = '/usr/bin/lua5.1' if os.path.isfile('/usr/bin/lua5.1') else shutil.which('lua5.1') or 'lua5.1'
         self.available = self.lune_available or self.lua51_available
 
     def run(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
-            if self.lua51_available:
+            if self.lua51_available and decoded_strings:
                 result = self._run_lua51(source, timeout, decoded_strings)
-            else:
+                if result and len(result) > 100:
+                    return result
+            if self.lune_available:
                 result = self._run_dynamic(source, timeout, decoded_strings)
-            if result and len(result) > 100:
-                return result
-            return result
+                if result and len(result) > 100:
+                    return result
+            return result if result and len(result) > 100 else None
         patched_source = self._patch_source_for_expression_hooks(source)
         result = self._run_symbolic(patched_source, timeout, decoded_strings)
         if result and len(result) > 200 and not self._is_raw_vm_output(result):
@@ -165,7 +168,7 @@ class LuaHarness:
         try:
             with open(input_path, "w", encoding="utf-8") as f:
                 f.write(source)
-            args = ["lua5.1", harness_path, input_path, output_path]
+            args = [self.lua51_path, harness_path, input_path, output_path]
             if decoded_strings:
                 escaped = []
                 for s in decoded_strings:
