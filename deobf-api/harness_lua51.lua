@@ -300,7 +300,14 @@ end
 
 local _orig_string_char = string.char
 string.char = function(...)
-    local r = _orig_string_char(...)
+    local args = {...}
+    for i, v in ipairs(args) do
+        local n = tonumber(v)
+        if n then
+            args[i] = n
+        end
+    end
+    local r = _orig_string_char(unpack(args))
     if select("#", ...) >= 3 then _25ms(r) end
     return r
 end
