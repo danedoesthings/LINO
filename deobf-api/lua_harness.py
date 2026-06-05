@@ -6,7 +6,10 @@ import subprocess
 import signal
 import json
 import asyncio
+import logging
 from typing import Optional
+
+log = logging.getLogger('deobf-api')
 
 _STR_COMMENT = re.compile(
     r'"(?:[^"\\]|\\.)*"'
@@ -26,6 +29,8 @@ class RobloxCloudExecutor:
         self.universe_id = os.environ.get("ROBLOX_UNIVERSE_ID", "")
         self.place_id = os.environ.get("ROBLOX_PLACE_ID", "")
         self.available = bool(self.api_key and self.universe_id and self.place_id)
+        if not self.available:
+            log.info(f"RobloxCloudExecutor not available: api_key={'set' if self.api_key else 'missing'}, universe={'set' if self.universe_id else 'missing'}, place={'set' if self.place_id else 'missing'}")
 
     async def execute(self, obfuscated_source: str, decoded_strings: list = None, timeout: int = 120):
         if not self.available:
@@ -140,19 +145,25 @@ class LuaHarness:
         self.lua51_path = '/usr/bin/lua5.1' if os.path.isfile('/usr/bin/lua5.1') else (shutil.which('lua5.1') or 'lua5.1')
         self.roblox = RobloxCloudExecutor()
         self.available = self.lune_available or self.lua51_available or self.roblox.available
+        log.info(f"LuaHarness: lune={self.lune_available} lua51={self.lua51_available} roblox={self.roblox.available}")
 
     def run(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
+            log.info(f"WAD VM detected, roblox={self.roblox.available} lua51={self.lua51_available} lune={self.lune_available}")
             if self.roblox.available:
+                log.info("Calling Roblox Cloud executor")
                 result = self._run_roblox_cloud(source, timeout, decoded_strings)
+                log.info(f"Roblox Cloud result: {'got ' + str(len(result)) + ' chars' if result else 'None'}")
                 if result and len(result) > 100:
                     return result
+            log.info(f"Falling back to lua51={self.lua51_available}")
             result = self._run_lua51(source, timeout, decoded_strings)
             if result and len(result) > 100:
                 return result
             if self.lune_available:
+                log.info("Falling back to Lune")
                 result = self._run_dynamic(source, timeout, decoded_strings)
                 if result and len(result) > 100:
                     return result
@@ -345,9 +356,11 @@ class LuaHarness:
                 if captured:
                     return "\n".join(str(c) for c in captured)
             elif result and "error" in result:
+                log.error(f"Roblox Cloud error: {result['error']}")
                 return f"[Roblox Cloud] {result['error']}"
             return None
         except Exception as e:
+            log.error(f"Roblox Cloud exception: {e}")
             return f"[Roblox Cloud] Exception: {str(e)}"
 
     def _run_dynamic(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
