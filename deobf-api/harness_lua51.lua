@@ -246,7 +246,18 @@ _cenv.proxo = _cenv
 _cenv.furk_os = _cenv
 _cenv.shark = _cenv
 _cenv.debug = {
-    getinfo=function() return {source="mock",short_src="mock",func=function() end} end,
+    getinfo = function(fn_or_level, what)
+        return {
+            source = "[C]",
+            short_src = "[C]",
+            what = type(fn_or_level) == "function" and "C" or "Lua",
+            currentline = -1,
+            linedefined = -1,
+            lastlinedefined = -1,
+            nups = 0,
+            func = type(fn_or_level) == "function" and fn_or_level or nil,
+        }
+    end,
     getconstants=function() return {} end,
     getconstant=function() return nil end,
     setconstant=function() end,
@@ -303,11 +314,10 @@ string.char = function(...)
     local args = {...}
     for i, v in ipairs(args) do
         local n = tonumber(v)
-        if n then
-            args[i] = n
-        end
+        if n then args[i] = n end
     end
-    local r = _orig_string_char(unpack(args))
+    local ok, r = pcall(_orig_string_char, unpack(args))
+    if not ok then return "" end
     if select("#", ...) >= 3 then _25ms(r) end
     return r
 end
