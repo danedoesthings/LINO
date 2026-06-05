@@ -5,8 +5,7 @@ from math_fold import safe_eval_int, fold_constants, get_string_table_offset
 
 
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
-    folded = fold_constants(source)
-    for tbl_m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{300,})\}', folded):
+    for tbl_m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{300,})\}', source):
         body = tbl_m.group(1)
         entries: dict[str, int] = {}
         for m in re.finditer(r'\b([A-Za-z_])\s*=\s*([-\d+*()\s]{3,60}?)(?=[,;\}]|\Z)', body):
@@ -33,7 +32,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
         alphabet = ''.join(rev.get(i, '') for i in range(64))
         if len(alphabet) == 64 and len(set(alphabet)) == 64:
             return alphabet
-    for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', folded):
+    for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', source):
         cand = m.group(1)
         if len(set(cand)) == 64:
             return cand
@@ -42,8 +41,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
 
 def _extract_shuffle_ops(source: str) -> list[tuple[int, int]]:
     ops: list[tuple[int, int]] = []
-    folded = fold_constants(source)
-    m = re.search(r'ipairs\s*\(\s*\{(.*?)\}\s*\)', folded, re.DOTALL)
+    m = re.search(r'ipairs\s*\(\s*\{(.*?)\}\s*\)', source, re.DOTALL)
     if not m:
         return ops
     inner = m.group(1)
