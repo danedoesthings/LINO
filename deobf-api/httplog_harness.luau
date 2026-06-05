@@ -205,11 +205,18 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local fn, err = luau.load(src, {
+		local opts = {
 			debugName = type(b) == "string" and b or "=(load)",
 			environment = _cenv,
 			injectGlobals = false,
-		})
+		}
+		local fn, err = luau.load(src, opts)
+		if not fn then
+			local stripped = src:gsub("^%s*return%s*", "")
+			if stripped ~= src then
+				fn, err = luau.load(stripped, opts)
+			end
+		end
 		return fn, err
 	end
 	return nil, "source must be a string"
@@ -382,9 +389,9 @@ _cenv.setthreadidentity = function(n) end
 _cenv.getthreadcontext = function() return 8 end
 _cenv.setthreadcontext = function(n) end
 _cenv.checkcaller = function() return true end
-_cenv.identifyexecutor = function() return "LINO", "1.0.0" end
-_cenv.getexecutorname = function() return "LINO" end
-_cenv.getexecutorversion = function() return "1.0.0" end
+_cenv.identifyexecutor = function() return "Synapse X", "2.0" end
+_cenv.getexecutorname = function() return "Synapse X" end
+_cenv.getexecutorversion = function() return "2.0" end
 _cenv.getexecutorbuild = function() return "stable" end
 
 _cenv.getrawmetatable = function(t) return getmetatable(t) end
@@ -767,7 +774,9 @@ string.char = function(...)
 	return r
 end
 
-local chunk, err = luau.load(input, {
+local loadable_input = input:gsub("^%s*return%s*", "")
+
+local chunk, err = luau.load(loadable_input, {
 	debugName = "script",
 	environment = _cenv,
 	injectGlobals = false,
