@@ -13,7 +13,6 @@ from lua_harness import LuaHarness
 from lune_pipeline import run_lune_darklua_pipeline
 from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
 from instruction_decoder import WeAreDevsVMLifter
-from symbolic_state_tracer import SymbolicStateTracer
 try:
     from luaparser import ast as lua_ast
     HAS_LUAPARSER = True
@@ -41,11 +40,6 @@ class DiagnosticEvent:
 class Unveiler:
     def __init__(self, harness: LuaHarness) -> None:
         self.harness = harness
-        self.trace: List[Dict] = []
-        self._depth = 0
-
-    def _log(self, stage: str, success: bool, message: str) -> None:
-        self.trace.append({'stage': stage, 'success': success, 'message': message, 'timestamp': time.time()})
 
     def _is_valid_lua(self, code: str) -> bool:
         if not HAS_LUAPARSER:
@@ -119,132 +113,111 @@ class Unveiler:
                 score = 50
         return score
 
-    def unveil(self, source: str) -> Tuple[str, str, str]:
-        self._depth += 1
-        if self._depth > 5:
-            self._depth -= 1
-            return source, 'max_depth', 'Recursion limit reached'
+    def unveil(self, source: str, depth: int = 0, trace: list = None) -> Tuple[str, str, str, list]:
+        if trace is None:
+            trace = []
+        def log(stage, success, message):
+            trace.append({'stage': stage, 'success': success, 'message': message, 'timestamp': time.time()})
+        if depth > 5:
+            log('max_depth', False, 'Recursion limit reached')
+            return source, 'max_depth', 'Recursion limit reached', trace
         decoder = StringTableDecoder(source)
         if not decoder.ok:
-            self._depth -= 1
-            self._log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
-            return '', 'unable', 'String decode failed'
-        self._log('decode', True, f'decoded {len(decoder.strings)} strings (depth {self._depth})')
+            log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
+            return '', 'unable', 'String decode failed', trace
+        log('decode', True, f'decoded {len(decoder.strings)} strings (depth {depth})')
         vm_score = self._calculate_vm_score(source)
-        self._log('vm_detect', True, f'VM score: {vm_score}')
+        log('vm_detect', True, f'VM score: {vm_score}')
         if vm_score >= 10:
-            self._log('devirtualise', True, 'attempting symbolic state machine tracing')
-            tracer = SymbolicStateTracer(source, decoder.strings, offset=decoder.offset)
-            traced = tracer.trace()
-            if traced and self._is_valid_lua(traced):
-                self._log('devirtualise_success', True, 'symbolic state trace produced valid Lua')
-                renamer = VarRenamer()
-                traced = renamer.rename(traced)
-                traced = beautify(traced)
-                self._depth -= 1
-                return traced, 'symbolic_trace', 'Symbolic state machine execution complete'
-            elif traced and len(traced) > 100:
-                self._log('devirtualise_partial', True, f'symbolic trace produced {len(traced)} chars')
-            self._log('harness', True, 'VM detected, attempting dynamic harness execution')
+            log('harness', True, 'VM detected, attempting dynamic harness execution')
             harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
             if harness_result and len(harness_result) > 100:
                 payload = self._extract_payload_from_harness_output(harness_result)
                 if payload:
-                    self._log('harness_success', True, f'inner payload extracted ({len(payload)} bytes), recursing')
-                    inner_result, inner_method, inner_diag = self.unveil(payload)
+                    log('harness_success', True, f'inner payload extracted ({len(payload)} bytes), recursing')
+                    inner_result, inner_method, inner_diag, _ = self.unveil(payload, depth + 1, trace)
                     if self._is_quality_output(inner_result):
-                        self._log('recursion_success', True, f'inner layer deobfuscated via {inner_method}')
-                        self._depth -= 1
-                        return inner_result, f'dynamic_harness+{inner_method}', f'Layer 2: {inner_diag}'
+                        log('recursion_success', True, f'inner layer deobfuscated via {inner_method}')
+                        return inner_result, f'dynamic_harness+{inner_method}', f'Layer 2: {inner_diag}', trace
                     elif inner_result and len(inner_result) > 100:
-                        self._log('recursion_partial', True, f'inner layer returned {len(inner_result)} chars')
-                        self._depth -= 1
-                        return inner_result, 'dynamic_harness+partial', f'Layer 2 partial: {inner_diag}'
+                        log('recursion_partial', True, f'inner layer returned {len(inner_result)} chars')
+                        return inner_result, 'dynamic_harness+partial', f'Layer 2 partial: {inner_diag}', trace
                 elif self._is_quality_output(harness_result):
-                    self._log('harness_success', True, f'dynamic harness produced {len(harness_result)} chars')
+                    log('harness_success', True, f'dynamic harness produced {len(harness_result)} chars')
                     renamer = VarRenamer()
                     harness_result = renamer.rename(harness_result)
                     harness_result = beautify(harness_result)
-                    self._depth -= 1
-                    return harness_result, 'dynamic_harness', 'Dynamic harness execution complete'
+                    return harness_result, 'dynamic_harness', 'Dynamic harness execution complete', trace
                 else:
-                    self._log('harness', False, f'harness produced {len(harness_result)} chars but not quality output, recursing')
-                    inner_result, inner_method, inner_diag = self.unveil(harness_result)
+                    log('harness', False, f'harness produced {len(harness_result)} chars but not quality output, recursing')
+                    inner_result, inner_method, inner_diag, _ = self.unveil(harness_result, depth + 1, trace)
                     if inner_result and len(inner_result) > 100:
-                        self._depth -= 1
-                        return inner_result, f'dynamic_harness+{inner_method}', f'Harness output recurse: {inner_diag}'
+                        return inner_result, f'dynamic_harness+{inner_method}', f'Harness output recurse: {inner_diag}', trace
         if vm_score >= 15:
-            self._log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
+            log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
             try:
                 vm_devirt = VMDevirtualizer(source, decoder)
                 lifted = vm_devirt.devirtualize()
                 if lifted and self._is_valid_lua(lifted):
-                    self._log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
+                    log('devirtualise_success', True, f'VM lifted via AST, {len(vm_devirt.states)} states')
                     renamer = VarRenamer()
                     lifted = renamer.rename(lifted)
                     lifted = beautify(lifted)
-                    self._depth -= 1
-                    return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis'
+                    return lifted, 'vm_devirtualized', 'VM successfully devirtualized via AST analysis', trace
                 else:
                     diag_msg = '; '.join(vm_devirt.diagnostics) if vm_devirt.diagnostics else 'returned None/empty'
-                    self._log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
+                    log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
             except Exception as e:
-                self._log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
+                log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
         if vm_score >= 10:
-            self._log('devirtualise', True, 'attempting instruction-level VM lifting')
+            log('devirtualise', True, 'attempting instruction-level VM lifting')
             vm_lifter = WeAreDevsVMLifter(decoder.strings, offset=decoder.offset)
             lifted = vm_lifter.lift(source)
             if lifted and self._is_valid_lua(lifted):
                 renamer = VarRenamer()
                 lifted = renamer.rename(lifted)
                 lifted = beautify(lifted)
-                self._log('devirtualise_success', True, 'VM lifted via instruction decoder')
-                self._depth -= 1
-                return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
-        self._log('harness', True, 'attempting static symbolic evaluation')
+                log('devirtualise_success', True, 'VM lifted via instruction decoder')
+                return lifted, 'vm_lifted', 'VM successfully lifted to structured code', trace
+        log('harness', True, 'attempting static symbolic evaluation')
         harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
         if harness_result and len(harness_result) > 100:
             payload = self._extract_payload_from_harness_output(harness_result)
             if payload:
-                self._log('harness_success', True, f'inner payload extracted ({len(payload)} bytes), recursing (fallback)')
-                inner_result, inner_method, inner_diag = self.unveil(payload)
+                log('harness_success', True, f'inner payload extracted ({len(payload)} bytes), recursing (fallback)')
+                inner_result, inner_method, inner_diag, _ = self.unveil(payload, depth + 1, trace)
                 if inner_result and len(inner_result) > 100:
-                    self._depth -= 1
-                    return inner_result, f'dynamic_harness+{inner_method}', f'Layer 2: {inner_diag}'
+                    return inner_result, f'dynamic_harness+{inner_method}', f'Layer 2: {inner_diag}', trace
             elif self._is_quality_output(harness_result):
-                self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
-                self._depth -= 1
-                return harness_result, 'lua_harness', 'Symbolic evaluation complete'
-        self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
+                log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
+                return harness_result, 'lua_harness', 'Symbolic evaluation complete', trace
+        log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
         lune_result = run_lune_darklua_pipeline(source)
         if lune_result and looks_like_real_code(lune_result):
             renamer = VarRenamer()
             lune_result = renamer.rename(lune_result)
             lune_result = beautify(lune_result)
-            self._log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
-            self._depth -= 1
-            return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization'
-        self._log('devirtualise', True, 'dumping instruction table from decoded strings')
+            log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
+            return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization', trace
+        log('devirtualise', True, 'dumping instruction table from decoded strings')
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
             dumped = dumper.dump()
             if dumped and len(dumped) > 200:
-                self._log('devirtualise_success', True, 'instruction table dumped with reconstruction')
-                self._depth -= 1
-                return dumped, 'instr_table_dump', 'String table with source reconstruction'
+                log('devirtualise_success', True, 'instruction table dumped with reconstruction')
+                return dumped, 'instr_table_dump', 'String table with source reconstruction', trace
         except Exception as e:
-            self._log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
-        self._log('devirtualise', True, 'attempting state-machine lifting via regex')
+            log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
+        log('devirtualise', True, 'attempting state-machine lifting via regex')
         sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
         lifted = sm_lifter.lift()
         if lifted and self._is_valid_lua(lifted):
-            self._log('devirtualise_success', True, 'state machine lifted')
+            log('devirtualise_success', True, 'state machine lifted')
             renamer = VarRenamer()
             lifted = renamer.rename(lifted)
             lifted = beautify(lifted)
-            self._depth -= 1
-            return lifted, 'state_machine_lifted', 'State machine lifted'
-        self._log('devirtualise', True, 'falling back to static devirtualisation')
+            return lifted, 'state_machine_lifted', 'State machine lifted', trace
+        log('devirtualise', True, 'falling back to static devirtualisation')
         devirt = Devirtualiser(decoder, annotate=True)
         processed = devirt.process(source)
         if processed:
@@ -252,29 +225,24 @@ class Unveiler:
             result = renamer.rename(processed)
             result = beautify(result)
             header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
-            self._depth -= 1
-            return header + result, 'static_analysis', 'Static devirtualisation complete'
-        self._log('devirtualise', False, 'all stages failed, returning string dump')
+            return header + result, 'static_analysis', 'Static devirtualisation complete', trace
+        log('devirtualise', False, 'all stages failed, returning string dump')
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
             dumped = dumper.dump()
             if dumped:
-                self._depth -= 1
-                return dumped, 'wearedevs_decode', 'Decoded string table (best effort)'
+                return dumped, 'wearedevs_decode', 'Decoded string table (best effort)', trace
         except:
             pass
         lines = [f'-- [{i}] {json.dumps(str(s))}' for i, s in enumerate(decoder.strings) if s]
-        self._depth -= 1
-        return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table'
+        return '\n'.join(lines), 'wearedevs_decode', 'Decoded string table', trace
 
 class DeobfEngine:
     def __init__(self) -> None:
         self.unluac_path = UNLUAC_LOCAL_PATH
         self._java_available = shutil.which('java') is not None
         self.harness = LuaHarness(unluac_path=self.unluac_path)
-        self.unveiler = Unveiler(harness=self.harness)
         self.var_renamer = VarRenamer()
-        self.trace: List[DiagnosticEvent] = []
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
@@ -291,36 +259,38 @@ class DeobfEngine:
             'symbolic_eval': True,
         }
 
-    def _trace(self, stage: str, success: bool, message: str) -> None:
-        self.trace.append(DiagnosticEvent(stage=stage, success=success, message=message))
-
     def process(self, source: str, logger: Optional[JobLogger] = None) -> Tuple[str, str, str, list]:
-        self.trace = []
-        result, method, diagnostic = self.unveiler.unveil(source)
-        for entry in self.unveiler.trace:
-            self._trace(entry['stage'], entry['success'], entry['message'])
+        unveiler = Unveiler(harness=self.harness)
+        result, method, diagnostic, trace = unveiler.unveil(source)
         if logger:
-            for entry in self.unveiler.trace:
+            for entry in trace:
                 logger.add_trace(entry['stage'], entry['success'], entry['message'])
             logger.finish(result, method, diagnostic)
-        return result, method, diagnostic, [vars(t) for t in self.trace]
+        return result, method, diagnostic, trace
 
 job_store: Dict[str, Any] = {}
 job_lock = threading.Lock()
+_jobs_loaded = False
 
 def _save_jobs() -> None:
     try:
-        completed = {k: v for k, v in job_store.items() if v.get('status') != 'processing'}
-        with open(JOB_STORAGE_FILE, 'w') as f:
-            json.dump(completed, f)
+        with job_lock:
+            completed = {k: v for k, v in job_store.items() if v.get('status') != 'processing'}
+            with open(JOB_STORAGE_FILE, 'w') as f:
+                json.dump(completed, f)
     except Exception:
         pass
 
 def _load_jobs() -> None:
+    global _jobs_loaded
+    if _jobs_loaded:
+        return
     try:
         if os.path.exists(JOB_STORAGE_FILE):
             with open(JOB_STORAGE_FILE) as f:
-                job_store.update(json.load(f))
+                with job_lock:
+                    job_store.update(json.load(f))
+        _jobs_loaded = True
     except Exception:
         pass
 
@@ -344,7 +314,7 @@ _cleanup_thread.start()
 def _run_job(job_id: str, source: str) -> None:
     engine = DeobfEngine()
     logger = JobLogger()
-    logger.start_job(job_id, engine.get_capabilities())
+    logger.start(job_id, engine.get_capabilities())
     try:
         result, method, diagnostic, trace = engine.process(source, logger)
         with job_lock:
@@ -381,5 +351,4 @@ def submit_job(source: str) -> str:
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     with job_lock:
-        _load_jobs()
         return job_store.get(job_id)
