@@ -159,7 +159,7 @@ class LuaHarness:
             return None
         if self._is_wearedevs_vm(source):
             emu_result = self._run_emulator(source, decoded_strings)
-            if emu_result and len(emu_result) > 100:
+            if emu_result and len(emu_result) > 20:
                 return emu_result
             if self.roblox.available:
                 result = self._run_roblox_cloud(source, timeout, decoded_strings)
@@ -242,7 +242,7 @@ class LuaHarness:
             from roblox_env.emulator import RobloxEmulator
             emu = RobloxEmulator(decoded_strings)
             result = emu.execute(source)
-            if result and len(result) > 50:
+            if result and len(result) > 20:
                 return result
         except Exception as e:
             return f"-- [Emulator Error] {str(e)}\n-- {tb.format_exc()[:2000]}"
