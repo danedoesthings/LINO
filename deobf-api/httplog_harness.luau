@@ -785,7 +785,10 @@ local function instruction_guard(event, line)
 	end
 end
 
-debug.sethook(instruction_guard, "", 1000)
+local ok_hook, err_hook = pcall(debug.sethook, instruction_guard, "", 1000)
+if not ok_hook then
+	pcall(debug.sethook, instruction_guard, "c", 1000)
+end
 
 local success, result = pcall(chunk)
 
