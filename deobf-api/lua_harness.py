@@ -22,13 +22,18 @@ def clean_lune_error(stderr_text):
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
         self.unluac_path = unluac_path
-        self.available = shutil.which('lune') is not None
+        self.lune_available = shutil.which('lune') is not None
+        self.lua51_available = shutil.which('lua5.1') is not None
+        self.available = self.lune_available or self.lua51_available
 
     def run(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
-            result = self._run_dynamic(source, timeout, decoded_strings)
+            if self.lua51_available:
+                result = self._run_lua51(source, timeout, decoded_strings)
+            else:
+                result = self._run_dynamic(source, timeout, decoded_strings)
             if result and len(result) > 100:
                 return result
             return result
@@ -148,7 +153,70 @@ class LuaHarness:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def _run_lua51(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
+        tmpdir = tempfile.mkdtemp()
+        input_path = os.path.join(tmpdir, "input.lua")
+        strings_path = os.path.join(tmpdir, "strings.lua")
+        output_path = os.path.join(tmpdir, "captured.lua")
+        harness_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness_lua51.lua")
+        if not os.path.isfile(harness_path):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return None
+        try:
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(source)
+            args = ["lua5.1", harness_path, input_path, output_path]
+            if decoded_strings:
+                escaped = []
+                for s in decoded_strings:
+                    if s:
+                        esc = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                        escaped.append(f'"{esc}"')
+                    else:
+                        escaped.append('""')
+                lua_table = "return {\n" + ",\n".join(escaped) + "\n}"
+                with open(strings_path, "w", encoding="utf-8") as f:
+                    f.write(lua_table)
+                args.append(strings_path)
+            else:
+                args.append("")
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True
+            )
+            try:
+                _, stderr_data = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    if hasattr(os, 'killpg') and hasattr(os, 'getpgid'):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except Exception:
+                    pass
+                return f"[Harness] TIMEOUT after {timeout}s"
+            if os.path.exists(output_path):
+                with open(output_path, "r", encoding="utf-8", errors="replace") as f:
+                    captured = f.read().strip()
+                    if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
+                        return captured
+                    elif captured:
+                        return captured
+            if stderr_data:
+                stderr_str = stderr_data.decode('utf-8', errors='replace').strip()
+                if stderr_str:
+                    cleaned = clean_lune_error(stderr_str)
+                    return f"[Harness] Lua5.1 error: {cleaned[:2000]}"
+            return None
+        except Exception as e:
+            return f"[Harness] Exception: {str(e)}"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def _run_dynamic(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
+        if not self.lune_available:
+            return self._run_lua51(source, timeout, decoded_strings)
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
         strings_path = os.path.join(tmpdir, "strings.lua")
@@ -195,8 +263,6 @@ class LuaHarness:
                 with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                     captured = f.read().strip()
                     if captured and len(captured) > 50 and not captured.startswith("-- [ERROR]"):
-                        return captured
-                    elif captured:
                         return captured
             if stderr_data:
                 stderr_str = stderr_data.decode('utf-8', errors='replace').strip()
