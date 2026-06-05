@@ -77,6 +77,15 @@ class Unveiler:
     def _is_quality_output(self, code: str) -> bool:
         return self._score_lua_quality(code) >= 20
 
+    def _extract_payload_from_harness_output(self, output: str) -> Optional[str]:
+        lines = output.split('\n')
+        for line in lines:
+            line = line.strip()
+            if len(line) > 100 and not line.startswith('[Harness]') and not line.startswith('[Error]') and not line.startswith('[Trace]'):
+                if 'function' in line or 'local' in line or 'loadstring' in line or 'print' in line or '=' in line:
+                    return line
+        return None
+
     def _calculate_vm_score(self, source: str) -> int:
         score = 0
         indicators = [
@@ -109,12 +118,22 @@ class Unveiler:
         if vm_score >= 10:
             self._log('harness', True, 'VM detected, attempting dynamic harness execution')
             harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
-            if harness_result and self._is_quality_output(harness_result):
-                self._log('harness_success', True, f'dynamic harness produced {len(harness_result)} chars')
-                renamer = VarRenamer()
-                harness_result = renamer.rename(harness_result)
-                harness_result = beautify(harness_result)
-                return harness_result, 'dynamic_harness', 'Dynamic harness execution complete'
+            if harness_result and len(harness_result) > 100:
+                payload = self._extract_payload_from_harness_output(harness_result)
+                if payload:
+                    self._log('harness_success', True, 'inner payload extracted from harness')
+                    renamer = VarRenamer()
+                    payload = renamer.rename(payload)
+                    payload = beautify(payload)
+                    return payload, 'dynamic_harness', 'Inner payload captured via dynamic harness'
+                elif self._is_quality_output(harness_result):
+                    self._log('harness_success', True, f'dynamic harness produced {len(harness_result)} chars')
+                    renamer = VarRenamer()
+                    harness_result = renamer.rename(harness_result)
+                    harness_result = beautify(harness_result)
+                    return harness_result, 'dynamic_harness', 'Dynamic harness execution complete'
+                else:
+                    self._log('harness', False, f'harness produced {len(harness_result)} chars but not quality output')
         if vm_score >= 15:
             self._log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
             try:
@@ -143,9 +162,17 @@ class Unveiler:
                 return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
         self._log('harness', True, 'attempting static symbolic evaluation')
         harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
-        if harness_result and self._is_quality_output(harness_result):
-            self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
-            return harness_result, 'lua_harness', 'Symbolic evaluation complete'
+        if harness_result and len(harness_result) > 100:
+            payload = self._extract_payload_from_harness_output(harness_result)
+            if payload:
+                self._log('harness_success', True, 'inner payload extracted from harness (fallback)')
+                renamer = VarRenamer()
+                payload = renamer.rename(payload)
+                payload = beautify(payload)
+                return payload, 'dynamic_harness', 'Inner payload captured via dynamic harness'
+            elif self._is_quality_output(harness_result):
+                self._log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
+                return harness_result, 'lua_harness', 'Symbolic evaluation complete'
         self._log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
         lune_result = run_lune_darklua_pipeline(source)
         if lune_result and looks_like_real_code(lune_result):
