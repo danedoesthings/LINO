@@ -50,6 +50,108 @@ local function capture(val)
     captured[captured_count] = val
 end
 
+local function make_proxy(name)
+    local proxy = {{}}
+    local mt = {{
+        __index = function(t, k)
+            if k == "Parent" then return nil end
+            if k == "PlaceId" then return 1234567890 end
+            if k == "JobId" then return "00000000-0000-0000-0000-000000000000" end
+            if k == "UserId" then return 1 end
+            if k == "Name" then return name end
+            if k == "ClassName" then return name end
+            if k == "Health" then return 100 end
+            if k == "MaxHealth" then return 100 end
+            if k == "WalkSpeed" then return 16 end
+            if k == "JumpPower" then return 50 end
+            if k == "Gravity" then return 196.2 end
+            if k == "Transparency" then return 0 end
+            if k == "Size" then return Vector3.new(1, 1, 1) end
+            if k == "Position" then return Vector3.new(0, 0, 0) end
+            if k == "CFrame" then return CFrame.new() end
+            if k == "Text" then return "" end
+            if k == "Value" then return 0 end
+            if k == "Magnitude" then return 0 end
+            if k == "unit" then return Vector3.new(0, 0, 0) end
+            if k == "X" then return 0 end
+            if k == "Y" then return 0 end
+            if k == "Z" then return 0 end
+            if k == "R" then return 255 end
+            if k == "G" then return 255 end
+            if k == "B" then return 255 end
+            return make_proxy(name .. "." .. tostring(k))
+        end,
+        __newindex = function(t, k, v)
+            if type(v) == "string" and #v > 0 then
+                capture(v)
+            end
+        end,
+        __call = function(t, ...)
+            return make_proxy(name .. "(...)")
+        end,
+        __tostring = function() return name end,
+        __len = function() return 0 end,
+        __add = function() return 0 end,
+        __sub = function() return 0 end,
+        __mul = function() return 0 end,
+        __div = function() return 0 end,
+        __mod = function() return 0 end,
+        __unm = function() return 0 end,
+        __pow = function() return 0 end,
+        __concat = function(a, b) return tostring(a) .. tostring(b) end,
+        __lt = function() return false end,
+        __le = function() return false end,
+        __eq = function() return false end,
+    }}
+    setmetatable(proxy, mt)
+    return proxy
+end
+
+local CFrame = make_proxy("CFrame")
+local Vector3 = make_proxy("Vector3")
+local Vector2 = make_proxy("Vector2")
+local Color3 = make_proxy("Color3")
+local UDim2 = make_proxy("UDim2")
+local Instance = make_proxy("Instance")
+local BrickColor = make_proxy("BrickColor")
+local TweenInfo = make_proxy("TweenInfo")
+local Ray = make_proxy("Ray")
+local Region3 = make_proxy("Region3")
+local NumberRange = make_proxy("NumberRange")
+local NumberSequence = make_proxy("NumberSequence")
+local PhysicalProperties = make_proxy("PhysicalProperties")
+local Enum = setmetatable({{}}, {{
+    __index = function(t, k)
+        return make_proxy("Enum." .. k)
+    end
+}})
+
+local game = make_proxy("game")
+game.PlaceId = 1234567890
+game.JobId = "00000000-0000-0000-0000-000000000000"
+game.GetService = function(self, name)
+    local svc = make_proxy(name)
+    if name == "HttpService" then
+        svc.JSONEncode = function(self, data)
+            local HttpService = game:GetService("HttpService")
+            return HttpService.JSONEncode(data)
+        end
+        svc.JSONDecode = function(self, str)
+            local HttpService = game:GetService("HttpService")
+            return HttpService.JSONDecode(str)
+        end
+    end
+    if name == "Players" then
+        svc.LocalPlayer = make_proxy("LocalPlayer")
+        svc.LocalPlayer.UserId = 1
+        svc.LocalPlayer.Name = "Player"
+    end
+    return svc
+end
+
+local workspace = make_proxy("workspace")
+local script = make_proxy("script")
+
 local old_loadstring = loadstring
 loadstring = function(src, name)
     capture(src)
