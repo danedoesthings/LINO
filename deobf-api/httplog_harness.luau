@@ -1,5 +1,6 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
+local luau = require("@lune/luau")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "captured.lua"
@@ -204,8 +205,23 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local name = type(b) == "string" and b or "=(load)"
-		local fn, load_err = load(src, name, "t", _cenv)
+		local opts = {
+			debugName = type(b) == "string" and b or "=(load)",
+			environment = _cenv,
+			injectGlobals = true,
+		}
+		local fn, load_err = luau.load(src, opts)
+		if not fn then
+			local stripped = src:match("^%s*(.-)%s*$")
+			if stripped:match("^return%s+") then
+				stripped = stripped:gsub("^return%s+", "", 1)
+			elseif stripped:match("^return%(") then
+				stripped = stripped:gsub("^return", "", 1)
+			end
+			if stripped ~= src then
+				fn, load_err = luau.load(stripped, opts)
+			end
+		end
 		return fn, load_err
 	end
 	return nil, "source must be a string"
@@ -288,6 +304,7 @@ _cenv.os = {
 _cenv.require = function(id)
 	if id == "@lune/fs" then return fs end
 	if id == "@lune/process" then return process end
+	if id == "@lune/luau" then return luau end
 	return _spy_make("require." .. tostring(id))
 end
 
@@ -762,9 +779,18 @@ string.char = function(...)
 	return r
 end
 
-local loadable_input = input:gsub("^%s*return%s*", "")
+local loadable_input = input:match("^%s*(.-)%s*$")
+if loadable_input:match("^return%s+") then
+	loadable_input = loadable_input:gsub("^return%s+", "", 1)
+elseif loadable_input:match("^return%(") then
+	loadable_input = loadable_input:gsub("^return", "", 1)
+end
 
-local chunk, err = load(loadable_input, "script", "t", _cenv)
+local chunk, err = luau.load(loadable_input, {
+	debugName = "script",
+	environment = _cenv,
+	injectGlobals = true,
+})
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
