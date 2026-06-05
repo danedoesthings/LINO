@@ -43,117 +43,17 @@ class RobloxCloudExecutor:
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
 
-        capture_part = r"""
-local R = __STRING_TABLE__
-local captured = {}
+        capture_script = f"""
+local args = {{...}}
+local b64_source = args[1] or ""
+local R = {string_table}
+local captured = {{}}
 local captured_count = 0
 
 local function capture(val)
     captured_count = captured_count + 1
     captured[captured_count] = val
 end
-
-local function make_proxy(name)
-    local proxy = {}
-    local mt = {
-        __index = function(t, k)
-            if k == "Parent" then return nil end
-            if k == "PlaceId" then return 1234567890 end
-            if k == "JobId" then return "00000000-0000-0000-0000-000000000000" end
-            if k == "UserId" then return 1 end
-            if k == "Name" then return name end
-            if k == "ClassName" then return name end
-            if k == "Health" then return 100 end
-            if k == "MaxHealth" then return 100 end
-            if k == "WalkSpeed" then return 16 end
-            if k == "JumpPower" then return 50 end
-            if k == "Gravity" then return 196.2 end
-            if k == "Transparency" then return 0 end
-            if k == "Size" then return Vector3.new(1, 1, 1) end
-            if k == "Position" then return Vector3.new(0, 0, 0) end
-            if k == "CFrame" then return CFrame.new() end
-            if k == "Text" then return "" end
-            if k == "Value" then return 0 end
-            if k == "Magnitude" then return 0 end
-            if k == "unit" then return Vector3.new(0, 0, 0) end
-            if k == "X" then return 0 end
-            if k == "Y" then return 0 end
-            if k == "Z" then return 0 end
-            if k == "R" then return 255 end
-            if k == "G" then return 255 end
-            if k == "B" then return 255 end
-            return make_proxy(name .. "." .. tostring(k))
-        end,
-        __newindex = function(t, k, v)
-            if type(v) == "string" and #v > 0 then
-                capture(v)
-            end
-        end,
-        __call = function(t, ...)
-            return make_proxy(name .. "(...)")
-        end,
-        __tostring = function() return name end,
-        __len = function() return 0 end,
-        __add = function() return 0 end,
-        __sub = function() return 0 end,
-        __mul = function() return 0 end,
-        __div = function() return 0 end,
-        __mod = function() return 0 end,
-        __unm = function() return 0 end,
-        __pow = function() return 0 end,
-        __concat = function(a, b) return tostring(a) .. tostring(b) end,
-        __lt = function() return false end,
-        __le = function() return false end,
-        __eq = function() return false end,
-    }
-    setmetatable(proxy, mt)
-    return proxy
-end
-
-local CFrame = make_proxy("CFrame")
-local Vector3 = make_proxy("Vector3")
-local Vector2 = make_proxy("Vector2")
-local Color3 = make_proxy("Color3")
-local UDim2 = make_proxy("UDim2")
-local Instance = make_proxy("Instance")
-local BrickColor = make_proxy("BrickColor")
-local TweenInfo = make_proxy("TweenInfo")
-local Ray = make_proxy("Ray")
-local Region3 = make_proxy("Region3")
-local NumberRange = make_proxy("NumberRange")
-local NumberSequence = make_proxy("NumberSequence")
-local PhysicalProperties = make_proxy("PhysicalProperties")
-local Enum = setmetatable({}, {
-    __index = function(t, k)
-        return make_proxy("Enum." .. k)
-    end
-})
-
-local game = make_proxy("game")
-game.PlaceId = 1234567890
-game.JobId = "00000000-0000-0000-0000-000000000000"
-game.GetService = function(self, name)
-    local svc = make_proxy(name)
-    if name == "HttpService" then
-        svc.JSONEncode = function(self, data)
-            local HttpService = game:GetService("HttpService")
-            return HttpService.JSONEncode(data)
-        end
-        svc.JSONDecode = function(self, str)
-            local HttpService = game:GetService("HttpService")
-            return HttpService.JSONDecode(str)
-        end
-    end
-    if name == "Players" then
-        svc.LocalPlayer = make_proxy("LocalPlayer")
-        svc.LocalPlayer.UserId = 1
-        svc.LocalPlayer.Name = "Player"
-    end
-    return svc
-end
-
-local workspace = make_proxy("workspace")
-local script = make_proxy("script")
 
 local old_loadstring = loadstring
 loadstring = function(src, name)
@@ -162,39 +62,48 @@ loadstring = function(src, name)
     return old_loadstring(src, name)
 end
 
-local old_getfenv = getfenv
-getfenv = function(lvl)
-    local env = old_getfenv(lvl)
-    capture("[getfenv called]")
-    return env
-end
-
 local old_print = print
 print = function(...)
-    local parts = {}
+    local parts = {{}}
     for i = 1, select('#', ...) do
         parts[i] = tostring(select(i, ...))
     end
-    capture(table.concat(parts, "\t"))
+    capture(table.concat(parts, "\\t"))
     old_print(...)
 end
 
-local HttpService = game:GetService("HttpService")
+local function b64_decode(data)
+    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    data = string.gsub(data, '[^'..b..'=]', '')
+    return (data:gsub('.', function(x)
+        if (x == '=') then return '' end
+        local r, f = '', (b:find(x) - 1)
+        for i = 6, 1, -1 do
+            r = r .. (f % 2 ^ i - f % 2 ^ (i - 1) > 0 and '1' or '0')
+        end
+        return r
+    end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+        if (#x < 8) then return '' end
+        local c = 0
+        for i = 1, 8 do
+            c = c + (x:sub(i, i) == '1' and 2 ^ (8 - i) or 0)
+        end
+        return string.char(c)
+    end))
+end
 
-local b64_source = "__ENCODED_SOURCE__"
-local decoded_source = game:GetService("HttpService"):JSONDecode(b64_source)
-if not decoded_source then
-    local b64 = {}
-    for i = 1, #b64_source do
-        b64[i] = string.byte(b64_source, i)
-    end
-    decoded_source = game:GetService("HttpService"):JSONDecode(string.char(unpack(b64)))
+local decoded_source = b64_decode(b64_source)
+if decoded_source == "" then
+    capture("[Error: base64 decode failed]")
+    local HttpService = game:GetService("HttpService")
+    return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 end
 
 local obfuscated_chunk, err = loadstring(decoded_source, "obfuscated")
 if not obfuscated_chunk then
     capture("[Error loading obfuscated: " .. tostring(err) .. "]")
-    return HttpService:JSONEncode({captured = captured, count = captured_count})
+    local HttpService = game:GetService("HttpService")
+    return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 end
 
 setfenv(obfuscated_chunk, getfenv())
@@ -208,18 +117,17 @@ else
     capture("[Error: " .. tostring(result) .. "]")
 end
 
-return HttpService:JSONEncode({captured = captured, count = captured_count})
+local HttpService = game:GetService("HttpService")
+return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 """
-        capture_part = capture_part.replace('__STRING_TABLE__', string_table)
-        capture_part = capture_part.replace('__ENCODED_SOURCE__', encoded_source)
 
         headers = {
             "x-api-key": self.api_key,
             "Content-Type": "application/json"
         }
         payload = {
-            "script": capture_part,
-            "arguments": []
+            "script": capture_script,
+            "arguments": [encoded_source]
         }
         import httpx
         create_url = f"https://apis.roblox.com/cloud/v2/universes/{self.universe_id}/places/{self.place_id}/luau-execution-session-tasks"
