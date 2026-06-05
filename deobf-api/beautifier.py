@@ -1,5 +1,4 @@
 import re
-
 _OPENERS = frozenset(['then', 'do', 'else', 'elseif', 'repeat'])
 _CLOSERS = frozenset(['end', 'else', 'elseif', 'until'])
 _FUNC_PAT = re.compile(r'\bfunction\b')
@@ -28,7 +27,7 @@ def beautify(code: str) -> str:
     shielded_code = re.sub(r'[ \t]{2,}', ' ', shielded_code)
     shielded_code = re.sub(r'(?<![=~<>!])=(?!=)', ' = ', shielded_code)
     shielded_code = re.sub(r'(?<![<>])([<>])(?!=)', r' \1 ', shielded_code)
-    shielded_code = re.sub(r'(?<![.]).\.(?!.)', ' .. ', shielded_code)
+    shielded_code = re.sub(r'(?<!\.)\.\.(?!\.)', ' .. ', shielded_code)
     shielded_code = re.sub(r'\s*,\s*', ', ', shielded_code)
     shielded_code = re.sub(r'\(\s+', '(', shielded_code)
     shielded_code = re.sub(r'\s+\)', ')', shielded_code)
@@ -47,7 +46,7 @@ def beautify(code: str) -> str:
         first = (line.split() or [''])[0].rstrip('(').rstrip('{')
         if first in _CLOSERS and not (first in _OPENERS and closes_inline == opens_inline):
             depth = max(0, depth - 1)
-        indented_lines.append('  ' * depth + line)
+        indented_lines.append(' ' * depth + line)
         if first in ('else', 'elseif'):
             delta = opens_inline - closes_inline
             if delta > 0:
