@@ -787,15 +787,7 @@ string.char = function(...)
 	return r
 end
 
-local loadable_input = input
-local ret_pos = loadable_input:find("return")
-if ret_pos then
-	local after_ret = loadable_input:sub(ret_pos + 6)
-	local paren_pos = after_ret:find("%(")
-	if paren_pos then
-		loadable_input = after_ret:sub(paren_pos)
-	end
-end
+local loadable_input = input:gsub("^%s*return%s*", "", 1)
 
 local chunk, err = luau.load(loadable_input, {
 	debugName = "script",
