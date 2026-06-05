@@ -13,6 +13,7 @@ from lua_harness import LuaHarness
 from lune_pipeline import run_lune_darklua_pipeline
 from constants import looks_like_real_code, is_lua_bytecode, LUA_KEYWORDS, is_probably_text
 from instruction_decoder import WeAreDevsVMLifter
+from symbolic_state_tracer import SymbolicStateTracer
 try:
     from luaparser import ast as lua_ast
     HAS_LUAPARSER = True
@@ -132,8 +133,20 @@ class Unveiler:
         vm_score = self._calculate_vm_score(source)
         self._log('vm_detect', True, f'VM score: {vm_score}')
         if vm_score >= 10:
+            self._log('devirtualise', True, 'attempting symbolic state machine tracing')
+            tracer = SymbolicStateTracer(source, decoder.strings, offset=decoder.offset)
+            traced = tracer.trace()
+            if traced and self._is_valid_lua(traced):
+                self._log('devirtualise_success', True, 'symbolic state trace produced valid Lua')
+                renamer = VarRenamer()
+                traced = renamer.rename(traced)
+                traced = beautify(traced)
+                self._depth -= 1
+                return traced, 'symbolic_trace', 'Symbolic state machine execution complete'
+            elif traced and len(traced) > 100:
+                self._log('devirtualise_partial', True, f'symbolic trace produced {len(traced)} chars')
             self._log('harness', True, 'VM detected, attempting dynamic harness execution')
-            harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
+            harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
             if harness_result and len(harness_result) > 100:
                 payload = self._extract_payload_from_harness_output(harness_result)
                 if payload:
@@ -189,7 +202,7 @@ class Unveiler:
                 self._depth -= 1
                 return lifted, 'vm_lifted', 'VM successfully lifted to structured code'
         self._log('harness', True, 'attempting static symbolic evaluation')
-        harness_result = self.harness.run(source, timeout=30, decoded_strings=decoder.strings)
+        harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
         if harness_result and len(harness_result) > 100:
             payload = self._extract_payload_from_harness_output(harness_result)
             if payload:
