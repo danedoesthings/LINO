@@ -208,8 +208,7 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local opts = (type(b) == "string") and {debugName = b} or nil
-		local fn, err = load(src, opts)
+		local fn, err = load(src, b)
 		if fn then
 			setfenv(fn, _cenv)
 		end
@@ -704,7 +703,9 @@ _cenv.debug = {
 	setmetatable = function(t, m) return setmetatable(t, m) end,
 	profilebegin = function() end,
 	profileend = function() end,
-	traceback = function() return "mock traceback" end,
+	traceback = function(msg, level)
+		return "[string \"chunk\"]:1: in function <chunk:1>"
+	end,
 	sethook = function() end,
 	gethook = function() return nil, "", 0 end,
 	getlocal = function() return nil end,
