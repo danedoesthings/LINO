@@ -5,7 +5,8 @@ from math_fold import safe_eval_int, fold_constants, get_string_table_offset
 
 
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
-    for tbl_m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{300,})\}', source):
+    folded = fold_constants(source)
+    for tbl_m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]{300,})\}', folded):
         body = tbl_m.group(1)
         entries: dict[str, int] = {}
         for m in re.finditer(r'\b([A-Za-z_])\s*=\s*([-\d+*()\s]{3,60}?)(?=[,;\}]|\Z)', body):
@@ -32,7 +33,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
         alphabet = ''.join(rev.get(i, '') for i in range(64))
         if len(alphabet) == 64 and len(set(alphabet)) == 64:
             return alphabet
-    for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', source):
+    for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', folded):
         cand = m.group(1)
         if len(set(cand)) == 64:
             return cand
@@ -41,7 +42,8 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
 
 def _extract_shuffle_ops(source: str) -> list[tuple[int, int]]:
     ops: list[tuple[int, int]] = []
-    m = re.search(r'ipairs\s*\(\s*\{(.*?)\}\s*\)', source, re.DOTALL)
+    folded = fold_constants(source)
+    m = re.search(r'ipairs\s*\(\s*\{(.*?)\}\s*\)', folded, re.DOTALL)
     if not m:
         return ops
     inner = m.group(1)
@@ -131,6 +133,8 @@ class StringTableDecoder:
                 self.diagnostics['raw_count'] = len(raw)
                 self.diagnostics['decoded_count'] = len(self.strings)
                 self.diagnostics['note'] = 'alphabet not found, used raw strings'
+                self.offset = get_string_table_offset(self.source)
+                self.diagnostics['offset'] = self.offset
                 return
             self.diagnostics['error'] = 'alphabet not found and no raw strings'
             return
@@ -161,9 +165,16 @@ class StringTableDecoder:
     @staticmethod
     def _extract_keyed_strings(source: str) -> Optional[list[str]]:
         m = _KEYED_TABLE_PATTERN.search(source)
-        if m:
-            return re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-        return None
+        if not m:
+            return None
+        body = m.group(1)
+        entries: dict[int, str] = {}
+        for km in re.finditer(r'\[(\d+)\]\s*=\s*"((?:[^"\\]|\\.)*)"', body):
+            entries[int(km.group(1))] = km.group(2)
+        if not entries:
+            return None
+        max_key = max(entries.keys())
+        return [entries.get(i, '') for i in range(1, max_key + 1)]
 
     def _decode_entry(self, s: str) -> str:
         if not s:
