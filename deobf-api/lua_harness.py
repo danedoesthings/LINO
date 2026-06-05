@@ -19,7 +19,7 @@ class LuaHarness:
         self.unluac_path = unluac_path
         self.available = shutil.which('lune') is not None
 
-    def run(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
+    def run(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
@@ -94,7 +94,7 @@ class LuaHarness:
             parts[i] = ('code', text)
         return ''.join(t for _, t in parts)
 
-    def _run_symbolic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
+    def _run_symbolic(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
         strings_path = os.path.join(tmpdir, "strings.lua")
@@ -143,7 +143,7 @@ class LuaHarness:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _run_dynamic(self, source: str, timeout: int = 30, decoded_strings: list = None) -> Optional[str]:
+    def _run_dynamic(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
         input_path = os.path.join(tmpdir, "input.lua")
         strings_path = os.path.join(tmpdir, "strings.lua")
