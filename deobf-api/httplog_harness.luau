@@ -1,5 +1,6 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
+local luau = require("@lune/luau")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "captured.lua"
@@ -196,22 +197,19 @@ end
 
 _cenv.xpcall = xpcall or function(f, errh, ...) return pcall(f, ...) end
 _cenv.getfenv = function(lvl)
-	if lvl then return getfenv(lvl) end
 	return _cenv
 end
 _cenv.setfenv = function(f, e)
-	if type(f) == "function" and type(e) == "table" then
-		setfenv(f, e)
-	end
 	return f
 end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local fn, err = load(src, b)
-		if fn then
-			setfenv(fn, _cenv)
-		end
+		local fn, err = luau.load(src, {
+			debugName = type(b) == "string" and b or "=(load)",
+			environment = _cenv,
+			injectGlobals = false,
+		})
 		return fn, err
 	end
 	return nil, "source must be a string"
@@ -294,6 +292,7 @@ _cenv.os = {
 _cenv.require = function(id)
 	if id == "@lune/fs" then return fs end
 	if id == "@lune/process" then return process end
+	if id == "@lune/luau" then return luau end
 	return _spy_make("require." .. tostring(id))
 end
 
@@ -768,13 +767,15 @@ string.char = function(...)
 	return r
 end
 
-local chunk, err = load(input)
+local chunk, err = luau.load(input, {
+	debugName = "script",
+	environment = _cenv,
+	injectGlobals = false,
+})
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
 end
-
-setfenv(chunk, _cenv)
 
 local INSTRUCTION_LIMIT = 500000
 local instruction_count = 0
