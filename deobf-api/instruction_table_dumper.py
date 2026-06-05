@@ -1,6 +1,7 @@
 import re
 import json
 from typing import Optional, List
+from math_fold import safe_eval_int, fold_constants
 
 class InstructionTableDumper:
     def __init__(self, source: str, decoded_strings: List[str]):
@@ -19,38 +20,36 @@ class InstructionTableDumper:
                 results.append(f"\t[{i + 1}] = {escaped},")
         results.append("}")
         results.append("")
+        getter_name, offset_const = self._detect_getter(self.source)
+        if getter_name and offset_const:
+            results.append(f"-- Detected getter: {getter_name}(N + {offset_const})")
+            results.append("")
+            reconstructed = self._reconstruct_source(getter_name, offset_const)
+            if reconstructed:
+                results.append("-- SOURCE RECONSTRUCTION (getter calls resolved)")
+                results.append("")
+                results.append(reconstructed)
+                return "\n".join(results)
         results.append("-- SOURCE RECONSTRUCTION")
         results.append("")
-        reconstructed = self._reconstruct_source()
-        if reconstructed:
-            results.append(reconstructed)
-        else:
-            results.append("-- Could not reconstruct source from decoded strings")
-            results.append("-- Strings found in source context:")
-            results.append("")
-            results.extend(self._find_string_context())
-            results.append("")
-            results.append("-- Possible payload reconstruction:")
-            results.append("")
-            results.extend(self._analyze_strings())
+        results.append("-- Could not reconstruct source from decoded strings")
+        results.append("-- Strings found in source context:")
+        results.append("")
+        results.extend(self._find_string_context())
+        results.append("")
+        results.append("-- Possible payload reconstruction:")
+        results.append("")
+        results.extend(self._analyze_strings())
         return "\n".join(results)
 
-    def _reconstruct_source(self) -> Optional[str]:
+    def _reconstruct_source(self, getter_name: str, offset_const: int) -> Optional[str]:
         source = self.source
-        source = self._strip_bootstrap(source)
-        getter_name, offset_const = self._detect_getter(source)
-        if not getter_name:
-            return None
-        for i, s in enumerate(self.strings):
-            if s:
-                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                source = source.replace(f'R[{i + 1}]', f'"{escaped}"')
         replaced = 0
         def repl(m):
             nonlocal replaced
             try:
                 expr = m.group(1).strip()
-                n = self._eval_arithmetic(expr)
+                n = safe_eval_int(expr)
                 if n is None:
                     return m.group(0)
                 idx = n + offset_const
@@ -58,51 +57,17 @@ class InstructionTableDumper:
                     s = self.strings[idx - 1]
                     if s:
                         replaced += 1
-                        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-                        return f'"{escaped}"'
+                        escaped = json.dumps(s)
+                        return escaped
             except:
                 pass
             return m.group(0)
-        source = re.sub(rf'{getter_name}\s*\(\s*([^)]+?)\s*\)', repl, source)
-        if replaced > 0 and f'{getter_name}(' not in source:
-            source = self._strip_string_table(source)
-            source = re.sub(r'local\s+function\s+' + getter_name + r'\s*\([^)]*\)\s*return\s+R\s*\[[^\]]+\]\s*end', ' ', source)
+        source = re.sub(rf'{re.escape(getter_name)}\s*\(\s*([^)]+?)\s*\)', repl, source)
+        if replaced > 0:
             return source
         return None
 
-    def _eval_arithmetic(self, expr: str) -> Optional[int]:
-        try:
-            cleaned = expr.replace(' ', '').replace('\t', '').replace('\n', '')
-            return self._simple_eval(cleaned)
-        except:
-            return None
-
-    def _simple_eval(self, expr: str) -> int:
-        expr = expr.strip()
-        while '(' in expr:
-            expr = re.sub(r'\(([^()]+)\)', lambda m: str(self._eval_simple_expr(m.group(1))), expr)
-        return self._eval_simple_expr(expr)
-
-    def _eval_simple_expr(self, expr: str) -> int:
-        expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
-        tokens = re.findall(r'[+\-]?\d+', expr)
-        if tokens:
-            return sum(int(t) for t in tokens)
-        return 0
-
-    def _strip_bootstrap(self, code: str) -> str:
-        markers = ['return(function(R,M,Y,r,m,N,h,d,o,l,q,I,w,g', 'return(function(']
-        for marker in markers:
-            pos = code.find(marker)
-            if pos != -1:
-                return code[pos:]
-        return code
-
-    def _strip_string_table(self, code: str) -> str:
-        return re.sub(r'local\s+R\s*=\s*\{[^}]*\}', '', code, flags=re.DOTALL)
-
     def _detect_getter(self, source: str):
-        from math_fold import fold_constants
         folded = fold_constants(source)
         m = re.search(r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?(-?\d+)\)?\s*\]', folded)
         if m:
@@ -139,14 +104,22 @@ class InstructionTableDumper:
         lines = []
         known = ['print', 'pcall', 'tostring', 'tonumber', 'error', 'math', 'table', 'string',
                  'floor', 'char', 'concat', 'gsub', 'byte', 'len', 'gmatch',
-                 'unpack', 'select', 'type', 'assert', 'require', 'loadstring', 'load']
+                 'unpack', 'select', 'type', 'assert', 'require', 'loadstring', 'load',
+                 'setmetatable', 'getmetatable', 'newproxy', 'getfenv', 'setfenv']
         functions = [s for s in self.strings if s in known]
-        others = [s for s in self.strings if s and s not in known and len(s) > 1]
+        others = [s for s in self.strings if s and s not in known and len(s) > 1 and not s.startswith('__')]
+        payload_hints = [s for s in others if any(kw in s.lower() for kw in ['http', 'require', 'load', 'game', 'print', 'get', 'set', 'fire', 'hook', 'chat', 'player', 'gui', 'teleport'])]
         lines.append("-- Likely function calls:")
         for f in functions:
             lines.append(f"-- {f}(...)")
+        if payload_hints:
+            lines.append("")
+            lines.append("-- Possible payload-related strings:")
+            for s in payload_hints:
+                lines.append(f"-- {json.dumps(s)}")
         lines.append("")
         lines.append("-- Other decoded strings:")
         for s in others:
-            lines.append(f"-- {json.dumps(s)}")
+            if s not in payload_hints:
+                lines.append(f"-- {json.dumps(s)}")
         return lines
