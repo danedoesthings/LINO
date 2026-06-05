@@ -1,6 +1,5 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
-local luau = require("@lune/luau")
 
 local targetFile = process.args[1]
 local outFile = process.args[2] or "captured.lua"
@@ -205,19 +204,9 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local opts = {
-			debugName = type(b) == "string" and b or "=(load)",
-			environment = _cenv,
-			injectGlobals = false,
-		}
-		local fn, err = luau.load(src, opts)
-		if not fn then
-			local stripped = src:gsub("^%s*return%s*", "")
-			if stripped ~= src then
-				fn, err = luau.load(stripped, opts)
-			end
-		end
-		return fn, err
+		local name = type(b) == "string" and b or "=(load)"
+		local fn, load_err = load(src, name, "t", _cenv)
+		return fn, load_err
 	end
 	return nil, "source must be a string"
 end
@@ -299,7 +288,6 @@ _cenv.os = {
 _cenv.require = function(id)
 	if id == "@lune/fs" then return fs end
 	if id == "@lune/process" then return process end
-	if id == "@lune/luau" then return luau end
 	return _spy_make("require." .. tostring(id))
 end
 
@@ -776,11 +764,7 @@ end
 
 local loadable_input = input:gsub("^%s*return%s*", "")
 
-local chunk, err = luau.load(loadable_input, {
-	debugName = "script",
-	environment = _cenv,
-	injectGlobals = false,
-})
+local chunk, err = load(loadable_input, "script", "t", _cenv)
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
