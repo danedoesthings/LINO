@@ -381,7 +381,5 @@ async def keep_alive():
             pass
         await asyncio.sleep(60)
 
-bot.loop.create_task(keep_alive())
-
 if __name__ == '__main__':
     bot.run(TOKEN)
