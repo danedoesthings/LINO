@@ -113,4 +113,4 @@ class SymbolicExecutor:
         return str(arg)
 
     def emit_lua(self):
-        return self.emitter.emit(self.ast_nodes)
+        return self.emitter.emit_ast(self.ast_nodes)
