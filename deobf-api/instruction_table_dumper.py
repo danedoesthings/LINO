@@ -124,4 +124,29 @@ class InstructionTableDumper:
         lines, seen = [], set()
         for pattern in ['E(', 'l1(', 'l2(', 'GetStr(', 'R[', 'EncStr']:
             for m in re.finditer(re.escape(pattern), self.source):
-                start, end = max(0, m.start() -
+                start, end = max(0, m.start() - 40), min(len(self.source), m.end() + 80)
+                ctx = self.source[start:end].replace('\n', ' ').strip()
+                if ctx not in seen:
+                    seen.add(ctx)
+                    lines.append(f"-- {ctx}")
+                if len(lines) >= 15:
+                    break
+            if lines:
+                break
+        return lines
+
+    def _analyze_strings(self) -> List[str]:
+        lines = []
+        known = ['print', 'pcall', 'tostring', 'tonumber', 'error', 'math', 'table', 'string',
+                 'floor', 'char', 'concat', 'gsub', 'byte', 'len', 'gmatch',
+                 'unpack', 'select', 'type', 'assert', 'require', 'loadstring', 'load']
+        functions = [s for s in self.strings if s in known]
+        others = [s for s in self.strings if s and s not in known and len(s) > 1]
+        lines.append("-- Likely function calls:")
+        for f in functions:
+            lines.append(f"-- {f}(...)")
+        lines.append("")
+        lines.append("-- Other decoded strings:")
+        for s in others:
+            lines.append(f"-- {json.dumps(s)}")
+        return lines
