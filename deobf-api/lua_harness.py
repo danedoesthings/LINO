@@ -31,9 +31,7 @@ class RobloxCloudExecutor:
     async def execute(self, obfuscated_source: str, decoded_strings: list = None, timeout: int = 120):
         if not self.available:
             return None
-
         encoded_source = base64.b64encode(obfuscated_source.encode('utf-8', errors='replace')).decode('ascii')
-
         string_table = "{}"
         if decoded_strings:
             entries = []
@@ -42,19 +40,16 @@ class RobloxCloudExecutor:
                     escaped = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
-
         capture_script = f"""
 local args = {{...}}
 local b64_source = args[1] or ""
 local R = {string_table}
 local captured = {{}}
 local captured_count = 0
-
 local function capture(val)
     captured_count = captured_count + 1
     captured[captured_count] = val
 end
-
 local old_loadstring = rawget(_G, "loadstring") or function(s, n)
     return nil, "loadstring unavailable"
 end
@@ -63,7 +58,6 @@ loadstring = function(src, name)
     capture("[Payload: " .. #src .. " bytes]")
     return old_loadstring(src, name)
 end
-
 local old_print = print
 print = function(...)
     local parts = {{}}
@@ -73,7 +67,6 @@ print = function(...)
     capture(table.concat(parts, "\\t"))
     old_print(...)
 end
-
 local function b64_decode(data)
     local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
     data = string.gsub(data, '[^'..b..'=]', '')
@@ -93,21 +86,18 @@ local function b64_decode(data)
         return string.char(c)
     end))
 end
-
 local decoded_source = b64_decode(b64_source)
 if decoded_source == "" then
     capture("[Error: base64 decode failed]")
     local HttpService = game:GetService("HttpService")
     return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 end
-
 local obfuscated_chunk, err = old_loadstring(decoded_source, "obfuscated")
 if not obfuscated_chunk then
     capture("[Error loading obfuscated: " .. tostring(err) .. "]")
     local HttpService = game:GetService("HttpService")
     return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 end
-
 setfenv(obfuscated_chunk, getfenv())
 local success, result = pcall(obfuscated_chunk)
 if success then
@@ -118,19 +108,11 @@ if success then
 else
     capture("[Error: " .. tostring(result) .. "]")
 end
-
 local HttpService = game:GetService("HttpService")
 return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 """
-
-        headers = {
-            "x-api-key": self.api_key,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "script": capture_script,
-            "arguments": [encoded_source]
-        }
+        headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
+        payload = {"script": capture_script, "arguments": [encoded_source]}
         import httpx
         create_url = f"https://apis.roblox.com/cloud/v2/universes/{self.universe_id}/places/{self.place_id}/luau-execution-session-tasks"
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -163,6 +145,8 @@ return HttpService:JSONEncode({{captured = captured, count = captured_count}})
             except Exception as e:
                 return {"error": str(e)}
 
+from roblox_env.emulator import RobloxEmulator
+
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
         self.unluac_path = unluac_path
@@ -176,6 +160,9 @@ class LuaHarness:
         if not self.available:
             return None
         if self._is_wearedevs_vm(source):
+            emu_result = self._run_emulator(source, decoded_strings)
+            if emu_result and len(emu_result) > 100:
+                return emu_result
             if self.roblox.available:
                 result = self._run_roblox_cloud(source, timeout, decoded_strings)
                 if result and len(result) > 100:
@@ -213,6 +200,16 @@ class LuaHarness:
             if indicator in output:
                 return True
         return octal_count > 20
+
+    def _run_emulator(self, source: str, decoded_strings: list = None) -> Optional[str]:
+        try:
+            emu = RobloxEmulator(decoded_strings)
+            result = emu.execute(source)
+            if result and len(result) > 50:
+                return result
+            return None
+        except Exception:
+            return None
 
     def _patch_source_for_expression_hooks(self, source: str) -> str:
         spans = []
@@ -327,11 +324,7 @@ class LuaHarness:
                 args.append(strings_path)
             else:
                 args.append("")
-            proc = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                start_new_session=True
-            )
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
             try:
                 _, stderr_data = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -406,11 +399,7 @@ class LuaHarness:
                 args.append(strings_path)
             else:
                 args.append("")
-            proc = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                start_new_session=True
-            )
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
             try:
                 _, stderr_data = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -440,11 +429,4 @@ class LuaHarness:
 
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
         captured = self.run(source, timeout)
-        return {
-            'captured': captured,
-            'trace': '',
-            'error': None,
-            'stdout': '',
-            'stderr': '',
-            'timed_out': False,
-        }
+        return {'captured': captured, 'trace': '', 'error': None, 'stdout': '', 'stderr': '', 'timed_out': False}
