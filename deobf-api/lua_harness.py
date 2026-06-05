@@ -145,8 +145,6 @@ return HttpService:JSONEncode({{captured = captured, count = captured_count}})
             except Exception as e:
                 return {"error": str(e)}
 
-from roblox_env.emulator import RobloxEmulator
-
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
         self.unluac_path = unluac_path
@@ -201,16 +199,6 @@ class LuaHarness:
                 return True
         return octal_count > 20
 
-    def _run_emulator(self, source: str, decoded_strings: list = None) -> Optional[str]:
-        try:
-            emu = RobloxEmulator(decoded_strings)
-            result = emu.execute(source)
-            if result and len(result) > 50:
-                return result
-            return None
-        except Exception:
-            return None
-
     def _patch_source_for_expression_hooks(self, source: str) -> str:
         spans = []
         for m in _STR_COMMENT.finditer(source):
@@ -247,6 +235,17 @@ class LuaHarness:
                 text = re.sub(pattern, repl, text)
             parts[i] = ('code', text)
         return ''.join(t for _, t in parts)
+
+    def _run_emulator(self, source: str, decoded_strings: list = None) -> Optional[str]:
+        try:
+            from roblox_env.emulator import RobloxEmulator
+            emu = RobloxEmulator(decoded_strings)
+            result = emu.execute(source)
+            if result and len(result) > 50:
+                return result
+        except Exception:
+            pass
+        return None
 
     def _run_symbolic(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         tmpdir = tempfile.mkdtemp()
@@ -324,7 +323,11 @@ class LuaHarness:
                 args.append(strings_path)
             else:
                 args.append("")
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True
+            )
             try:
                 _, stderr_data = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -399,7 +402,11 @@ class LuaHarness:
                 args.append(strings_path)
             else:
                 args.append("")
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True
+            )
             try:
                 _, stderr_data = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -429,4 +436,11 @@ class LuaHarness:
 
     def run_with_trace(self, source: str, timeout: int = 30) -> dict:
         captured = self.run(source, timeout)
-        return {'captured': captured, 'trace': '', 'error': None, 'stdout': '', 'stderr': '', 'timed_out': False}
+        return {
+            'captured': captured,
+            'trace': '',
+            'error': None,
+            'stdout': '',
+            'stderr': '',
+            'timed_out': False,
+        }
