@@ -189,8 +189,13 @@ _cenv._log_call = function(func_name, ...)
 	return ...
 end
 
+local native_loadstring = loadstring
+local native_pcall = pcall
+local native_xpcall = xpcall
+local native_tostring = tostring
+
 _cenv.pcall = function(fn, ...)
-	local results = {pcall(fn, ...)}
+	local results = {native_pcall(fn, ...)}
 	if not results[1] then
 		local err = results[2]
 		local trace = debug.traceback("", 2)
@@ -200,7 +205,7 @@ _cenv.pcall = function(fn, ...)
 	return _unpack(results)
 end
 
-_cenv.xpcall = xpcall or function(f, errh, ...) return pcall(f, ...) end
+_cenv.xpcall = native_xpcall or function(f, errh, ...) return native_pcall(f, ...) end
 _cenv.getfenv = function(lvl)
 	return _cenv
 end
@@ -217,12 +222,12 @@ _cenv.loadstring = function(src, b)
 			injectGlobals = true,
 		})
 		if fn then
-			local ok, result = pcall(fn)
+			local ok, result = native_pcall(fn)
 			if ok and type(result) == "string" and #result > 10 then
 				_25ms(result)
 				_25ms("[Payload returned: " .. #result .. " bytes]")
 			elseif ok and type(result) == "function" then
-				local ok2, result2 = pcall(result)
+				local ok2, result2 = native_pcall(result)
 				if ok2 and type(result2) == "string" and #result2 > 10 then
 					_25ms(result2)
 					_25ms("[Payload returned: " .. #result2 .. " bytes]")
@@ -230,11 +235,28 @@ _cenv.loadstring = function(src, b)
 			end
 			return fn
 		end
-		return function() end, nil
+		return nil, err
 	end
 	return nil, "source must be a string"
 end
 _cenv.load = _cenv.loadstring
+
+local hooked_functions = {
+	[_cenv.loadstring] = "function: builtin#loadstring",
+	[_cenv.load] = "function: builtin#load",
+	[_cenv.pcall] = "function: builtin#pcall",
+	[_cenv.xpcall] = "function: builtin#xpcall",
+	[_cenv.getfenv] = "function: builtin#getfenv",
+	[_cenv.setfenv] = "function: builtin#setfenv",
+	[_cenv.newproxy] = "function: builtin#newproxy",
+}
+
+_cenv.tostring = function(value)
+	if hooked_functions[value] then
+		return hooked_functions[value]
+	end
+	return native_tostring(value)
+end
 
 _cenv.select = select or function(n, ...)
 	if n == "#" then return select("#", ...) end
@@ -279,13 +301,13 @@ _cenv.coroutine = coroutine or {
 	create = function(f) return { __func = f } end,
 	resume = function(co, ...)
 		if type(co) == "table" and co.__func then
-			return pcall(co.__func, ...)
+			return native_pcall(co.__func, ...)
 		end
-		return pcall(co, ...)
+		return native_pcall(co, ...)
 	end,
 	wrap = function(f)
 		return function(...)
-			return pcall(f, ...)
+			return native_pcall(f, ...)
 		end
 	end,
 	yield = function() end,
@@ -361,14 +383,14 @@ _cenv.Buffer = _spy_make("Buffer")
 
 _cenv.task = {
 	wait = function() return 1 end,
-	spawn = function(f) pcall(f) end,
-	defer = function(f) pcall(f) end,
-	delay = function(t, f) pcall(f) end,
+	spawn = function(f) native_pcall(f) end,
+	defer = function(f) native_pcall(f) end,
+	delay = function(t, f) native_pcall(f) end,
 	cancel = function() end,
 }
 _cenv.wait = function() return 1 end
-_cenv.spawn = function(f) pcall(f) end
-_cenv.delay = function(t, f) pcall(f) end
+_cenv.spawn = function(f) native_pcall(f) end
+_cenv.delay = function(t, f) native_pcall(f) end
 _cenv.tick = function() return 0 end
 _cenv.time = function() return 0 end
 _cenv.elapsedTime = function() return 0 end
@@ -797,14 +819,12 @@ local chunk, err = luau.load(loadable_input, {
 if err then
 	fs.writeFile(outFile, "-- [ERROR] Compile: " .. err)
 	return
-end
-
-local success, result = pcall(chunk)
+endlocal success, result = native_pcall(chunk)
 
 if not success then
 	c = c + 1
 	local trace = debug.traceback("", 2)
-	r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace
+	r[c] = "[Error] " .. native_tostring(result) .. "\n[Trace] " .. trace
 end
 
 local output_lines = {}
@@ -822,9 +842,9 @@ end
 
 local output
 if #output_lines == 0 and #r == 0 then
-	output = "[Harness] No output captured. success=" .. tostring(success) .. " result_type=" .. type(result)
+	output = "[Harness] No output captured. success=" .. native_tostring(success) .. " result_type=" .. type(result)
 	if result ~= nil then
-		local preview = tostring(result):sub(1, 500)
+		local preview = native_tostring(result):sub(1, 500)
 		output = output .. " result_preview=" .. preview
 	end
 else
