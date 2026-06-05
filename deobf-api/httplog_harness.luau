@@ -30,6 +30,11 @@ local function _25ms(var)
 	if type(var) == "string" then
 		c = c + 1
 		r[c] = var
+		local f = io.open(outFile, "a")
+		if f then
+			f:write(var .. "\n")
+			f:close()
+		end
 	end
 	return var
 end
@@ -223,12 +228,8 @@ _cenv.loadstring = function(src, b)
 					_25ms("[Payload returned: " .. #result2 .. " bytes]")
 				end
 			end
-			local output = table.concat(r, "\n")
-			fs.writeFile(outFile, output)
 			return fn
 		end
-		local output = table.concat(r, "\n")
-		fs.writeFile(outFile, output)
 		return function() end, nil
 	end
 	return nil, "source must be a string"
@@ -806,24 +807,17 @@ if err then
 	return
 end
 
-local instruction_count = 0
-local hook_active = false
-
 local success, result = pcall(chunk)
 
 if not success then
 	c = c + 1
 	local trace = debug.traceback("", 2)
-	r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace .. "\n[Harness] executed " .. instruction_count .. " instructions before failure"
+	r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace
 end
 
 local output_lines = {}
 for _, line in ipairs(_captured_lines) do
 	output_lines[#output_lines + 1] = line
-end
-
-if success then
-	_25ms("[Harness] executed " .. instruction_count .. " instructions")
 end
 
 if #_captured_lines > 0 and #r > 0 then
@@ -841,7 +835,6 @@ if #output_lines == 0 and #r == 0 then
 		local preview = tostring(result):sub(1, 500)
 		output = output .. " result_preview=" .. preview
 	end
-	output = output .. " instructions=" .. instruction_count
 else
 	output = table.concat(output_lines, "\n")
 end
