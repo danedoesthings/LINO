@@ -206,6 +206,8 @@ _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
 		_25ms("[Payload captured: " .. #src .. " bytes]")
+		local output = table.concat(r, "\n")
+		fs.writeFile(outFile, output)
 		return function() end, nil
 	end
 	return nil, "source must be a string"
@@ -806,27 +808,6 @@ if not success then
 	c = c + 1
 	local trace = debug.traceback("", 2)
 	r[c] = "[Error] " .. tostring(result) .. "\n[Trace] " .. trace .. "\n[Harness] executed " .. instruction_count .. " instructions before failure"
-else
-	if type(result) == "string" and #result > 10 then
-		_25ms(result)
-	elseif type(result) == "function" then
-		local ok2, result2 = pcall(result)
-		if ok2 and type(result2) == "string" and #result2 > 10 then
-			_25ms(result2)
-		elseif ok2 and type(result2) == "table" then
-			for _, v in pairs(result2) do
-				if type(v) == "string" and #v > 10 then
-					_25ms(v)
-				end
-			end
-		end
-	elseif type(result) == "table" then
-		for _, v in pairs(result) do
-			if type(v) == "string" and #v > 10 then
-				_25ms(v)
-			end
-		end
-	end
 end
 
 local output_lines = {}
