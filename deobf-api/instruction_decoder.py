@@ -76,18 +76,18 @@ class WeAreDevsVMLifter:
         return re.sub(pattern, repl, source)
 
     def _detect_getter(self, source):
+        from math_fold import fold_constants
+        folded = fold_constants(source)
         patterns = [
-            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?(-?\d+(?:[+\-]\d+)*)\)?\s*\]',
-            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?([^)]+)\)?\s*\]',
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?(-?\d+)\)?\s*\]',
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*(-?\d+)\s*\]',
         ]
         for p in patterns:
-            m = re.search(p, source)
+            m = re.search(p, folded)
             if m:
                 name = m.group(1)
-                offset_str = m.group(2)
-                offset = safe_eval_int(offset_str)
-                if offset is not None:
-                    return name, offset
+                offset = int(m.group(2))
+                return name, offset
         return None, 0
 
     def _resolve_inline_instruction_pairs(self, source):
