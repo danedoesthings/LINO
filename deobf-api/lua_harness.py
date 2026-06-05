@@ -30,18 +30,19 @@ class RobloxCloudExecutor:
     async def execute(self, obfuscated_source: str, decoded_strings: list = None, timeout: int = 120):
         if not self.available:
             return None
+
         string_table = "{}"
         if decoded_strings:
             entries = []
             for i, s in enumerate(decoded_strings):
                 if s:
-                    escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                    escaped = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
-        escaped_source = obfuscated_source.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-        extract_script = r"""
-local R = __STRING_TABLE__
-local captured = {}
+
+        capture_part = f"""
+local R = {string_table}
+local captured = {{}}
 local captured_count = 0
 
 local function capture(val)
@@ -65,39 +66,43 @@ end
 
 local old_print = print
 print = function(...)
-    local parts = {}
+    local parts = {{}}
     for i = 1, select('#', ...) do
         parts[i] = tostring(select(i, ...))
     end
-    capture(table.concat(parts, "\t"))
+    capture(table.concat(parts, "\\t"))
     old_print(...)
 end
 
-local f = loadstring("__OBFUSCATED_SOURCE__", "obfuscated")
-if f then
-    setfenv(f, getfenv())
-    local success, result = pcall(f)
-    if success then
-        capture("[Execution complete]")
-        if type(result) == "string" then
-            capture(result)
-        end
-    else
-        capture("[Error: " .. tostring(result) .. "]")
-    end
+local HttpService = game:GetService("HttpService")
+
+local obfuscated_chunk, err = loadstring([[
+{obfuscated_source}
+]], "obfuscated")
+if not obfuscated_chunk then
+    capture("[Error loading obfuscated: " .. tostring(err) .. "]")
+    return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 end
 
-local HttpService = game:GetService("HttpService")
-return HttpService:JSONEncode({captured = captured, count = captured_count})
+setfenv(obfuscated_chunk, getfenv())
+local success, result = pcall(obfuscated_chunk)
+if success then
+    capture("[Execution complete]")
+    if type(result) == "string" then
+        capture(result)
+    end
+else
+    capture("[Error: " .. tostring(result) .. "]")
+end
+
+return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 """
-        extract_script = extract_script.replace('__STRING_TABLE__', string_table)
-        extract_script = extract_script.replace('__OBFUSCATED_SOURCE__', escaped_source)
         headers = {
             "x-api-key": self.api_key,
             "Content-Type": "application/json"
         }
         payload = {
-            "script": extract_script,
+            "script": capture_part,
             "arguments": []
         }
         import httpx
