@@ -780,16 +780,17 @@ local INSTRUCTION_LIMIT = 500000
 local instruction_count = 0
 local hook_active = false
 
-local function instruction_guard(event, line)
-	instruction_count = instruction_count + 1
-	if instruction_count > INSTRUCTION_LIMIT then
-		error("Dynamic harness: instruction limit reached (" .. INSTRUCTION_LIMIT .. ")", 0)
+if debug and debug.sethook then
+	local function instruction_guard(event, line)
+		instruction_count = instruction_count + 1
+		if instruction_count > INSTRUCTION_LIMIT then
+			error("Dynamic harness: instruction limit reached (" .. INSTRUCTION_LIMIT .. ")", 0)
+		end
 	end
-end
-
-local ok_hook, err_hook = pcall(debug.sethook, instruction_guard, "c", 1000)
-if ok_hook then
-	hook_active = true
+	local ok_hook, err_hook = pcall(debug.sethook, instruction_guard, "c", 1000)
+	if ok_hook then
+		hook_active = true
+	end
 end
 
 local success, result = pcall(chunk)
