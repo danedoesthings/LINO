@@ -94,16 +94,21 @@ class Unveiler:
             (r'local\s+function\s+\w+\s*\([^)]*\)\s*return\s+R\s*\[[^\]]*[+\-*/%][^\]]*\d+\]', 15),
             (r'\w+\s*=\s*\{\s*\[?\d+\]?\s*=\s*function', 10),
             (r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs', 15),
-            (r'return\s*\(function\s*\(', 10),
+            (r'return\s*\(function\s*\(', 15),
             (r'instrTbl', 10),
             (r'callEnvA', 10),
             (r'callEnvB', 10),
             (r'vmStack', 10),
             (r'allocSlot', 10),
             (r'funcWrap', 10),
+            (r'local\s+function\s+\w\s*\(\s*\w\s*\)\s*return\s+R\s*\[', 20),
+            (r'R\s*\[', 5),
         ]
         for pattern, weight in indicators:
             score += len(re.findall(pattern, source)) * weight
+        if score < 10:
+            if 'return(function(' in source or 'ipairs({{' in source:
+                score = 50
         return score
 
     def unveil(self, source: str) -> Tuple[str, str, str]:
