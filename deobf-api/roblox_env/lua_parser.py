@@ -13,9 +13,12 @@ class LuaParser:
             self._skip_whitespace()
             if self.pos >= len(self.source):
                 break
-            stmt = self._parse_statement()
-            if stmt:
-                statements.append(stmt)
+            try:
+                stmt = self._parse_statement()
+                if stmt:
+                    statements.append(stmt)
+            except Exception:
+                self.pos += 1
         return statements
 
     def _skip_whitespace(self):
@@ -565,17 +568,11 @@ class LuaParser:
     def _expect(self, c):
         if self.pos < len(self.source) and self.source[self.pos] == c:
             self.pos += 1
-        else:
-            pass
 
     def _expect_then(self):
         if self.pos + 4 < len(self.source) and self.source[self.pos:self.pos+4] == 'then':
             self.pos += 4
-        else:
-            pass
 
     def _expect_do(self):
         if self.pos + 2 < len(self.source) and self.source[self.pos:self.pos+2] == 'do':
             self.pos += 2
-        else:
-            pass
