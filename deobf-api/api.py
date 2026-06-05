@@ -42,11 +42,12 @@ def health():
         'unluac_exists': os.path.isfile(engine.unluac_path),
         'has_luaparser': HAS_LUAPARSER,
         'lua_binaries': {
-            'lua5.1': shutil.which('lua5.1'),
+            'lua5.1': '/usr/bin/lua5.1' if os.path.isfile('/usr/bin/lua5.1') else shutil.which('lua5.1'),
             'lua5.2': shutil.which('lua5.2'),
             'lua': shutil.which('lua'),
         },
         'lune_available': shutil.which('lune') is not None,
+        'lua51_available': os.path.isfile('/usr/bin/lua5.1') or shutil.which('lua5.1') is not None,
         'lupa_available': _check_lupa(),
     })
 
@@ -203,7 +204,7 @@ def debug_harness():
     try:
         from string_decoder import StringTableDecoder
         decoder = StringTableDecoder(source_str)
-        harness_output = harness.run(source_str, timeout=30, decoded_strings=decoder.strings if decoder.ok else None)
+        harness_output = harness.run(source_str, timeout=120, decoded_strings=decoder.strings if decoder.ok else None)
         if harness_output:
             stdout = harness_output
         else:
@@ -215,7 +216,9 @@ def debug_harness():
 
     return jsonify({
         'lua_found': harness.available,
-        'lua_path': shutil.which('lua5.1') or shutil.which('lua') or 'not found',
+        'lua_path': '/usr/bin/lua5.1' if os.path.isfile('/usr/bin/lua5.1') else shutil.which('lua5.1') or shutil.which('lua') or 'not found',
+        'lua51_available': os.path.isfile('/usr/bin/lua5.1') or shutil.which('lua5.1') is not None,
+        'lune_available': shutil.which('lune') is not None,
         'exit_code': exit_code,
         'timeout': timeout,
         'stdout': stdout[:5000],
