@@ -205,21 +205,8 @@ end
 _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
-		local stripped = src
-		local ret_pos = stripped:find("return")
-		if ret_pos then
-			local after_ret = stripped:sub(ret_pos + 6)
-			local paren_pos = after_ret:find("%(")
-			if paren_pos then
-				stripped = after_ret:sub(paren_pos)
-			end
-		end
-		local fn, load_err = luau.load(stripped, {
-			debugName = type(b) == "string" and b or "=(load)",
-			environment = _cenv,
-			injectGlobals = true,
-		})
-		return fn, load_err
+		_25ms("[Payload captured: " .. #src .. " bytes]")
+		return function() end, nil
 	end
 	return nil, "source must be a string"
 end
