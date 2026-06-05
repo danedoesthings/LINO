@@ -6,6 +6,7 @@ import subprocess
 import signal
 import json
 import asyncio
+import base64
 from typing import Optional
 
 _STR_COMMENT = re.compile(
@@ -31,6 +32,8 @@ class RobloxCloudExecutor:
         if not self.available:
             return None
 
+        encoded_source = base64.b64encode(obfuscated_source.encode('utf-8', errors='replace')).decode('ascii')
+
         string_table = "{}"
         if decoded_strings:
             entries = []
@@ -40,9 +43,9 @@ class RobloxCloudExecutor:
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
 
-        capture_part = f"""
-local R = {string_table}
-local captured = {{}}
+        capture_part = r"""
+local R = __STRING_TABLE__
+local captured = {}
 local captured_count = 0
 
 local function capture(val)
@@ -51,8 +54,8 @@ local function capture(val)
 end
 
 local function make_proxy(name)
-    local proxy = {{}}
-    local mt = {{
+    local proxy = {}
+    local mt = {
         __index = function(t, k)
             if k == "Parent" then return nil end
             if k == "PlaceId" then return 1234567890 end
@@ -102,7 +105,7 @@ local function make_proxy(name)
         __lt = function() return false end,
         __le = function() return false end,
         __eq = function() return false end,
-    }}
+    }
     setmetatable(proxy, mt)
     return proxy
 end
@@ -120,11 +123,11 @@ local Region3 = make_proxy("Region3")
 local NumberRange = make_proxy("NumberRange")
 local NumberSequence = make_proxy("NumberSequence")
 local PhysicalProperties = make_proxy("PhysicalProperties")
-local Enum = setmetatable({{}}, {{
+local Enum = setmetatable({}, {
     __index = function(t, k)
         return make_proxy("Enum." .. k)
     end
-}})
+})
 
 local game = make_proxy("game")
 game.PlaceId = 1234567890
@@ -168,22 +171,30 @@ end
 
 local old_print = print
 print = function(...)
-    local parts = {{}}
+    local parts = {}
     for i = 1, select('#', ...) do
         parts[i] = tostring(select(i, ...))
     end
-    capture(table.concat(parts, "\\t"))
+    capture(table.concat(parts, "\t"))
     old_print(...)
 end
 
 local HttpService = game:GetService("HttpService")
 
-local obfuscated_chunk, err = loadstring([[
-{obfuscated_source}
-]], "obfuscated")
+local b64_source = "__ENCODED_SOURCE__"
+local decoded_source = game:GetService("HttpService"):JSONDecode(b64_source)
+if not decoded_source then
+    local b64 = {}
+    for i = 1, #b64_source do
+        b64[i] = string.byte(b64_source, i)
+    end
+    decoded_source = game:GetService("HttpService"):JSONDecode(string.char(unpack(b64)))
+end
+
+local obfuscated_chunk, err = loadstring(decoded_source, "obfuscated")
 if not obfuscated_chunk then
     capture("[Error loading obfuscated: " .. tostring(err) .. "]")
-    return HttpService:JSONEncode({{captured = captured, count = captured_count}})
+    return HttpService:JSONEncode({captured = captured, count = captured_count})
 end
 
 setfenv(obfuscated_chunk, getfenv())
@@ -197,8 +208,11 @@ else
     capture("[Error: " .. tostring(result) .. "]")
 end
 
-return HttpService:JSONEncode({{captured = captured, count = captured_count}})
+return HttpService:JSONEncode({captured = captured, count = captured_count})
 """
+        capture_part = capture_part.replace('__STRING_TABLE__', string_table)
+        capture_part = capture_part.replace('__ENCODED_SOURCE__', encoded_source)
+
         headers = {
             "x-api-key": self.api_key,
             "Content-Type": "application/json"
