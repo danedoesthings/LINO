@@ -238,13 +238,14 @@ class LuaHarness:
 
     def _run_emulator(self, source: str, decoded_strings: list = None) -> Optional[str]:
         try:
+            import traceback as tb
             from roblox_env.emulator import RobloxEmulator
             emu = RobloxEmulator(decoded_strings)
             result = emu.execute(source)
             if result and len(result) > 50:
                 return result
-        except Exception:
-            pass
+        except Exception as e:
+            return f"-- [Emulator Error] {str(e)}\n-- {tb.format_exc()[:2000]}"
         return None
 
     def _run_symbolic(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
