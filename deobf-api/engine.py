@@ -75,27 +75,19 @@ class Unveiler:
 
     def _extract_payload_from_harness_output(self, output: str) -> Optional[str]:
         lines = output.split('\n')
-        payload_lines = []
-        in_payload = False
+        payloads = []
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if line.startswith('[Payload:') and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if len(next_line) > 50 and not next_line.startswith('['):
+                    payloads.append(next_line)
+        if payloads:
+            return payloads[-1]
         for line in lines:
             line = line.strip()
-            if not line:
-                continue
-            if '[Payload captured:' in line or '[Payload returned:' in line:
-                in_payload = True
-                continue
-            if '[Error' in line or '[Trace' in line or '[Harness]' in line:
-                in_payload = False
-                continue
-            if in_payload and len(line) > 20:
-                payload_lines.append(line)
-                in_payload = False
-        if payload_lines:
-            return payload_lines[0]
-        for line in lines:
-            line = line.strip()
-            if len(line) > 100 and not line.startswith('[') and not line.startswith('--'):
-                if '=' in line or '(' in line or 'end' in line or 'local' in line or 'function' in line or 'print' in line:
+            if len(line) > 200 and not line.startswith('[') and not line.startswith('--'):
+                if 'function' in line or 'local' in line or 'print' in line or 'return' in line:
                     return line
         return None
 
@@ -145,25 +137,17 @@ class Unveiler:
             if harness_result and len(harness_result) > 100:
                 payload = self._extract_payload_from_harness_output(harness_result)
                 if payload:
-                    log('harness_success', True, f'inner payload extracted ({len(payload)} bytes), recursing')
-                    inner_result, inner_method, inner_diag, _ = self.unveil(payload, depth + 1, trace)
-                    if self._is_quality_output(inner_result):
-                        log('recursion_success', True, f'inner layer deobfuscated via {inner_method}')
-                        return inner_result, f'dynamic_harness+{inner_method}', f'Layer 2: {inner_diag}', trace
-                    elif inner_result and len(inner_result) > 100:
-                        log('recursion_partial', True, f'inner layer returned {len(inner_result)} chars')
-                        return inner_result, 'dynamic_harness+partial', f'Layer 2 partial: {inner_diag}', trace
+                    log('harness_success', True, f'inner payload extracted ({len(payload)} bytes)')
+                    renamer = VarRenamer()
+                    payload = renamer.rename(payload)
+                    payload = beautify(payload)
+                    return payload, 'dynamic_harness', 'Dynamic harness execution complete', trace
                 elif self._is_quality_output(harness_result):
                     log('harness_success', True, f'dynamic harness produced {len(harness_result)} chars')
                     renamer = VarRenamer()
                     harness_result = renamer.rename(harness_result)
                     harness_result = beautify(harness_result)
                     return harness_result, 'dynamic_harness', 'Dynamic harness execution complete', trace
-                else:
-                    log('harness', False, f'harness produced {len(harness_result)} chars but not quality output, recursing')
-                    inner_result, inner_method, inner_diag, _ = self.unveil(harness_result, depth + 1, trace)
-                    if inner_result and len(inner_result) > 100:
-                        return inner_result, f'dynamic_harness+{inner_method}', f'Harness output recurse: {inner_diag}', trace
         if vm_score >= 15:
             log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
             try:
