@@ -2,6 +2,7 @@ import re
 import json
 from typing import Optional, List
 from math_fold import safe_eval_int, fold_constants
+from string_decrypter import StringDecrypter
 
 class InstructionTableDumper:
     def __init__(self, source: str, decoded_strings: List[str]):
@@ -122,4 +123,12 @@ class InstructionTableDumper:
         for s in others:
             if s not in payload_hints:
                 lines.append(f"-- {json.dumps(s)}")
+        decrypter = StringDecrypter()
+        decrypted = decrypter.decrypt_all(self.source)
+        if decrypted:
+            lines.append("")
+            lines.append("-- Decrypted strings from source:")
+            for d in decrypted[:20]:
+                preview = d[:200]
+                lines.append(f"-- {preview}")
         return lines
