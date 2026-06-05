@@ -75,17 +75,28 @@ class Unveiler:
 
     def _extract_payload_from_harness_output(self, output: str) -> Optional[str]:
         lines = output.split('\n')
-        candidates = []
+        payload_lines = []
+        in_payload = False
         for line in lines:
             line = line.strip()
-            if len(line) > 100 and not line.startswith('[Harness]') and not line.startswith('[Error]') and not line.startswith('[Trace]') and not line.startswith('[Payload'):
-                if 'function' in line or 'local' in line or 'loadstring' in line or 'print' in line or 'return' in line:
-                    candidates.append(line)
-        for candidate in candidates:
-            if candidate.startswith('local') or candidate.startswith('function') or candidate.startswith('return') or candidate.startswith('print'):
-                return candidate
-        for candidate in candidates:
-            return candidate
+            if not line:
+                continue
+            if '[Payload captured:' in line or '[Payload returned:' in line:
+                in_payload = True
+                continue
+            if '[Error' in line or '[Trace' in line or '[Harness]' in line:
+                in_payload = False
+                continue
+            if in_payload and len(line) > 20:
+                payload_lines.append(line)
+                in_payload = False
+        if payload_lines:
+            return payload_lines[0]
+        for line in lines:
+            line = line.strip()
+            if len(line) > 100 and not line.startswith('[') and not line.startswith('--'):
+                if '=' in line or '(' in line or 'end' in line or 'local' in line or 'function' in line or 'print' in line:
+                    return line
         return None
 
     def _calculate_vm_score(self, source: str) -> int:
