@@ -778,6 +778,7 @@ setfenv(chunk, _cenv)
 
 local INSTRUCTION_LIMIT = 500000
 local instruction_count = 0
+local hook_active = false
 
 local function instruction_guard(event, line)
 	instruction_count = instruction_count + 1
@@ -786,9 +787,9 @@ local function instruction_guard(event, line)
 	end
 end
 
-local ok_hook, err_hook = pcall(debug.sethook, instruction_guard, "", 1000)
-if not ok_hook then
-	pcall(debug.sethook, instruction_guard, "c", 1000)
+local ok_hook, err_hook = pcall(debug.sethook, instruction_guard, "c", 1000)
+if ok_hook then
+	hook_active = true
 end
 
 local success, result = pcall(chunk)
@@ -826,7 +827,7 @@ for _, line in ipairs(_captured_lines) do
 end
 
 if success then
-	_25ms("[Harness] executed " .. instruction_count .. " instructions")
+	_25ms("[Harness] executed " .. instruction_count .. " instructions (hook=" .. tostring(hook_active) .. ")")
 end
 
 if #_captured_lines > 0 and #r > 0 then
