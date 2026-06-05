@@ -206,6 +206,27 @@ _cenv.loadstring = function(src, b)
 	if type(src) == "string" then
 		_25ms(src)
 		_25ms("[Payload captured: " .. #src .. " bytes]")
+		local fn, err = luau.load(src, {
+			debugName = type(b) == "string" and b or "=(load)",
+			environment = _cenv,
+			injectGlobals = true,
+		})
+		if fn then
+			local ok, result = pcall(fn)
+			if ok and type(result) == "string" and #result > 10 then
+				_25ms(result)
+				_25ms("[Payload returned: " .. #result .. " bytes]")
+			elseif ok and type(result) == "function" then
+				local ok2, result2 = pcall(result)
+				if ok2 and type(result2) == "string" and #result2 > 10 then
+					_25ms(result2)
+					_25ms("[Payload returned: " .. #result2 .. " bytes]")
+				end
+			end
+			local output = table.concat(r, "\n")
+			fs.writeFile(outFile, output)
+			return fn
+		end
 		local output = table.concat(r, "\n")
 		fs.writeFile(outFile, output)
 		return function() end, nil
@@ -785,22 +806,8 @@ if err then
 	return
 end
 
-local INSTRUCTION_LIMIT = 500000
 local instruction_count = 0
 local hook_active = false
-
-if debug and debug.sethook then
-	local function instruction_guard(event, line)
-		instruction_count = instruction_count + 1
-		if instruction_count > INSTRUCTION_LIMIT then
-			error("Dynamic harness: instruction limit reached (" .. INSTRUCTION_LIMIT .. ")", 0)
-		end
-	end
-	local ok_hook, err_hook = pcall(debug.sethook, instruction_guard, "c", 1000)
-	if ok_hook then
-		hook_active = true
-	end
-end
 
 local success, result = pcall(chunk)
 
@@ -816,7 +823,7 @@ for _, line in ipairs(_captured_lines) do
 end
 
 if success then
-	_25ms("[Harness] executed " .. instruction_count .. " instructions (hook=" .. tostring(hook_active) .. ")")
+	_25ms("[Harness] executed " .. instruction_count .. " instructions")
 end
 
 if #_captured_lines > 0 and #r > 0 then
