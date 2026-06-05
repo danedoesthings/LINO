@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import subprocess
 import signal
+import json
 from typing import Optional
 
 _STR_COMMENT = re.compile(
@@ -13,6 +14,10 @@ _STR_COMMENT = re.compile(
     r'|--[^\n]*'
     , re.DOTALL
 )
+
+def clean_lune_error(stderr_text):
+    cleaned = re.sub(r'\[string "([^"]+)"\]', r'\1', stderr_text)
+    return cleaned
 
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
@@ -196,7 +201,8 @@ class LuaHarness:
             if stderr_data:
                 stderr_str = stderr_data.decode('utf-8', errors='replace').strip()
                 if stderr_str:
-                    return f"[Harness] Lune error: {stderr_str[:2000]}"
+                    cleaned = clean_lune_error(stderr_str)
+                    return f"[Harness] Lune error: {cleaned[:2000]}"
             return None
         except Exception as e:
             return f"[Harness] Exception: {str(e)}"
