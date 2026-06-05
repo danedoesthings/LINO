@@ -42,10 +42,11 @@ class Unveiler:
         self.harness = harness
 
     def _is_valid_lua(self, code: str) -> bool:
+        sanitized = re.sub(r'[^\x20-\x7E\n\r\t]', '', code)
         if not HAS_LUAPARSER:
             return True
         try:
-            lua_ast.parse(code)
+            lua_ast.parse(sanitized)
             return True
         except Exception:
             return False
