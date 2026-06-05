@@ -82,7 +82,7 @@ class RobloxVMEmulator:
             'coroutine': {
                 'wrap': lambda f: f,
                 'create': lambda f: f,
-                'resume': lambda co, ...: (True, co(...) if callable(co) else None),
+                'resume': lambda co, *args: (True, co(*args) if callable(co) else None),
                 'yield': lambda: None,
             },
             'tick': lambda: 0,
@@ -102,10 +102,8 @@ class RobloxVMEmulator:
         self.globals['bit'] = self.globals['bit32']
 
     def _make_spy(self, name: str) -> dict:
-        proxy = {}
         def make_proxy(n):
             p = {}
-            p['__name'] = n
             def index_handler(k):
                 if k == 'Parent':
                     return None
@@ -115,7 +113,7 @@ class RobloxVMEmulator:
             def newindex_handler(k, v):
                 if isinstance(v, str) and len(v) > 3:
                     self.output.append(v)
-            proxy_handler = {
+            return {
                 '__index': index_handler,
                 '__call': call_handler,
                 '__newindex': newindex_handler,
@@ -129,7 +127,6 @@ class RobloxVMEmulator:
                 '__lt': lambda a, b: False,
                 '__le': lambda a, b: False,
             }
-            return proxy_handler
         return make_proxy(name)
 
     def _native_print(self, *args):
