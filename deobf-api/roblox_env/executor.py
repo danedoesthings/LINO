@@ -9,6 +9,11 @@ class Executor:
         self.return_value = None
 
     def run(self, source: str):
+        source = source.strip()
+        if source.startswith('return'):
+            source = source[6:].strip()
+        if source.startswith('(') and source.endswith(')'):
+            source = source[1:-1].strip()
         parser = LuaParser(source)
         statements = parser.parse()
         for stmt in statements:
