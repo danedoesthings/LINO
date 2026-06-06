@@ -119,8 +119,10 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
         missing_indices = [i for i, c in enumerate(alphabet_chars) if c == '']
         used_chars = set(c for c in alphabet_chars if c != '')
         if len(missing_indices) == 1:
-            missing_char = (_STANDARD_B64 - used_chars).pop()
-            alphabet_chars[missing_indices[0]] = missing_char
+            remaining = _STANDARD_B64 - used_chars
+            if remaining:
+                missing_char = remaining.pop()
+                alphabet_chars[missing_indices[0]] = missing_char
         alphabet = ''.join(alphabet_chars)
         if len(alphabet) == 64 and len(set(alphabet)) >= 63:
             return alphabet
@@ -247,6 +249,16 @@ class StringTableDecoder:
             return ''
         if re.match(r'^(\\\d{1,3})+$', s):
             decoded = _decode_octal_string(s)
+            if self.alphabet:
+                raw_bytes = _custom_b64_decode(decoded, self.alphabet)
+                if raw_bytes is not None:
+                    for enc in ('utf-8', 'latin-1'):
+                        try:
+                            text = raw_bytes.decode(enc, errors='strict')
+                            if _is_readable_string(text):
+                                return text
+                        except Exception:
+                            pass
             if _is_readable_string(decoded):
                 return decoded
             return s
