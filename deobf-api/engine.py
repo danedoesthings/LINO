@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 from string_decoder import StringTableDecoder
 from prometheus_decoder import PrometheusDecoder
+from vm_devirtualizer import VMDevirtualizer
 from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
@@ -66,7 +67,16 @@ class Unveiler:
             result = prom_decoder.decode()
             if result and len(result) > 10:
                 if _contains_vm(result):
-                    log('prometheus_decode', False, 'result still contains VM markers')
+                    log('prometheus_decode', False, 'result contains VM markers, attempting devirtualization')
+                    vm_devirt = VMDevirtualizer(result, decoder)
+                    lifted = vm_devirt.devirtualize()
+                    if lifted and len(lifted) > 10 and not _contains_vm(lifted):
+                        renamer = VarRenamer()
+                        lifted = renamer.rename(lifted)
+                        lifted = beautify(lifted)
+                        log('vm_devirtualize', True, f'VM devirtualized, {len(lifted)} chars')
+                        return lifted, 'vm_devirtualized', 'VM successfully devirtualized', trace
+                    log('vm_devirtualize', False, 'devirtualization failed')
                 else:
                     renamer = VarRenamer()
                     result = renamer.rename(result)
@@ -98,6 +108,7 @@ class DeobfEngine:
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             'prometheus_decode': True,
+            'vm_devirtualize': True,
             'string_table_dump': True,
             'var_renamer': True,
             'beautifier': True,
