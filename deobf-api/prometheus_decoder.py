@@ -8,11 +8,11 @@ class PrometheusDecoder:
     def __init__(self, source: str, decoder):
         self.source = source
         self.decoder = decoder
-        self.strings = decoder.strings
+        self.strings = list(decoder.strings)
         self.offset = decoder.offset
         self.getter_name = None
         self.vm_var = None
-        self.instruction_table = None
+        self.shuffle_pairs = []
         self.state_handlers = {}
         self._detect_getter()
         self._extract_vm_structure()
@@ -49,7 +49,6 @@ class PrometheusDecoder:
             body = ipairs_match.group(1)
             pairs = re.findall(r'\{([^}]+)\}', body)
             if pairs:
-                self.instruction_table = []
                 for pair_str in pairs:
                     parts = re.split(r'[;,]', pair_str)
                     resolved = []
@@ -61,7 +60,7 @@ class PrometheusDecoder:
                         if n is not None:
                             resolved.append(n)
                     if len(resolved) == 2:
-                        self.instruction_table.append(tuple(resolved))
+                        self.shuffle_pairs.append(tuple(resolved))
 
     def _resolve_getter(self, expr: str) -> Optional[str]:
         if not self.getter_name:
@@ -83,13 +82,22 @@ class PrometheusDecoder:
             code = re.sub(rf'{re.escape(self.getter_name)}\s*\(\s*([^)]+?)\s*\)', repl, code)
         return code
 
+    def _apply_shuffle(self, arr: List[str]) -> List[str]:
+        result = list(arr)
+        for a, b in self.shuffle_pairs:
+            lo, hi = a - 1, b - 1
+            if 0 <= lo < len(result) and 0 <= hi < len(result) and lo < hi:
+                result[lo], result[hi] = result[hi], result[lo]
+        return result
+
     def decode(self) -> Optional[str]:
         if not self.strings or len(self.strings) < 4:
             return None
 
-        payload = self._try_instruction_table_decode()
-        if payload:
-            return payload
+        if self.shuffle_pairs:
+            payload = self._try_shuffled_string_assembly()
+            if payload:
+                return payload
 
         payload = self._try_vm_handler_decode()
         if payload:
@@ -98,29 +106,18 @@ class PrometheusDecoder:
         payload = self._try_direct_string_assembly()
         return payload
 
-    def _try_instruction_table_decode(self) -> Optional[str]:
-        if not self.instruction_table:
-            return None
-
-        decoded_ops = []
-        for a, b in self.instruction_table:
-            if isinstance(b, int) and 1 <= b <= len(self.strings):
-                s = self.strings[b - 1]
-                if s:
-                    decoded_ops.append(s)
-                else:
-                    decoded_ops.append(f"[{b}]")
-            elif a == 0:
-                continue
-            else:
-                decoded_ops.append(f"<{a},{b}>")
-
-        if not decoded_ops:
-            return None
-
-        result = ''.join(decoded_ops)
-        if len(result) > 5 and ('function' in result or 'local' in result or 'print' in result):
-            return result
+    def _try_shuffled_string_assembly(self) -> Optional[str]:
+        shuffled = self._apply_shuffle(self.strings)
+        payload_keywords = {'print', 'function', 'local', 'return', 'loadstring', 'pcall', 'error', 'game', 'workspace'}
+        for i, s in enumerate(shuffled):
+            if s and s in payload_keywords:
+                parts = []
+                for j in range(i, len(shuffled)):
+                    if shuffled[j]:
+                        parts.append(shuffled[j])
+                result = ''.join(parts)
+                if len(result) > 5 and any(kw in result for kw in ['print', 'function', 'local', 'return', 'loadstring']):
+                    return result
 
         return None
 
@@ -136,16 +133,6 @@ class PrometheusDecoder:
                 break
 
         if not loadstring_handler:
-            for idx, body in self.state_handlers.items():
-                resolved = self._resolve_indices(body)
-                for name in ['loadstring', 'load', 'pcall']:
-                    if f'"{name}"' in resolved or f"'{name}'" in resolved:
-                        loadstring_handler = resolved
-                        break
-                if loadstring_handler:
-                    break
-
-        if not loadstring_handler:
             return None
 
         concat_parts = re.split(r'\s*\.\.\s*', loadstring_handler)
@@ -157,8 +144,6 @@ class PrometheusDecoder:
                     result_parts.append(part[1:-1])
                 elif part.startswith("'") and part.endswith("'"):
                     result_parts.append(part[1:-1])
-                elif part.isidentifier():
-                    result_parts.append(part)
                 else:
                     break
             else:
@@ -178,23 +163,15 @@ class PrometheusDecoder:
         return None
 
     def _try_direct_string_assembly(self) -> Optional[str]:
-        candidates = []
-        for s in self.strings:
-            if s and len(s) > 2:
-                candidates.append(s)
-
-        if not candidates:
-            return None
-
         payload_keywords = ['print', 'function', 'local', 'return', 'end', 'then', 'else', 'for', 'while', 'do']
         for kw in payload_keywords:
-            if kw in candidates:
-                idx = candidates.index(kw)
+            if kw in self.strings:
+                idx = self.strings.index(kw)
                 payload_parts = []
-                for s in candidates[idx:]:
-                    payload_parts.append(s)
+                for s in self.strings[idx:]:
+                    if s:
+                        payload_parts.append(s)
                 result = ''.join(payload_parts)
                 if len(result) > 5:
                     return result
-
         return None
