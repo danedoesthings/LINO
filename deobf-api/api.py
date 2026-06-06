@@ -13,6 +13,8 @@ CORS(app, origins=['http://localhost:3000', 'http://localhost:5000', 'https://di
 
 engine = DeobfEngine()
 
+MAX_SIZE = 10 * 1024 * 1024
+
 @app.route('/health')
 def health():
     return jsonify({'ok': True, 'version': '1.0.0'})
@@ -35,8 +37,8 @@ def deobf_direct():
     except Exception as e:
         return jsonify({'error': f'Invalid base64: {e}'}), 400
     
-    if len(source) > 5 * 1024 * 1024:
-        return jsonify({'error': 'Source too large'}), 413
+    if len(source) > MAX_SIZE:
+        return jsonify({'error': f'Source too large ({len(source)} bytes, max {MAX_SIZE})'}), 413
     
     log.info(f"Processing {len(source)} bytes")
     result, method, diag, trace = engine.process(source)
