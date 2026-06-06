@@ -27,26 +27,23 @@ def decode_octal_escapes(s: str) -> str:
         i += 1
     return ''.join(result)
 
-def decode_octal_string(s: str) -> str:
+def decode_full_octal_string(s: str) -> str:
     result = []
     i = 0
     while i < len(s):
         if s[i] == '\\' and i + 1 < len(s):
-            if s[i+1] == '\\':
-                i += 1
-            if i + 1 < len(s) and s[i+1] in '01234567':
-                j = i + 1
-                octal_digits = ''
-                while j < len(s) and len(octal_digits) < 3 and s[j] in '01234567':
-                    octal_digits += s[j]
-                    j += 1
-                if octal_digits:
-                    try:
-                        result.append(chr(int(octal_digits, 8)))
-                        i = j
-                        continue
-                    except:
-                        pass
+            j = i + 1
+            octal_digits = ''
+            while j < len(s) and len(octal_digits) < 3 and s[j] in '01234567':
+                octal_digits += s[j]
+                j += 1
+            if octal_digits:
+                try:
+                    result.append(chr(int(octal_digits, 8)))
+                    i = j
+                    continue
+                except:
+                    pass
         result.append(s[i])
         i += 1
     return ''.join(result)
@@ -84,7 +81,7 @@ def extract_alphabet_from_n_table(source: str) -> Optional[str]:
     if table_start is None:
         for m in re.finditer(r'local\s+(\w+)\s*=\s*\{', source):
             preview = source[m.end():min(m.end()+1000, len(source))]
-            if re.search(r'\d+\s*[+\-]\s*\d+', preview) and re.search(r'\[\s*"[A-Za-z0-9+/]"', preview):
+            if re.search(r'\d+\s*[+\-]\s*\d+', preview):
                 table_start = m.end()
                 break
     if table_start is None:
@@ -290,26 +287,27 @@ class StringTableDecoder:
         decoded_strings = []
         for s in shuffled:
             decoded = self._decode_string(s)
-            decoded_strings.append(decoded if decoded else s)
+            if decoded and len(decoded) > 0:
+                decoded_strings.append(decoded)
+            else:
+                decoded_strings.append(s)
         self.strings = decoded_strings
         self.offset = get_string_table_offset(self.source)
         self.diagnostics['offset'] = self.offset
-        self.diagnostics['decoded_count'] = len([s for s in self.strings if s and len(s) > 0])
+        self.diagnostics['decoded_count'] = len([s for s in self.strings if s])
         self.ok = len(self.strings) > 0
-        if self.strings:
-            preview = self.strings[0][:50] if self.strings[0] else 'empty'
-            self.diagnostics['first_preview'] = preview
 
     def _decode_string(self, s: str) -> str:
         if not s:
             return ''
-        s = s.replace('\\"', '"').replace("\\'", "'")
         if '\\' in s:
             try:
-                s = decode_octal_escapes(s)
+                octal_decoded = decode_full_octal_string(s)
+                if is_lua_source(octal_decoded) or is_readable_string(octal_decoded):
+                    return octal_decoded
             except:
                 pass
-        if self.alphabet and len(s) >= 4 and any(c in self.alphabet for c in s[:10]):
+        if self.alphabet and len(s) >= 4:
             try:
                 raw_bytes = custom_b64_decode(s, self.alphabet)
                 if raw_bytes:
@@ -320,13 +318,6 @@ class StringTableDecoder:
                                 return text
                         except:
                             pass
-            except:
-                pass
-        if '\\' in s:
-            try:
-                octal_decoded = decode_octal_string(s)
-                if is_lua_source(octal_decoded) or is_readable_string(octal_decoded):
-                    return octal_decoded
             except:
                 pass
         if is_readable_string(s):
