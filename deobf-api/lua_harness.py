@@ -112,6 +112,8 @@ return HttpService:JSONEncode({{captured = captured, count = captured_count}})
             task_path = task_data.get("path", "")
             if not task_path:
                 return {"error": "No task path returned"}
+            if not task_path.startswith('/'):
+                task_path = '/' + task_path
             task_url = f"https://apis.roblox.com{task_path}"
             deadline = time.time() + timeout
             while time.time() < deadline:
