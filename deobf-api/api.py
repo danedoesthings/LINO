@@ -4,6 +4,8 @@ import traceback
 import logging
 import re
 import time
+import sys
+import io
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from engine import DeobfEngine, submit_job, get_job
@@ -17,22 +19,68 @@ log = logging.getLogger('deobf-api')
 
 app = Flask(__name__)
 CORS(app)
-engine = DeobfEngine()
+engine = None
+
+try:
+    engine = DeobfEngine()
+    log.info("Engine initialized successfully")
+except Exception as e:
+    log.error(f"Engine init failed: {e}")
+    log.error(traceback.format_exc())
 
 @app.route('/health')
 def health():
     return jsonify({
         'ok': True,
-        'version': '11.0.1',
-        'capabilities': engine.get_capabilities(),
+        'version': '11.0.2',
+        'engine_ok': engine is not None,
     })
 
 @app.route('/alive')
 def alive():
     return 'ok'
 
+@app.route('/debug/imports')
+def debug_imports():
+    output = io.StringIO()
+    try:
+        import prometheus_decoder
+        output.write("prometheus_decoder: OK\n")
+    except Exception as e:
+        output.write(f"prometheus_decoder: FAILED - {e}\n")
+        output.write(traceback.format_exc())
+    try:
+        import string_decoder
+        output.write("string_decoder: OK\n")
+    except Exception as e:
+        output.write(f"string_decoder: FAILED - {e}\n")
+    try:
+        import math_fold
+        output.write("math_fold: OK\n")
+    except Exception as e:
+        output.write(f"math_fold: FAILED - {e}\n")
+    try:
+        import constants
+        output.write("constants: OK\n")
+    except Exception as e:
+        output.write(f"constants: FAILED - {e}\n")
+    try:
+        import beautifier
+        output.write("beautifier: OK\n")
+    except Exception as e:
+        output.write(f"beautifier: FAILED - {e}\n")
+    try:
+        import var_renamer
+        output.write("var_renamer: OK\n")
+    except Exception as e:
+        output.write(f"var_renamer: FAILED - {e}\n")
+    return output.getvalue(), 200, {'Content-Type': 'text/plain'}
+
 @app.route('/deobf/direct', methods=['POST'])
 def deobf_direct():
+    if engine is None:
+        return jsonify({'error': 'Engine not initialized'}), 500
+
     data = request.get_json(silent=True)
     if not data:
         return jsonify({'error': 'No JSON data provided'}), 400
@@ -63,11 +111,12 @@ def deobf_direct():
             'result_length': len(result) if result else 0
         })
     except Exception as e:
-        log.error(f"Direct deobf failed: {e}")
+        tb = traceback.format_exc()
+        log.error(f"Direct deobf failed: {e}\n{tb}")
         return jsonify({
             'status': 'error',
             'error': str(e),
-            'traceback': traceback.format_exc()[:4000]
+            'traceback': tb[:4000]
         }), 500
 
 @app.route('/deobf', methods=['POST'])
