@@ -8,32 +8,9 @@ def decode_octal_escapes(s: str) -> str:
     while i < len(s):
         if s[i] == '\\' and i + 1 < len(s):
             if s[i+1] == '\\':
-                result.append('\\')
-                i += 2
-                continue
+                i += 1
             octal_digits = ''
             j = i + 1
-            while j < len(s) and len(octal_digits) < 3 and s[j] in '01234567':
-                octal_digits += s[j]
-                j += 1
-            if octal_digits:
-                try:
-                    result.append(chr(int(octal_digits, 8)))
-                    i = j
-                    continue
-                except:
-                    pass
-        result.append(s[i])
-        i += 1
-    return ''.join(result)
-
-def decode_full_octal_string(s: str) -> str:
-    result = []
-    i = 0
-    while i < len(s):
-        if s[i] == '\\' and i + 1 < len(s):
-            j = i + 1
-            octal_digits = ''
             while j < len(s) and len(octal_digits) < 3 and s[j] in '01234567':
                 octal_digits += s[j]
                 j += 1
@@ -72,6 +49,7 @@ def extract_alphabet_from_n_table(source: str) -> Optional[str]:
         r'(?:local\s+)?alphaMap\s*=\s*\{',
         r'(?:local\s+)?ALPHABET\s*=\s*\{',
         r'(?:local\s+)?__ALPHABET\s*=\s*\{',
+        r'(?:local\s+)?_N\s*=\s*\{',
     ]
     for pattern in patterns:
         m = re.search(pattern, source)
@@ -151,6 +129,7 @@ def extract_shuffle_ops(source: str) -> List[Tuple[int, int]]:
     patterns = [
         r'ipairs\s*\(\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})\s*\)',
         r'local\s+\w+\s*=\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
+        r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})\s*\)',
     ]
     table_content = None
     for pattern in patterns:
@@ -199,7 +178,7 @@ def custom_b64_decode(s: str, alphabet: str) -> Optional[bytes]:
 def is_readable_string(s: str) -> bool:
     if not s:
         return False
-    lua_patterns = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for']
+    lua_patterns = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do', 'repeat', 'until', 'nil', 'true', 'false']
     if any(p in s for p in lua_patterns):
         return True
     printable = sum(1 for c in s if 32 <= ord(c) <= 126 or c in '\n\r\t')
@@ -212,7 +191,8 @@ def is_lua_source(code: str) -> bool:
     lua_indicators = [
         r'function\s+\w+\s*\(', r'local\s+\w+\s*=', r'return\s+\w+',
         r'print\s*\(', r'if\s+.*\s+then', r'for\s+.*\s+in\s+',
-        r'while\s+.*\s+do', r'repeat\s+.*\s+until',
+        r'while\s+.*\s+do', r'repeat\s+.*\s+until', r'pcall\s*\(',
+        r'loadstring\s*\(', r'load\s*\(', r'table\.', r'string\.',
     ]
     matches = sum(1 for p in lua_indicators if re.search(p, code, re.IGNORECASE))
     return matches >= 1
@@ -222,6 +202,8 @@ def extract_raw_octal_strings(source: str) -> Optional[List[str]]:
         r'local\s+EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'local\s+R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'local\s+__STR__\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'local\s+StringTable\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'local\s+STR\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
     ]
     for pattern in patterns:
         m = re.search(pattern, source, re.DOTALL)
@@ -237,7 +219,8 @@ def get_string_table_offset(source: str) -> int:
     patterns = [
         r'return\s+(\w+)\s*\[\s*\w+\s*\+\s*(\d+)\s*\]',
         r'return\s+(\w+)\s*\[\s*\w+\s*-\s*(\d+)\s*\]',
-        r'\+\s*(\d+)\s*\]',
+        r'return\s+(\w+)\s*\[\s*\w+\s*\+\s*\(?(\d+)\)?\s*\]',
+        r'\+\s*(\d+)\s*\]\s*\)?\s*$',
     ]
     for pattern in patterns:
         m = re.search(pattern, source)
@@ -280,46 +263,52 @@ class StringTableDecoder:
             shuffled = raw_strings
         self.alphabet = extract_alphabet_from_n_table(self.source)
         if self.alphabet:
-            self.diagnostics['alphabet'] = self.alphabet[:20] + '...'
+            self.diagnostics['alphabet_found'] = True
         else:
-            self.diagnostics['alphabet_warning'] = 'No custom alphabet'
+            self.diagnostics['alphabet_warning'] = 'No custom alphabet found'
             self.alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         decoded_strings = []
         for s in shuffled:
-            decoded = self._decode_string(s)
-            if decoded and len(decoded) > 0:
-                decoded_strings.append(decoded)
-            else:
+            s = s.replace('\\"', '"').replace("\\'", "'")
+            if '\\\\' in s:
+                s = s.replace('\\\\', '\\')
+            if '\\' in s:
+                try:
+                    s = decode_octal_escapes(s)
+                except:
+                    pass
+            if self.alphabet and len(s) >= 4:
+                try:
+                    raw_bytes = custom_b64_decode(s, self.alphabet)
+                    if raw_bytes:
+                        try:
+                            text = raw_bytes.decode('utf-8', errors='replace')
+                            if is_lua_source(text) or is_readable_string(text):
+                                decoded_strings.append(text)
+                                continue
+                        except:
+                            pass
+                except:
+                    pass
+            if is_readable_string(s):
                 decoded_strings.append(s)
+            else:
+                decoded_strings.append('')
         self.strings = decoded_strings
         self.offset = get_string_table_offset(self.source)
         self.diagnostics['offset'] = self.offset
         self.diagnostics['decoded_count'] = len([s for s in self.strings if s])
         self.ok = len(self.strings) > 0
+        if self.strings:
+            for i, s in enumerate(self.strings[:5]):
+                if s and len(s) > 10:
+                    self.diagnostics[f'preview_{i+1}'] = s[:50]
 
-    def _decode_string(self, s: str) -> str:
-        if not s:
-            return ''
-        if '\\' in s:
-            try:
-                octal_decoded = decode_full_octal_string(s)
-                if is_lua_source(octal_decoded) or is_readable_string(octal_decoded):
-                    return octal_decoded
-            except:
-                pass
-        if self.alphabet and len(s) >= 4:
-            try:
-                raw_bytes = custom_b64_decode(s, self.alphabet)
-                if raw_bytes:
-                    for enc in ('utf-8', 'latin-1'):
-                        try:
-                            text = raw_bytes.decode(enc)
-                            if is_lua_source(text) or is_readable_string(text):
-                                return text
-                        except:
-                            pass
-            except:
-                pass
-        if is_readable_string(s):
-            return s
-        return ''
+    def get_original_source(self) -> Optional[str]:
+        for s in self.strings:
+            if s and is_lua_source(s):
+                return s
+        joined = ''.join(self.strings)
+        if is_lua_source(joined):
+            return joined
+        return None
