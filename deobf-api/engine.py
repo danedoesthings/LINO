@@ -1,4 +1,4 @@
-import os, time, uuid, threading, json, traceback
+import os, re, time, uuid, threading, json, traceback
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 from string_decoder import StringTableDecoder
@@ -10,6 +10,33 @@ from env_logger import JobLogger
 JOB_STORAGE_DIR = '/data'
 JOB_STORAGE_FILE = os.path.join(JOB_STORAGE_DIR, 'deobf_jobs.json')
 os.makedirs(JOB_STORAGE_DIR, exist_ok=True)
+
+VM_MARKERS = [
+    'while vmState do',
+    'while l do if l<',
+    'instrTbl',
+    'allocSlot',
+    'funcWrap',
+    'vmStack',
+    'callEnvA',
+    'callEnvB',
+    'packArgs',
+    'cleanRef',
+    'shuffleTbl',
+    'tokenMap',
+    'charFn',
+    'alphaMap',
+    'GetStr(',
+    'return(function(',
+    'ipairs({{',
+]
+
+def _contains_vm(source: str) -> bool:
+    if not source:
+        return False
+    count = sum(1 for marker in VM_MARKERS if marker in source)
+    has_dispatcher = bool(re.search(r'while\s+\w+\s+do\s+if\s+\w+\s*[<>=]+\s*-?\d+\s+then', source))
+    return count >= 2 or has_dispatcher
 
 @dataclass
 class DiagnosticEvent:
@@ -38,35 +65,29 @@ class Unveiler:
             prom_decoder = PrometheusDecoder(source, decoder)
             result = prom_decoder.decode()
             if result and len(result) > 10:
-                renamer = VarRenamer()
-                result = renamer.rename(result)
-                result = beautify(result)
-                log('prometheus_decode', True, f'decoded {len(result)} chars')
-                return result, 'prometheus_decode', 'Prometheus static decode complete', trace
+                if _contains_vm(result):
+                    log('prometheus_decode', False, 'result still contains VM markers')
+                else:
+                    renamer = VarRenamer()
+                    result = renamer.rename(result)
+                    result = beautify(result)
+                    log('prometheus_decode', True, f'decoded {len(result)} chars')
+                    return result, 'prometheus_decode', 'Prometheus static decode complete', trace
         except Exception as e:
             log('prometheus_decode', False, f'decode failed: {str(e)[:100]}')
 
         try:
             lines = []
-            decoded_count = 0
             for i, s in enumerate(decoder.strings):
                 if s:
-                    # Mark entries that are still raw/encoded vs successfully decoded
-                    is_raw = (s == decoder.strings[i] and
-                              re.search(r'[^A-Za-z0-9 _.,:;!?()\[\]{}\'"=+\-*/\\<>@#%^&~`|\n\t]', s))
-                    tag = '[raw]' if is_raw else ''
-                    lines.append(f'-- [{i+1}]{tag} {json.dumps(s)}')
-                    decoded_count += 1
+                    lines.append(f'-- [{i+1}] {json.dumps(s)}')
             lines.append('')
             lines.append(f'-- Detected getter offset: {decoder.offset}')
             if decoder.alphabet:
-                lines.append(f'-- Custom base64 alphabet detected: {decoder.alphabet[:16]}...')
-                lines.append(f'-- Decoded {decoded_count} of {len(decoder.strings)} strings')
-            else:
-                lines.append('-- WARNING: No custom alphabet found â strings may still be encoded')
-                lines.append('-- Tip: locate the 64-char alphabet string in your Lua source')
+                lines.append(f'-- Custom base64 alphabet: {decoder.alphabet[:16]}...')
             lines.append('-- Could not fully reconstruct original source')
-            return '\n'.join(lines), 'string_table', 'Decoded string table (best effort)', trace
+            lines.append('-- The script contains a VM layer that requires runtime execution to fully recover')
+            return '\n'.join(lines), 'string_table', 'Decoded string table (VM detected, best effort)', trace
         except:
             return '', 'unable', 'All decode stages failed', trace
 
