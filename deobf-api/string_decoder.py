@@ -4,35 +4,6 @@ from typing import Optional
 from math_fold import safe_eval_int, fold_constants, get_string_table_offset
 
 
-def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
-    if start >= len(text) or text[start] != '{':
-        return None
-    depth = 0
-    i = start
-    while i < len(text):
-        c = text[i]
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0:
-                return text[start:i+1]
-        elif c == '"':
-            i += 1
-            while i < len(text) and text[i] != '"':
-                if text[i] == '\\':
-                    i += 1
-                i += 1
-        elif c == "'":
-            i += 1
-            while i < len(text) and text[i] != "'":
-                if text[i] == '\\':
-                    i += 1
-                i += 1
-        i += 1
-    return None
-
-
 def _decode_octal_string(s: str) -> str:
     result = []
     i = 0
@@ -93,65 +64,85 @@ def _try_build_alphabet(entries: dict) -> Optional[str]:
 
 
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
-    folded = fold_constants(source)
-    for m in re.finditer(r'local\s+\w+\s*=\s*\{', folded):
-        start = m.end() - 1
-        body = _extract_balanced_braces(folded, start)
-        if not body:
-            continue
-        entries: dict[str, int] = {}
-        for m2 in re.finditer(r'\b([A-Za-z_])\s*=\s*(\d+)', body):
-            key = m2.group(1)
-            try:
-                val = int(m2.group(2))
-                if 0 <= val <= 63:
-                    entries[key] = val
-            except Exception:
-                pass
-        for m2 in re.finditer(r'\["([^"]*)"\]\s*=\s*(\d+)', body):
-            raw_key = m2.group(1)
-            key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
-            try:
-                val = int(m2.group(2))
-                if 0 <= val <= 63:
-                    entries[key] = val
-            except Exception:
-                pass
-        if len(entries) >= 50:
-            alpha = _try_build_alphabet(entries)
-            if alpha:
-                return alpha
-
-    unfolded = source
-    for m in re.finditer(r'local\s+\w+\s*=\s*\{', unfolded):
-        start = m.end() - 1
-        body = _extract_balanced_braces(unfolded, start)
-        if not body:
-            continue
-        entries = {}
-        for m2 in re.finditer(r'\b([A-Za-z_])\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
-            key = m2.group(1)
-            try:
-                val = safe_eval_int(m2.group(2))
-                if val is not None and 0 <= val <= 63:
-                    entries[key] = val
-            except Exception:
-                pass
-        for m2 in re.finditer(r'\["([^"]*)"\]\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
-            raw_key = m2.group(1)
-            key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
-            try:
-                val = safe_eval_int(m2.group(2))
-                if val is not None and 0 <= val <= 63:
-                    entries[key] = val
-            except Exception:
-                pass
-        if len(entries) >= 50:
-            alpha = _try_build_alphabet(entries)
-            if alpha:
-                return alpha
-
+    patterns = [
+        r'local\s+alphaMap\s*=\s*\{',
+        r'local\s+N\s*=\s*\{',
+        r'local\s+\w+\s*=\s*\{[^}]*\b\w+\s*=\s*\d+[^}]*\b\w+\s*=\s*\d+',
+    ]
+    for pat in patterns:
+        m = re.search(pat, source)
+        if m:
+            start = m.end() - 1
+            body = _extract_table_body(source, start)
+            if body:
+                entries = _parse_alphabet_entries(body)
+                if len(entries) >= 50:
+                    alpha = _try_build_alphabet(entries)
+                    if alpha:
+                        return alpha
     return None
+
+
+def _extract_table_body(text: str, start: int) -> Optional[str]:
+    if start >= len(text) or text[start] != '{':
+        return None
+    depth = 0
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+        elif c == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                if text[i] == '\\':
+                    i += 1
+                i += 1
+        elif c == "'":
+            i += 1
+            while i < len(text) and text[i] != "'":
+                if text[i] == '\\':
+                    i += 1
+                i += 1
+        elif c == '-' and i + 1 < len(text) and text[i+1] == '-':
+            while i < len(text) and text[i] != '\n':
+                i += 1
+        i += 1
+    return None
+
+
+def _parse_alphabet_entries(body: str) -> dict:
+    entries: dict[str, int] = {}
+    for m in re.finditer(r'\b([A-Za-z_])\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
+        key = m.group(1)
+        try:
+            val = safe_eval_int(m.group(2))
+            if val is not None and 0 <= val <= 63:
+                entries[key] = val
+        except Exception:
+            pass
+    for m in re.finditer(r'\["([^"]*)"\]\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
+        raw_key = m.group(1)
+        key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
+        try:
+            val = safe_eval_int(m.group(2))
+            if val is not None and 0 <= val <= 63:
+                entries[key] = val
+        except Exception:
+            pass
+    for m in re.finditer(r'\[(\d+)\]\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
+        key = m.group(1)
+        try:
+            val = safe_eval_int(m.group(2))
+            if val is not None and 0 <= val <= 63:
+                entries[key] = val
+        except Exception:
+            pass
+    return entries
 
 
 def _extract_shuffle_ops(source: str) -> list:
