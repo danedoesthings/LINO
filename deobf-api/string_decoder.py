@@ -33,6 +33,40 @@ def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
     return None
 
 
+def _decode_octal_string(s: str) -> str:
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s):
+            if s[i+1] == '\\' and i + 2 < len(s) and s[i+2].isdigit():
+                i += 1
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - i <= 3:
+                    j += 1
+                try:
+                    result.append(chr(int(s[i+1:j]) % 256))
+                    i = j
+                    continue
+                except ValueError:
+                    pass
+            elif s[i+1].isdigit():
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - i <= 3:
+                    j += 1
+                try:
+                    result.append(chr(int(s[i+1:j]) % 256))
+                    i = j
+                    continue
+                except ValueError:
+                    pass
+        result.append(s[i])
+        i += 1
+    return ''.join(result)
+
+
+_STANDARD_B64 = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/')
+
+
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
     folded = fold_constants(source)
     for m in re.finditer(r'local\s+\w+\s*=\s*\{', folded):
@@ -45,12 +79,13 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             key = m2.group(1)
             try:
                 val = int(m2.group(2))
-                if 0 <= val <= 63:
+                if 0 <= val <= 63 and len(key) == 1:
                     entries[key] = val
             except Exception:
                 pass
         for m2 in re.finditer(r'\["([^"]*)"\]\s*=\s*(\d+)', body):
-            key = m2.group(1)
+            raw_key = m2.group(1)
+            key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
             try:
                 val = int(m2.group(2))
                 if 0 <= val <= 63 and len(key) == 1:
@@ -61,7 +96,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             key = m2.group(1)
             try:
                 val = int(m2.group(2))
-                if 0 <= val <= 63:
+                if 0 <= val <= 63 and len(key) == 1:
                     entries[key] = val
             except Exception:
                 pass
@@ -69,12 +104,25 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             continue
         rev: dict[int, str] = {}
         for k, v in entries.items():
-            if v not in rev:
+            if len(k) == 1:
                 rev[v] = k
         if len(rev) < 50:
             continue
-        alphabet = ''.join(rev.get(i, '') for i in range(64))
-        if len(alphabet) >= 60 and len(set(alphabet)) >= 60:
+        alphabet_chars = []
+        for i in range(64):
+            if i in rev:
+                alphabet_chars.append(rev[i])
+            else:
+                alphabet_chars.append('')
+        if len(alphabet_chars) != 64:
+            continue
+        missing_indices = [i for i, c in enumerate(alphabet_chars) if c == '']
+        used_chars = set(c for c in alphabet_chars if c != '')
+        if len(missing_indices) == 1:
+            missing_char = (_STANDARD_B64 - used_chars).pop()
+            alphabet_chars[missing_indices[0]] = missing_char
+        alphabet = ''.join(alphabet_chars)
+        if len(alphabet) == 64 and len(set(alphabet)) >= 63:
             return alphabet
     return None
 
@@ -111,7 +159,7 @@ def _apply_shuffle(strings: list, ops: list) -> list:
 
 
 def _custom_b64_decode(s: str, alphabet: str) -> Optional[bytes]:
-    if len(set(alphabet)) < 50:
+    if len(set(alphabet)) < 60:
         return None
     rev = {c: i for i, c in enumerate(alphabet)}
     bits = 0
@@ -126,37 +174,6 @@ def _custom_b64_decode(s: str, alphabet: str) -> Optional[bytes]:
             bit_count -= 8
             out.append((bits >> bit_count) & 0xFF)
     return bytes(out)
-
-
-def _decode_octal_string(s: str) -> str:
-    result = []
-    i = 0
-    while i < len(s):
-        if s[i] == '\\' and i + 1 < len(s):
-            if s[i+1] == '\\' and i + 2 < len(s) and s[i+2].isdigit():
-                i += 1
-                j = i + 1
-                while j < len(s) and s[j].isdigit() and j - i <= 3:
-                    j += 1
-                try:
-                    result.append(chr(int(s[i+1:j]) % 256))
-                    i = j
-                    continue
-                except ValueError:
-                    pass
-            elif s[i+1].isdigit():
-                j = i + 1
-                while j < len(s) and s[j].isdigit() and j - i <= 3:
-                    j += 1
-                try:
-                    result.append(chr(int(s[i+1:j]) % 256))
-                    i = j
-                    continue
-                except ValueError:
-                    pass
-        result.append(s[i])
-        i += 1
-    return ''.join(result)
 
 
 def _is_readable_string(s: str) -> bool:
@@ -201,15 +218,15 @@ class StringTableDecoder:
         self._decode()
 
     def _decode(self) -> None:
-        raw_octal = _extract_raw_octal_strings(self.source)
-        if not raw_octal:
+        raw_strings = _extract_raw_octal_strings(self.source)
+        if not raw_strings:
             self.diagnostics['error'] = 'string table not found in source'
             return
 
-        self.diagnostics['raw_count'] = len(raw_octal)
+        self.diagnostics['raw_count'] = len(raw_strings)
         ops = _extract_shuffle_ops(self.source)
         self.diagnostics['shuffle_ops'] = len(ops)
-        shuffled = _apply_shuffle(raw_octal, ops)
+        shuffled = _apply_shuffle(raw_strings, ops)
 
         alpha = _extract_alphabet_from_numeric_table(self.source)
         if alpha:
