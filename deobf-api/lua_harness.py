@@ -40,9 +40,10 @@ class RobloxCloudExecutor:
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
 
+        source_arg = json.dumps(obfuscated_source)
+
         capture_script = f"""
 local HttpService = game:GetService("HttpService")
-local args = {{...}}
 local R = {string_table}
 local captured = {{}}
 local captured_count = 0
@@ -72,7 +73,8 @@ print = function(...)
     old_print(...)
 end
 
-local decoded_source = HttpService:JSONDecode(args[1])
+local source_json = [[{source_arg}]]
+local decoded_source = HttpService:JSONDecode(source_json)
 if not decoded_source then
     capture("[Error: JSON decode failed]")
     return HttpService:JSONEncode({{captured = captured, count = captured_count}})
@@ -98,8 +100,7 @@ end
 return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 """
 
-        source_arg = json.dumps(obfuscated_source)
-        payload = {"script": capture_script, "arguments": [source_arg]}
+        payload = {"script": capture_script, "arguments": []}
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
         create_url = f"https://apis.roblox.com/cloud/v2/universes/{self.universe_id}/places/{self.place_id}/luau-execution-session-tasks"
 
