@@ -48,11 +48,23 @@ class Unveiler:
 
         try:
             lines = []
+            decoded_count = 0
             for i, s in enumerate(decoder.strings):
                 if s:
-                    lines.append(f'-- [{i+1}] {json.dumps(s)}')
+                    # Mark entries that are still raw/encoded vs successfully decoded
+                    is_raw = (s == decoder.strings[i] and
+                              re.search(r'[^A-Za-z0-9 _.,:;!?()\[\]{}\'"=+\-*/\\<>@#%^&~`|\n\t]', s))
+                    tag = '[raw]' if is_raw else ''
+                    lines.append(f'-- [{i+1}]{tag} {json.dumps(s)}')
+                    decoded_count += 1
             lines.append('')
             lines.append(f'-- Detected getter offset: {decoder.offset}')
+            if decoder.alphabet:
+                lines.append(f'-- Custom base64 alphabet detected: {decoder.alphabet[:16]}...')
+                lines.append(f'-- Decoded {decoded_count} of {len(decoder.strings)} strings')
+            else:
+                lines.append('-- WARNING: No custom alphabet found â strings may still be encoded')
+                lines.append('-- Tip: locate the 64-char alphabet string in your Lua source')
             lines.append('-- Could not fully reconstruct original source')
             return '\n'.join(lines), 'string_table', 'Decoded string table (best effort)', trace
         except:
