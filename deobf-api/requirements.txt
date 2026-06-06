@@ -5,3 +5,4 @@ httpx
 discord.py
 luaparser
 lupa
+requests
