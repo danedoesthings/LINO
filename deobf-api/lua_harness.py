@@ -6,7 +6,6 @@ import subprocess
 import signal
 import json
 import asyncio
-import base64
 from typing import Optional
 
 _STR_COMMENT = re.compile(
@@ -28,95 +27,9 @@ class RobloxCloudExecutor:
         self.place_id = os.environ.get("ROBLOX_PLACE_ID", "")
         self.available = bool(self.api_key and self.universe_id and self.place_id)
 
-    def _build_capture_script(self, encoded_source: str, string_table: str) -> str:
-        lines = [
-            'local args = {...}',
-            'local b64_source = args[1] or ""',
-            f'local R = {string_table}',
-            'local captured = {}',
-            'local captured_count = 0',
-            '',
-            'local function capture(val)',
-            '    captured_count = captured_count + 1',
-            '    captured[captured_count] = val',
-            'end',
-            '',
-            'local old_loadstring = rawget(_G, "loadstring") or function(s, n)',
-            '    return nil, "loadstring unavailable"',
-            'end',
-            '',
-            'loadstring = function(src, name)',
-            '    capture(src)',
-            '    capture("[Payload: " .. #src .. " bytes]")',
-            '    return old_loadstring(src, name)',
-            'end',
-            '',
-            'local old_print = print',
-            'print = function(...)',
-            '    local parts = {}',
-            '    for i = 1, select("#", ...) do',
-            '        parts[i] = tostring(select(i, ...))',
-            '    end',
-            '    capture(table.concat(parts, "\\t"))',
-            '    old_print(...)',
-            'end',
-            '',
-            'local function b64_decode(data)',
-            '    local b = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"',
-            '    data = string.gsub(data, "[^" .. b .. "=]", "")',
-            '    local decoded = ""',
-            '    local bit_buffer = 0',
-            '    local bit_count = 0',
-            '    for i = 1, #data do',
-            '        local c = data:sub(i, i)',
-            '        if c == "=" then break end',
-            '        local val = string.find(b, c, 1, true) - 1',
-            '        bit_buffer = bit_buffer * 64 + val',
-            '        bit_count = bit_count + 6',
-            '        if bit_count >= 8 then',
-            '            bit_count = bit_count - 8',
-            '            local byte = math.floor(bit_buffer / (2 ^ bit_count)) % 256',
-            '            decoded = decoded .. string.char(byte)',
-            '        end',
-            '    end',
-            '    return decoded',
-            'end',
-            '',
-            'local decoded_source = b64_decode(b64_source)',
-            'if decoded_source == "" then',
-            '    capture("[Error: base64 decode failed]")',
-            '    local HttpService = game:GetService("HttpService")',
-            '    return HttpService:JSONEncode({captured = captured, count = captured_count})',
-            'end',
-            '',
-            'local obfuscated_chunk, err = old_loadstring(decoded_source, "obfuscated")',
-            'if not obfuscated_chunk then',
-            '    capture("[Error loading obfuscated: " .. tostring(err) .. "]")',
-            '    local HttpService = game:GetService("HttpService")',
-            '    return HttpService:JSONEncode({captured = captured, count = captured_count})',
-            'end',
-            '',
-            'setfenv(obfuscated_chunk, getfenv())',
-            'local success, result = pcall(obfuscated_chunk)',
-            'if success then',
-            '    capture("[Execution complete]")',
-            '    if type(result) == "string" then',
-            '        capture(result)',
-            '    end',
-            'else',
-            '    capture("[Error: " .. tostring(result) .. "]")',
-            'end',
-            '',
-            'local HttpService = game:GetService("HttpService")',
-            'return HttpService:JSONEncode({captured = captured, count = captured_count})',
-        ]
-        return "\n".join(lines)
-
     async def execute(self, obfuscated_source: str, decoded_strings: list = None, timeout: int = 120):
         if not self.available:
             return None
-
-        encoded_source = base64.b64encode(obfuscated_source.encode('utf-8', errors='replace')).decode('ascii')
 
         string_table = "{}"
         if decoded_strings:
@@ -127,13 +40,71 @@ class RobloxCloudExecutor:
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
 
-        capture_script = self._build_capture_script(encoded_source, string_table)
-
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
-        payload = {"script": capture_script, "arguments": []}
-
         import httpx
         create_url = f"https://apis.roblox.com/cloud/v2/universes/{self.universe_id}/places/{self.place_id}/luau-execution-session-tasks"
+
+        capture_script = f"""
+local HttpService = game:GetService("HttpService")
+local args = {{...}}
+local R = {string_table}
+local captured = {{}}
+local captured_count = 0
+
+local function capture(val)
+    captured_count = captured_count + 1
+    captured[captured_count] = val
+end
+
+local old_loadstring = rawget(_G, "loadstring") or function(s, n)
+    return nil, "loadstring unavailable"
+end
+
+loadstring = function(src, name)
+    capture(src)
+    capture("[Payload: " .. #src .. " bytes]")
+    return old_loadstring(src, name)
+end
+
+local old_print = print
+print = function(...)
+    local parts = {{}}
+    for i = 1, select("#", ...) do
+        parts[i] = tostring(select(i, ...))
+    end
+    capture(table.concat(parts, "\\t"))
+    old_print(...)
+end
+
+local decoded_source = HttpService:JSONDecode(args[1])
+if not decoded_source then
+    capture("[Error: JSON decode failed]")
+    return HttpService:JSONEncode({{captured = captured, count = captured_count}})
+end
+
+local obfuscated_chunk, err = old_loadstring(decoded_source, "obfuscated")
+if not obfuscated_chunk then
+    capture("[Error loading obfuscated: " .. tostring(err) .. "]")
+    return HttpService:JSONEncode({{captured = captured, count = captured_count}})
+end
+
+setfenv(obfuscated_chunk, getfenv())
+local success, result = pcall(obfuscated_chunk)
+if success then
+    capture("[Execution complete]")
+    if type(result) == "string" then
+        capture(result)
+    end
+else
+    capture("[Error: " .. tostring(result) .. "]")
+end
+
+return HttpService:JSONEncode({{captured = captured, count = captured_count}})
+"""
+
+        source_arg = json.dumps(obfuscated_source)
+        payload = {"script": capture_script, "arguments": [source_arg]}
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 task_resp = await client.post(create_url, headers=headers, json=payload)
@@ -144,7 +115,7 @@ class RobloxCloudExecutor:
                 if not task_path:
                     return {"error": "No task path returned"}
                 task_url = f"https://apis.roblox.com{task_path}"
-                for poll_count in range(60):
+                for _ in range(60):
                     await asyncio.sleep(2)
                     poll_resp = await client.get(task_url, headers=headers)
                     if poll_resp.status_code != 200:
