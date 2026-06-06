@@ -1,3 +1,4 @@
+
 import re
 import json
 from typing import Optional, List
@@ -67,8 +68,11 @@ class PrometheusDecoder:
             if payload:
                 return payload
 
-        payload = self._try_direct_assembly()
-        return payload
+        payload = self._try_keyword_ordered_assembly()
+        if payload:
+            return payload
+
+        return None
 
     def _try_shuffled_assembly(self) -> Optional[str]:
         shuffled = self._apply_shuffle(self.strings)
@@ -78,22 +82,56 @@ class PrometheusDecoder:
             if s and s in payload_keywords:
                 parts = []
                 for j in range(i, len(shuffled)):
-                    if shuffled[j]:
-                        parts.append(shuffled[j])
-                result = ''.join(parts)
-                if len(result) > 5 and any(kw in result for kw in payload_keywords):
-                    return result
+                    part = shuffled[j]
+                    if part and self._is_source_fragment(part):
+                        parts.append(part)
+                if parts:
+                    result = self._join_fragments(parts)
+                    if len(result) > 10 and any(kw in result for kw in payload_keywords):
+                        return result
 
         return None
 
-    def _try_direct_assembly(self) -> Optional[str]:
+    def _try_keyword_ordered_assembly(self) -> Optional[str]:
         payload_keywords = {'print', 'function', 'local', 'return', 'loadstring', 'pcall', 'game', 'workspace', 'error'}
 
         for kw in payload_keywords:
             if kw in self.strings:
                 idx = self.strings.index(kw)
-                parts = [s for s in self.strings[idx:] if s]
-                result = ''.join(parts)
-                if len(result) > 5:
-                    return result
+                parts = []
+                for s in self.strings[idx:]:
+                    if s and self._is_source_fragment(s):
+                        parts.append(s)
+                if parts:
+                    result = self._join_fragments(parts)
+                    if len(result) > 10 and any(kw in result for kw in payload_keywords):
+                        return result
         return None
+
+    def _is_source_fragment(self, s: str) -> bool:
+        if len(s) == 0:
+            return False
+        if len(s) > 500:
+            return False
+        source_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,;:!?()[]{}\'\"=+-*/<>@# \t\n\r')
+        non_source = sum(1 for c in s if c not in source_chars)
+        if non_source > len(s) * 0.1:
+            return False
+        return True
+
+    def _join_fragments(self, parts: List[str]) -> str:
+        result_parts = []
+        for part in parts:
+            if result_parts and self._needs_space_before(part):
+                result_parts.append(' ')
+            result_parts.append(part)
+        return ''.join(result_parts)
+
+    def _needs_space_before(self, part: str) -> bool:
+        if not part:
+            return False
+        no_space_after = set('.,;:)]}\'\"')
+        no_space_before = set('.,;:)]}\'\"')
+        if part[0] in no_space_before:
+            return False
+        return True
