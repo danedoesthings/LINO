@@ -1,15 +1,14 @@
 import re
 import base64
 
-def decode_octal(s):
+def decode_unicode_escapes(s):
+    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
+
+def decode_octal_escapes(s):
     result = []
     i = 0
     while i < len(s):
         if s[i] == '\\' and i + 1 < len(s):
-            if s[i+1] == '\\':
-                result.append('\\')
-                i += 2
-                continue
             octal = ''
             j = i + 1
             while j < len(s) and len(octal) < 3 and s[j] in '01234567':
@@ -23,8 +22,10 @@ def decode_octal(s):
         i += 1
     return ''.join(result)
 
-def fix_unicode(s):
-    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
+def decode_mixed_escapes(s):
+    s = decode_unicode_escapes(s)
+    s = decode_octal_escapes(s)
+    return s
 
 def eval_expr(expr):
     expr = re.sub(r'\s+', '', expr)
@@ -38,6 +39,7 @@ def extract_alphabet(source):
         r'local\s+N\s*=\s*\{([^}]+)\}',
         r'local\s+alphaMap\s*=\s*\{([^}]+)\}',
         r'N\s*=\s*\{([^}]+)\}',
+        r'alphaMap\s*=\s*\{([^}]+)\}',
     ]
     for pattern in patterns:
         m = re.search(pattern, source, re.DOTALL)
@@ -68,13 +70,17 @@ def extract_alphabet(source):
 
 def extract_strings(source):
     patterns = [
-        r'local\s+EncStr\s*=\s*\{([^}]+)\}',
-        r'local\s+R\s*=\s*\{([^}]+)\}',
+        r'local\s+EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'local\s+R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
     ]
     for pattern in patterns:
         m = re.search(pattern, source, re.DOTALL)
         if m:
-            return re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+            body = m.group(1)
+            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+            if strings:
+                return strings
     return []
 
 def extract_shuffle(source):
@@ -113,10 +119,10 @@ def custom_b64_decode(s, alphabet):
     except:
         return None
 
-def is_lua(s):
+def is_lua_source(s):
     if len(s) < 20:
         return False
-    keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do']
+    keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do', 'repeat', 'until']
     return sum(1 for kw in keywords if kw in s) >= 2
 
 class StringTableDecoder:
@@ -138,28 +144,30 @@ class StringTableDecoder:
         self.alphabet = extract_alphabet(self.source)
         
         for s in raw:
-            s = fix_unicode(s)
-            s = decode_octal(s)
+            original_s = s
+            s = decode_mixed_escapes(s)
+            
             if self.alphabet and len(s) >= 4:
-                decoded = custom_b64_decode(s, self.alphabet)
-                if decoded:
+                decoded_bytes = custom_b64_decode(s, self.alphabet)
+                if decoded_bytes:
                     try:
-                        text = decoded.decode('utf-8', errors='replace')
-                        if is_lua(text):
+                        text = decoded_bytes.decode('utf-8', errors='replace')
+                        if is_lua_source(text):
                             self.strings.append(text)
                             continue
                     except:
                         pass
-            if is_lua(s):
+            
+            if is_lua_source(s):
                 self.strings.append(s)
             else:
                 self.strings.append('')
         
-        self.ok = bool(self.strings)
+        self.ok = len(self.strings) > 0
         return self.ok
     
     def get_source(self):
         for s in self.strings:
-            if is_lua(s):
+            if is_lua_source(s):
                 return s
-        return '\n'.join([s for s in self.strings if s])
+        return ''
