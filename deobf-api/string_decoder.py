@@ -80,23 +80,12 @@ def _try_build_alphabet(entries: dict) -> Optional[str]:
             alphabet_chars.append(rev[i])
         else:
             alphabet_chars.append('')
-    if len(alphabet_chars) != 64:
-        return None
-    missing_indices = [i for i, c in enumerate(alphabet_chars) if c == '']
     used_chars = set(c for c in alphabet_chars if c != '')
-    if len(missing_indices) == 1:
-        remaining = _STANDARD_B64 - used_chars
+    missing_indices = [i for i, c in enumerate(alphabet_chars) if c == '']
+    remaining = list(_STANDARD_B64 - used_chars)
+    for idx in missing_indices:
         if remaining:
-            missing_char = remaining.pop()
-            alphabet_chars[missing_indices[0]] = missing_char
-    elif len(missing_indices) == 0:
-        pass
-    else:
-        for idx in missing_indices:
-            remaining = _STANDARD_B64 - used_chars
-            if remaining:
-                alphabet_chars[idx] = remaining.pop()
-                used_chars.add(alphabet_chars[idx])
+            alphabet_chars[idx] = remaining.pop()
     alphabet = ''.join(alphabet_chars)
     if len(alphabet) == 64 and len(set(alphabet)) >= 60:
         return alphabet
@@ -115,7 +104,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             key = m2.group(1)
             try:
                 val = int(m2.group(2))
-                if 0 <= val <= 63 and len(key) == 1:
+                if 0 <= val <= 63:
                     entries[key] = val
             except Exception:
                 pass
@@ -124,15 +113,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
             try:
                 val = int(m2.group(2))
-                if 0 <= val <= 63 and len(key) == 1:
-                    entries[key] = val
-            except Exception:
-                pass
-        for m2 in re.finditer(r'\[(\d+)\]\s*=\s*(\d+)', body):
-            key = m2.group(1)
-            try:
-                val = int(m2.group(2))
-                if 0 <= val <= 63 and len(key) == 1:
+                if 0 <= val <= 63:
                     entries[key] = val
             except Exception:
                 pass
@@ -147,12 +128,12 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
         body = _extract_balanced_braces(unfolded, start)
         if not body:
             continue
-        entries: dict[str, int] = {}
+        entries = {}
         for m2 in re.finditer(r'\b([A-Za-z_])\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
             key = m2.group(1)
             try:
                 val = safe_eval_int(m2.group(2))
-                if val is not None and 0 <= val <= 63 and len(key) == 1:
+                if val is not None and 0 <= val <= 63:
                     entries[key] = val
             except Exception:
                 pass
@@ -161,7 +142,7 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
             try:
                 val = safe_eval_int(m2.group(2))
-                if val is not None and 0 <= val <= 63 and len(key) == 1:
+                if val is not None and 0 <= val <= 63:
                     entries[key] = val
             except Exception:
                 pass
@@ -227,10 +208,6 @@ def _is_readable_string(s: str) -> bool:
         return False
     printable = sum(1 for c in s if 32 <= ord(c) <= 126 or ord(c) in (9, 10, 13))
     return printable / max(len(s), 1) >= 0.80
-
-
-def _is_identifier(s: str) -> bool:
-    return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s))
 
 
 _TABLE_PATTERNS = [
@@ -318,6 +295,6 @@ class StringTableDecoder:
                             return text
                     except Exception:
                         pass
-        if _is_identifier(s):
+        if _is_readable_string(s):
             return s
         return s
