@@ -1,4 +1,3 @@
-
 import re
 import json
 from typing import Optional, List
@@ -63,10 +62,9 @@ class PrometheusDecoder:
         if not self.strings or len(self.strings) < 4:
             return None
 
-        if self.shuffle_pairs:
-            payload = self._try_shuffled_assembly()
-            if payload:
-                return payload
+        payload = self._try_shuffled_assembly()
+        if payload:
+            return payload
 
         payload = self._try_keyword_ordered_assembly()
         if payload:
@@ -75,47 +73,39 @@ class PrometheusDecoder:
         return None
 
     def _try_shuffled_assembly(self) -> Optional[str]:
+        if not self.shuffle_pairs:
+            return None
         shuffled = self._apply_shuffle(self.strings)
-        payload_keywords = {'print', 'function', 'local', 'return', 'loadstring', 'pcall', 'game', 'workspace', 'error'}
+        return self._assemble_from_list(shuffled)
 
-        for i, s in enumerate(shuffled):
+    def _try_keyword_ordered_assembly(self) -> Optional[str]:
+        return self._assemble_from_list(self.strings)
+
+    def _assemble_from_list(self, strings: List[str]) -> Optional[str]:
+        payload_keywords = {'print', 'function', 'local', 'return', 'loadstring', 'pcall', 'game', 'workspace', 'error', 'while', 'for', 'if', 'repeat'}
+
+        for i, s in enumerate(strings):
             if s and s in payload_keywords:
                 parts = []
-                for j in range(i, len(shuffled)):
-                    part = shuffled[j]
+                for j in range(i, len(strings)):
+                    part = strings[j]
                     if part and self._is_source_fragment(part):
                         parts.append(part)
                 if parts:
                     result = self._join_fragments(parts)
-                    if len(result) > 10 and any(kw in result for kw in payload_keywords):
-                        return result
-
-        return None
-
-    def _try_keyword_ordered_assembly(self) -> Optional[str]:
-        payload_keywords = {'print', 'function', 'local', 'return', 'loadstring', 'pcall', 'game', 'workspace', 'error'}
-
-        for kw in payload_keywords:
-            if kw in self.strings:
-                idx = self.strings.index(kw)
-                parts = []
-                for s in self.strings[idx:]:
-                    if s and self._is_source_fragment(s):
-                        parts.append(s)
-                if parts:
-                    result = self._join_fragments(parts)
-                    if len(result) > 10 and any(kw in result for kw in payload_keywords):
-                        return result
+                    if len(result) > 15 and any(kw in result for kw in payload_keywords):
+                        if self._looks_like_lua_source(result):
+                            return result
         return None
 
     def _is_source_fragment(self, s: str) -> bool:
-        if len(s) == 0:
+        if not s:
             return False
         if len(s) > 500:
             return False
-        source_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,;:!?()[]{}\'\"=+-*/<>@# \t\n\r')
+        source_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,;:!?()[]{}\'\"=+-*/<>@#%^ \t\n\r')
         non_source = sum(1 for c in s if c not in source_chars)
-        if non_source > len(s) * 0.1:
+        if non_source > len(s) * 0.05:
             return False
         return True
 
@@ -130,8 +120,13 @@ class PrometheusDecoder:
     def _needs_space_before(self, part: str) -> bool:
         if not part:
             return False
-        no_space_after = set('.,;:)]}\'\"')
         no_space_before = set('.,;:)]}\'\"')
         if part[0] in no_space_before:
             return False
         return True
+
+    def _looks_like_lua_source(self, code: str) -> bool:
+        keywords = ['function', 'local', 'end', 'return', 'if', 'then', 'else', 'for', 'while', 'do', 'print', 'pcall', 'error']
+        found = sum(1 for kw in keywords if kw in code)
+        has_structure = '=' in code or '(' in code or '{' in code
+        return found >= 1 and has_structure and len(code) > 20
