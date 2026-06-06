@@ -53,7 +53,7 @@ local function capture(val)
     captured[captured_count] = val
 end
 
-local old_loadstring = rawget(_G, "loadstring") or function(s, n)
+local old_loadstring = loadstring or function(s, n)
     return nil, "loadstring unavailable"
 end
 
