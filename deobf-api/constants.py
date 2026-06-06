@@ -1,3 +1,5 @@
+import re
+
 LUA_KEYWORDS: set[str] = {
     'function', 'local', 'end', 'return', 'if', 'then', 'else', 'elseif',
     'for', 'while', 'do', 'repeat', 'until', 'not', 'and', 'or',
