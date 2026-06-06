@@ -10,17 +10,16 @@ class DeobfEngine:
     def process(self, source):
         trace = []
         
-        trace.append({'stage': 'anti_tamper', 'success': True, 'message': 'Removing anti-tamper'})
         source = remove_anti_tamper(source)
+        trace.append({'stage': 'anti_tamper', 'success': True, 'message': 'Anti-tamper removed'})
         
-        trace.append({'stage': 'string_decode', 'success': True, 'message': 'Decoding string table'})
         decoder = StringTableDecoder(source)
         if decoder.decode():
             result = decoder.get_source()
             if result and len(result) > 10:
-                trace.append({'stage': 'beautify', 'success': True, 'message': 'Beautifying output'})
                 result = beautify(result)
-                return result, 'success', 'Full deobfuscation completed', trace
+                trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
+                return result, 'success', 'Deobfuscation complete', trace
         
         trace.append({'stage': 'fallback', 'success': False, 'message': 'Could not extract source'})
         return '', 'failed', 'Unable to deobfuscate', trace
