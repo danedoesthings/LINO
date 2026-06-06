@@ -1,18 +1,16 @@
 import re
+
 _OPENERS = frozenset(['then', 'do', 'else', 'elseif', 'repeat'])
 _CLOSERS = frozenset(['end', 'else', 'elseif', 'until'])
-_FUNC_PAT = re.compile(r'\bfunction\b')
-_KW_OPEN = re.compile(r'\b(?:then|do|repeat)\b')
-_KW_CLOSE = re.compile(r'\bend\b')
 
 def beautify(code: str) -> str:
     code = re.sub(r'[ \t]+', ' ', code)
     code = code.replace(';', '\n')
     literal_pattern = r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|\[\[.*?\]\]|--\[\[.*?\]\]|--[^\n]*)'
     literals = []
-    def shield(match):
+    def shield(m):
         placeholder = f"___LINO_LITERAL_{len(literals)}___"
-        literals.append(match.group(0))
+        literals.append(m.group(0))
         return placeholder
     shielded_code = re.sub(literal_pattern, shield, code, flags=re.DOTALL)
     shielded_code = re.sub(r'([,{}\[\]\(\)])', r' \1 ', shielded_code)
@@ -41,16 +39,16 @@ def beautify(code: str) -> str:
         if not line:
             indented_lines.append('')
             continue
-        opens_inline = len(_FUNC_PAT.findall(line)) + len(_KW_OPEN.findall(line))
-        closes_inline = len(_KW_CLOSE.findall(line))
+        opens_inline = len(re.findall(r'\bfunction\b', line)) + len(re.findall(r'\b(?:then|do|repeat)\b', line))
+        closes_inline = len(re.findall(r'\bend\b', line)) + len(re.findall(r'\buntil\b', line))
         first = (line.split() or [''])[0].rstrip('(').rstrip('{')
         if first in _CLOSERS and not (first in _OPENERS and closes_inline == opens_inline):
             depth = max(0, depth - 1)
-        indented_lines.append(' ' * depth + line)
+        indented_lines.append('    ' * depth + line)
         if first in ('else', 'elseif'):
             delta = opens_inline - closes_inline
             if delta > 0:
-                depth += (delta - 1)
+                depth += max(0, delta - 1)
             elif delta < 0:
                 depth = max(0, depth + delta)
         else:
