@@ -2,9 +2,7 @@ import os
 import base64
 import traceback
 import logging
-import hashlib
 import re
-import json
 import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
