@@ -66,4 +66,17 @@ def fold_constants(code: str, passes: int = 12) -> str:
     return code
 
 _E_OFFSET_PATS = [
-    re.compile(r'local\s+function\s
+    re.compile(r'local\s+function\s+E\s*\(E\)\s*return\s+R\[E\s*\+\s*\(?([-\d+\-*\s]+)\)?\]'),
+    re.compile(r'\breturn\s+R\s*\[\s*E\s*\+\s*\(?([-\d+\-*\s]+)\)?\]'),
+    re.compile(r'\breturn\s+EncStr\s*\[\s*GetStr\s*\+\s*\(?([-\d+\-*\s]+)\)?\]'),
+]
+
+def get_string_table_offset(source: str) -> int:
+    folded = fold_constants(source)
+    for pat in _E_OFFSET_PATS:
+        m = pat.search(folded)
+        if m:
+            val = safe_eval_int(m.group(1))
+            if val is not None:
+                return val
+    return 0
