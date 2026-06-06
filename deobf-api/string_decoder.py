@@ -112,14 +112,14 @@ def _decode_octal_string(s: str) -> str:
         i += 1
     return ''.join(result)
 
-def _decode_numeric_escapes(s: str) -> str:
-    return re.sub(r'\\(\d{1,3})', lambda m: chr(int(m.group(1)) % 256), s)
-
 def _is_readable_string(s: str) -> bool:
     if not s:
         return False
     printable = sum(1 for c in s if 32 <= ord(c) <= 126 or ord(c) in (9, 10, 13))
     return printable / max(len(s), 1) >= 0.80
+
+def _is_identifier(s: str) -> bool:
+    return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s))
 
 def _extract_raw_octal_strings(source: str) -> Optional[list]:
     r_match = re.search(r'local\s+R\s*=\s*\{([^}]+)\}', source, re.DOTALL)
@@ -158,17 +158,11 @@ class StringTableDecoder:
         if alpha:
             self.alphabet = alpha
             self.diagnostics['alphabet'] = alpha[:10] + '...'
-            decoded = []
-            for s in shuffled:
-                decoded.append(self._decode_entry(s))
-            self.strings = decoded
-        else:
-            self.diagnostics['note'] = 'no custom alphabet, using octal decode'
-            decoded = []
-            for s in shuffled:
-                decoded.append(_decode_octal_string(s))
-            self.strings = decoded
 
+        decoded = []
+        for s in shuffled:
+            decoded.append(self._decode_entry(s))
+        self.strings = decoded
         self.ok = True
         self.diagnostics['decoded_count'] = len(self.strings)
         self.offset = get_string_table_offset(self.source)
@@ -177,20 +171,21 @@ class StringTableDecoder:
     def _decode_entry(self, s: str) -> str:
         if not s:
             return ''
-        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s):
+        if _is_identifier(s):
             return s
         if re.match(r'^(\\\d{1,3})+$', s):
-            return _decode_octal_string(s)
-        raw_bytes = _custom_b64_decode(s, self.alphabet)
-        if raw_bytes is not None:
-            for enc in ('utf-8', 'latin-1'):
-                try:
-                    text = raw_bytes.decode(enc, errors='strict')
-                    if _is_readable_string(text):
-                        return text
-                except Exception:
-                    pass
-        fallback = _decode_octal_string(s)
-        if _is_readable_string(fallback):
-            return fallback
+            decoded = _decode_octal_string(s)
+            if _is_readable_string(decoded):
+                return decoded
+            return s
+        if self.alphabet:
+            raw_bytes = _custom_b64_decode(s, self.alphabet)
+            if raw_bytes is not None:
+                for enc in ('utf-8', 'latin-1'):
+                    try:
+                        text = raw_bytes.decode(enc, errors='strict')
+                        if _is_readable_string(text):
+                            return text
+                    except Exception:
+                        pass
         return s
