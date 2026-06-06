@@ -63,15 +63,146 @@ class PrometheusDecoder:
         if not self.strings or len(self.strings) < 4:
             return None
 
+        payload = self._try_vm_unroll()
+        if payload:
+            return payload
+
+        payload = self._try_getter_substitution()
+        if payload:
+            return payload
+
         payload = self._try_shuffled_assembly()
         if payload:
             return payload
 
-        payload = self._try_keyword_ordered_assembly()
-        if payload:
-            return payload
+        return self._try_keyword_ordered_assembly()
 
-        return self._try_getter_substitution()
+    def _try_vm_unroll(self) -> Optional[str]:
+        if not self.getter_name:
+            return None
+
+        resolved_source = self._resolve_getter_calls(self.source)
+        loadstring_call = self._find_loadstring_call(resolved_source)
+        if not loadstring_call:
+            return None
+
+        payload = self._extract_loadstring_argument(loadstring_call, resolved_source)
+        return payload
+
+    def _resolve_getter_calls(self, source: str) -> str:
+        getter = re.escape(self.getter_name)
+        pattern = re.compile(rf'\b{getter}\s*\(\s*([0-9+\-*/%\s()]+?)\s*\)')
+        strings = self.strings
+        offset = self.offset
+
+        def repl(m):
+            idx = safe_eval_int(m.group(1).strip())
+            if idx is None:
+                return m.group(0)
+            py_index = idx + offset - 1
+            if 0 <= py_index < len(strings):
+                s = strings[py_index]
+                if s:
+                    return json.dumps(s)
+            return m.group(0)
+
+        return pattern.sub(repl, source)
+
+    def _find_loadstring_call(self, source: str) -> Optional[str]:
+        patterns = [
+            r'"loadstring"\s*\(\s*',
+            r'"load"\s*\(\s*',
+            r'loadstring\s*\(\s*',
+        ]
+        for pat in patterns:
+            m = re.search(pat, source)
+            if m:
+                start = m.start()
+                window = source[start:start + 2000]
+                depth = 0
+                arg_start = None
+                for i, c in enumerate(window):
+                    if c == '(':
+                        if depth == 0 and arg_start is None:
+                            arg_start = i + 1
+                        depth += 1
+                    elif c == ')':
+                        depth -= 1
+                        if depth == 0 and arg_start is not None:
+                            return window[arg_start:i]
+                if arg_start is not None:
+                    return window[arg_start:]
+        return None
+
+    def _extract_loadstring_argument(self, arg: str, source: str) -> Optional[str]:
+        arg = arg.strip()
+        if arg.startswith('"') and arg.endswith('"'):
+            content = arg[1:-1]
+            if len(content) > 5 and self._looks_like_lua_source(content):
+                return content
+
+        if '..' in arg:
+            parts = [p.strip() for p in arg.split('..')]
+            result_parts = []
+            for part in parts:
+                if part.startswith('"') and part.endswith('"'):
+                    result_parts.append(part[1:-1])
+                elif part in self.strings:
+                    result_parts.append(part)
+                else:
+                    resolved = self._resolve_getter_calls(part)
+                    if resolved.startswith('"') and resolved.endswith('"'):
+                        result_parts.append(resolved[1:-1])
+                    else:
+                        return None
+            payload = ''.join(result_parts)
+            if self._looks_like_lua_source(payload):
+                return payload
+
+        if 'string.char' in arg or 'table.concat' in arg:
+            return self._extract_via_symbolic_eval(arg, source)
+
+        return None
+
+    def _extract_via_symbolic_eval(self, expr: str, source: str) -> Optional[str]:
+        resolved = self._resolve_getter_calls(source)
+
+        char_blocks = re.findall(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', resolved)
+        if char_blocks:
+            all_bytes = []
+            for block in char_blocks:
+                nums = [int(n.strip()) for n in block.split(',') if n.strip().isdigit()]
+                all_bytes.extend(nums)
+            if all_bytes:
+                result = ''.join(chr(b % 256) for b in all_bytes)
+                if self._looks_like_lua_source(result):
+                    return result
+
+        concat_match = re.search(r'table\.concat\s*\(\s*(\w+)\s*\)', resolved)
+        if concat_match:
+            var = concat_match.group(1)
+            entries = {}
+            for m in re.finditer(rf'{var}\[(\d+)\]\s*=\s*"([^"]*)"', resolved):
+                entries[int(m.group(1))] = m.group(2)
+            for m in re.finditer(rf'table\.insert\s*\(\s*{var}\s*,\s*"([^"]*)"\s*\)', resolved):
+                idx = len(entries) + 1
+                entries[idx] = m.group(1)
+            if entries:
+                result = ''.join(entries[k] for k in sorted(entries))
+                if self._looks_like_lua_source(result):
+                    return result
+
+        return None
+
+    def _try_getter_substitution(self) -> Optional[str]:
+        if not self.getter_name:
+            return None
+        result = self._resolve_getter_calls(self.source)
+        if result != self.source:
+            result = self._strip_setup_block(result)
+            if self._looks_like_lua_source(result):
+                return result
+        return None
 
     def _try_shuffled_assembly(self) -> Optional[str]:
         if not self.shuffle_pairs:
@@ -131,32 +262,6 @@ class PrometheusDecoder:
         found = sum(1 for kw in keywords if kw in code)
         has_structure = '=' in code or '(' in code or '{' in code
         return found >= 1 and has_structure and len(code) > 20
-
-    def _try_getter_substitution(self) -> Optional[str]:
-        if not self.getter_name:
-            return None
-        getter = re.escape(self.getter_name)
-        pattern = re.compile(rf'\b{getter}\s*\(\s*([0-9+\-*/%\s()]+?)\s*\)')
-        strings = self.strings
-        offset = self.offset
-
-        def repl(m):
-            idx = safe_eval_int(m.group(1).strip())
-            if idx is None:
-                return m.group(0)
-            py_index = idx + offset - 1
-            if 0 <= py_index < len(strings):
-                s = strings[py_index]
-                if s:
-                    return json.dumps(s)
-            return m.group(0)
-
-        result = pattern.sub(repl, self.source)
-        if result != self.source:
-            result = self._strip_setup_block(result)
-            if self._looks_like_lua_source(result):
-                return result
-        return None
 
     def _strip_setup_block(self, source: str) -> str:
         source = re.sub(
