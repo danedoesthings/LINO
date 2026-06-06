@@ -84,17 +84,30 @@ def _decode_octal_string(s: str) -> str:
     result = []
     i = 0
     while i < len(s):
-        if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
-            j = i + 1
-            while j < len(s) and s[j].isdigit() and j - i <= 4:
-                j += 1
-            try:
-                code = int(s[i+1:j])
-                result.append(chr(code % 256))
-                i = j
-                continue
-            except ValueError:
-                pass
+        if s[i] == '\\' and i + 1 < len(s):
+            if s[i+1] == '\\' and i + 2 < len(s) and s[i+2].isdigit():
+                i += 1
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - i <= 3:
+                    j += 1
+                try:
+                    code = int(s[i+1:j])
+                    result.append(chr(code % 256))
+                    i = j
+                    continue
+                except ValueError:
+                    pass
+            elif s[i+1].isdigit():
+                j = i + 1
+                while j < len(s) and s[j].isdigit() and j - i <= 3:
+                    j += 1
+                try:
+                    code = int(s[i+1:j])
+                    result.append(chr(code % 256))
+                    i = j
+                    continue
+                except ValueError:
+                    pass
         result.append(s[i])
         i += 1
     return ''.join(result)
@@ -106,7 +119,7 @@ def _is_readable_string(s: str) -> bool:
     if not s:
         return False
     printable = sum(1 for c in s if 32 <= ord(c) <= 126 or ord(c) in (9, 10, 13))
-    return printable / len(s) >= 0.80
+    return printable / max(len(s), 1) >= 0.80
 
 def _extract_raw_octal_strings(source: str) -> Optional[list]:
     r_match = re.search(r'local\s+R\s*=\s*\{([^}]+)\}', source, re.DOTALL)
@@ -118,21 +131,6 @@ def _extract_raw_octal_strings(source: str) -> Optional[list]:
     raw = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
     if raw and len(raw) >= 4:
         return raw
-    return None
-
-_R_TABLE_PATTERNS = [
-    re.compile(r'local\s+R\s*=\s*\{(.*?)\}(?=local\s+function|for\s+E)', re.DOTALL),
-    re.compile(r'\{((?:\s*"[^"]*"\s*[;,]?\s*){10,})\}', re.DOTALL),
-]
-
-def _extract_raw_strings(source: str) -> Optional[list]:
-    for pat in _R_TABLE_PATTERNS:
-        m = pat.search(source)
-        if m:
-            body = m.group(1)
-            raw = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
-            if raw:
-                return [_decode_numeric_escapes(s) for s in raw]
     return None
 
 class StringTableDecoder:
@@ -154,19 +152,18 @@ class StringTableDecoder:
         self.diagnostics['raw_count'] = len(raw_octal)
         ops = _extract_shuffle_ops(self.source)
         self.diagnostics['shuffle_ops'] = len(ops)
+        shuffled = _apply_shuffle(raw_octal, ops)
 
         alpha = _extract_alphabet_from_numeric_table(self.source)
         if alpha:
             self.alphabet = alpha
             self.diagnostics['alphabet'] = alpha[:10] + '...'
-            shuffled = _apply_shuffle(raw_octal, ops)
             decoded = []
             for s in shuffled:
                 decoded.append(self._decode_entry(s))
             self.strings = decoded
         else:
             self.diagnostics['note'] = 'no custom alphabet, using octal decode'
-            shuffled = _apply_shuffle(raw_octal, ops)
             decoded = []
             for s in shuffled:
                 decoded.append(_decode_octal_string(s))
@@ -180,8 +177,6 @@ class StringTableDecoder:
     def _decode_entry(self, s: str) -> str:
         if not s:
             return ''
-        if _is_readable_string(s):
-            return s
         if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s):
             return s
         if re.match(r'^(\\\d{1,3})+$', s):
