@@ -6,6 +6,7 @@ from devirtualiser import Devirtualiser, strip_bootstrap
 from state_machine_devirt import StateMachineLifter
 from vm_devirtualizer import VMDevirtualizer
 from instruction_table_dumper import InstructionTableDumper
+from loadstring_extractor import LoadstringPayloadExtractor
 from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
@@ -125,13 +126,16 @@ class Unveiler:
         if depth > 5:
             log('max_depth', False, 'Recursion limit reached')
             return source, 'max_depth', 'Recursion limit reached', trace
+
         decoder = StringTableDecoder(source)
         if not decoder.ok:
             log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
             return '', 'unable', 'String decode failed', trace
         log('decode', True, f'decoded {len(decoder.strings)} strings (depth {depth})')
+
         vm_score = self._calculate_vm_score(source)
         log('vm_detect', True, f'VM score: {vm_score}')
+
         if vm_score >= 10:
             log('harness', True, 'VM detected, attempting dynamic harness execution')
             harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
@@ -149,6 +153,7 @@ class Unveiler:
                     harness_result = renamer.rename(harness_result)
                     harness_result = beautify(harness_result)
                     return harness_result, 'dynamic_harness', 'Dynamic harness execution complete', trace
+
         if vm_score >= 15:
             log('devirtualise', True, 'VM detected, attempting AST-based VM devirtualization')
             try:
@@ -165,6 +170,7 @@ class Unveiler:
                     log('devirtualise', False, f'VM devirtualizer: {diag_msg}')
             except Exception as e:
                 log('devirtualise', False, f'VM devirtualizer exception: {str(e)[:200]}')
+
         if vm_score >= 10:
             log('devirtualise', True, 'attempting instruction-level VM lifting')
             vm_lifter = WeAreDevsVMLifter(decoder.strings, offset=decoder.offset)
@@ -175,6 +181,21 @@ class Unveiler:
                 lifted = beautify(lifted)
                 log('devirtualise_success', True, 'VM lifted via instruction decoder')
                 return lifted, 'vm_lifted', 'VM successfully lifted to structured code', trace
+
+        if vm_score >= 5:
+            log('static_loadstring', True, 'attempting static loadstring payload extraction')
+            try:
+                extractor = LoadstringPayloadExtractor(source, decoder)
+                payload = extractor.extract()
+                if payload and len(payload) > 10 and self._is_valid_lua(payload):
+                    renamer = VarRenamer()
+                    payload = renamer.rename(payload)
+                    payload = beautify(payload)
+                    log('static_loadstring', True, f'payload extracted statically ({len(payload)} bytes)')
+                    return payload, 'static_loadstring', 'Loadstring payload extracted via static analysis', trace
+            except Exception as e:
+                log('static_loadstring', False, f'static extraction failed: {str(e)[:100]}')
+
         log('harness', True, 'attempting static symbolic evaluation')
         harness_result = self.harness.run(source, timeout=120, decoded_strings=decoder.strings)
         if harness_result and len(harness_result) > 100:
@@ -187,6 +208,7 @@ class Unveiler:
             elif self._is_quality_output(harness_result):
                 log('harness_success', True, f'symbolic evaluation produced {len(harness_result)} chars')
                 return harness_result, 'lua_harness', 'Symbolic evaluation complete', trace
+
         log('lune_pipeline', True, 'attempting Lune + Darklua extraction pipeline')
         lune_result = run_lune_darklua_pipeline(source)
         if lune_result and looks_like_real_code(lune_result):
@@ -195,6 +217,7 @@ class Unveiler:
             lune_result = beautify(lune_result)
             log('lune_pipeline_success', True, f'Lune+Darklua produced {len(lune_result)} chars')
             return lune_result, 'lune_darklua', 'Lune sandbox extraction + Darklua optimization', trace
+
         log('devirtualise', True, 'dumping instruction table from decoded strings')
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
@@ -204,6 +227,7 @@ class Unveiler:
                 return dumped, 'instr_table_dump', 'String table with source reconstruction', trace
         except Exception as e:
             log('devirtualise', False, f'instruction dumper failed: {str(e)[:100]}')
+
         log('devirtualise', True, 'attempting state-machine lifting via regex')
         sm_lifter = StateMachineLifter(source, decoder.strings, offset=decoder.offset)
         lifted = sm_lifter.lift()
@@ -213,6 +237,7 @@ class Unveiler:
             lifted = renamer.rename(lifted)
             lifted = beautify(lifted)
             return lifted, 'state_machine_lifted', 'State machine lifted', trace
+
         log('devirtualise', True, 'falling back to static devirtualisation')
         devirt = Devirtualiser(decoder, annotate=True)
         processed = devirt.process(source)
@@ -220,8 +245,9 @@ class Unveiler:
             renamer = VarRenamer()
             result = renamer.rename(processed)
             result = beautify(result)
-            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated via static analysis\n\n'
+            header = '-- [VM DETECTED] Devirtualised via fallback\n\n' if devirt.vm_detected else '-- Deobfuscated\n\n'
             return header + result, 'static_analysis', 'Static devirtualisation complete', trace
+
         log('devirtualise', False, 'all stages failed, returning string dump')
         try:
             dumper = InstructionTableDumper(source, decoder.strings)
@@ -253,6 +279,7 @@ class DeobfEngine:
             'vm_devirtualizer': True,
             'instruction_table_dumper': True,
             'symbolic_eval': True,
+            'static_loadstring': True,
         }
 
     def process(self, source: str, logger: Optional[JobLogger] = None) -> Tuple[str, str, str, list]:
