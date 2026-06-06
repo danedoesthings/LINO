@@ -73,7 +73,7 @@ print = function(...)
     old_print(...)
 end
 
-local source_json = [[{source_arg}]]
+local source_json = [=====[{source_arg}]=====]
 local decoded_source = HttpService:JSONDecode(source_json)
 if not decoded_source then
     capture("[Error: JSON decode failed]")
