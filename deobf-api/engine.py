@@ -7,6 +7,7 @@ from state_machine_devirt import StateMachineLifter
 from vm_devirtualizer import VMDevirtualizer
 from instruction_table_dumper import InstructionTableDumper
 from loadstring_extractor import LoadstringPayloadExtractor
+from prometheus_decoder import PrometheusDecoder
 from var_renamer import VarRenamer
 from beautifier import beautify
 from env_logger import JobLogger
@@ -135,6 +136,20 @@ class Unveiler:
 
         vm_score = self._calculate_vm_score(source)
         log('vm_detect', True, f'VM score: {vm_score}')
+
+        if vm_score >= 10:
+            log('prometheus_decode', True, 'VM detected, attempting Prometheus-aware static decode')
+            try:
+                prom_decoder = PrometheusDecoder(source, decoder)
+                result = prom_decoder.decode()
+                if result and len(result) > 10 and self._is_valid_lua(result):
+                    renamer = VarRenamer()
+                    result = renamer.rename(result)
+                    result = beautify(result)
+                    log('prometheus_decode', True, f'Prometheus decode produced {len(result)} chars')
+                    return result, 'prometheus_decode', 'Prometheus static decode complete', trace
+            except Exception as e:
+                log('prometheus_decode', False, f'Prometheus decode failed: {str(e)[:100]}')
 
         if vm_score >= 10:
             log('harness', True, 'VM detected, attempting dynamic harness execution')
@@ -280,6 +295,7 @@ class DeobfEngine:
             'instruction_table_dumper': True,
             'symbolic_eval': True,
             'static_loadstring': True,
+            'prometheus_decode': True,
         }
 
     def process(self, source: str, logger: Optional[JobLogger] = None) -> Tuple[str, str, str, list]:
