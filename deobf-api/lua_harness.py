@@ -5,7 +5,7 @@ import tempfile
 import subprocess
 import signal
 import json
-import asyncio
+import time
 from typing import Optional
 
 _STR_COMMENT = re.compile(
@@ -27,7 +27,7 @@ class RobloxCloudExecutor:
         self.place_id = os.environ.get("ROBLOX_PLACE_ID", "")
         self.available = bool(self.api_key and self.universe_id and self.place_id)
 
-    async def execute(self, obfuscated_source: str, decoded_strings: list = None, timeout: int = 120):
+    def execute_sync(self, obfuscated_source: str, decoded_strings: list = None, timeout: int = 120):
         if not self.available:
             return None
 
@@ -39,10 +39,6 @@ class RobloxCloudExecutor:
                     escaped = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
                     entries.append(f'[{i + 1}] = "{escaped}"')
             string_table = "{" + ", ".join(entries) + "}"
-
-        headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
-        import httpx
-        create_url = f"https://apis.roblox.com/cloud/v2/universes/{self.universe_id}/places/{self.place_id}/luau-execution-session-tasks"
 
         capture_script = f"""
 local HttpService = game:GetService("HttpService")
@@ -104,46 +100,49 @@ return HttpService:JSONEncode({{captured = captured, count = captured_count}})
 
         source_arg = json.dumps(obfuscated_source)
         payload = {"script": capture_script, "arguments": [source_arg]}
+        headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
+        create_url = f"https://apis.roblox.com/cloud/v2/universes/{self.universe_id}/places/{self.place_id}/luau-execution-session-tasks"
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                task_resp = await client.post(create_url, headers=headers, json=payload)
-                if task_resp.status_code != 200:
-                    return {"error": f"Task creation failed: {task_resp.status_code}", "details": task_resp.text[:500]}
-                task_data = task_resp.json()
-                task_path = task_data.get("path", "")
-                if not task_path:
-                    return {"error": "No task path returned"}
-                task_url = f"https://apis.roblox.com{task_path}"
-                for _ in range(60):
-                    await asyncio.sleep(2)
-                    poll_resp = await client.get(task_url, headers=headers)
-                    if poll_resp.status_code != 200:
-                        return {"error": f"Task poll failed: {poll_resp.status_code}"}
-                    poll_data = poll_resp.json()
-                    state = poll_data.get("state", "")
-                    if state == "COMPLETE":
-                        output_obj = poll_data.get("output", {})
-                        results = output_obj.get("results", [])
-                        if results and isinstance(results[0], dict):
-                            raw_output = results[0].get("value", "")
-                        elif results:
-                            raw_output = str(results[0])
-                        else:
-                            raw_output = str(output_obj)
-                        try:
-                            parsed = json.loads(raw_output)
-                            return parsed
-                        except (json.JSONDecodeError, TypeError):
-                            return {"captured": [raw_output], "count": 1}
-                    elif state == "FAILED":
-                        error_msg = poll_data.get("error", "Unknown error")
-                        if "details" in poll_data:
-                            error_msg += " | " + str(poll_data["details"])[:200]
-                        return {"error": f"Task failed: {error_msg}"}
-                return {"error": "Task timed out after 120 seconds"}
-            except Exception as e:
-                return {"error": str(e)}
+        import requests
+        try:
+            task_resp = requests.post(create_url, headers=headers, json=payload, timeout=30)
+            if task_resp.status_code != 200:
+                return {"error": f"Task creation failed: {task_resp.status_code}", "details": task_resp.text[:500]}
+            task_data = task_resp.json()
+            task_path = task_data.get("path", "")
+            if not task_path:
+                return {"error": "No task path returned"}
+            task_url = f"https://apis.roblox.com{task_path}"
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(2)
+                poll_resp = requests.get(task_url, headers=headers, timeout=30)
+                if poll_resp.status_code != 200:
+                    return {"error": f"Task poll failed: {poll_resp.status_code}"}
+                poll_data = poll_resp.json()
+                state = poll_data.get("state", "")
+                if state == "COMPLETE":
+                    output_obj = poll_data.get("output", {})
+                    results = output_obj.get("results", [])
+                    if results and isinstance(results[0], dict):
+                        raw_output = results[0].get("value", "")
+                    elif results:
+                        raw_output = str(results[0])
+                    else:
+                        raw_output = str(output_obj)
+                    try:
+                        parsed = json.loads(raw_output)
+                        return parsed
+                    except (json.JSONDecodeError, TypeError):
+                        return {"captured": [raw_output], "count": 1}
+                elif state == "FAILED":
+                    error_msg = poll_data.get("error", "Unknown error")
+                    if "details" in poll_data:
+                        error_msg += " | " + str(poll_data["details"])[:200]
+                    return {"error": f"Task failed: {error_msg}"}
+            return {"error": "Task timed out after 120 seconds"}
+        except Exception as e:
+            return {"error": str(e)}
 
 class LuaHarness:
     def __init__(self, unluac_path: str = None) -> None:
@@ -360,10 +359,7 @@ class LuaHarness:
 
     def _run_roblox_cloud(self, source: str, timeout: int = 120, decoded_strings: list = None) -> Optional[str]:
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(self.roblox.execute(source, decoded_strings, timeout))
-            loop.close()
+            result = self.roblox.execute_sync(source, decoded_strings, timeout)
             if result and "error" not in result:
                 captured = result.get("captured", [])
                 if captured:
