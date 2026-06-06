@@ -1,196 +1,166 @@
 import re
-import json
-from typing import Optional, List, Dict, Tuple
-from math_fold import safe_eval_int, fold_constants
+from typing import Optional, Dict, List, Tuple
 
 
 class VMDevirtualizer:
-    def __init__(self, source: str, decoder):
+    def __init__(self, source: str, decoder=None):
         self.source = source
         self.decoder = decoder
-        self.strings = decoder.strings
-        self.offset = decoder.offset
-        self.getter_name = None
-        self.vm_var = None
-        self.handlers = {}
-        self.instructions = []
-        self.output_lines = []
+        self.strings = decoder.strings if decoder else []
+        self.pos_var = None
+        self.blocks: Dict[int, str] = {}
+        self.start_pos = None
+        self.entry_block = None
 
     def devirtualize(self) -> Optional[str]:
-        self._detect_vm()
-        if not self.vm_var:
+        result = self._extract_and_linearize()
+        if result and len(result) > 10:
+            return result
+        result = self._try_trace_execution()
+        if result and len(result) > 10:
+            return result
+        return self._extract_visible_payload()
+
+    def _extract_and_linearize(self) -> Optional[str]:
+        vm_match = re.search(
+            r'return\s*\(\s*function\s*\(\s*(\w+)\s*[^)]*\)(.*?)end\s*\)\s*\(\s*(\d+)\s*\)',
+            self.source, re.DOTALL
+        )
+        if not vm_match:
+            vm_match = re.search(
+                r'function\s*\(\s*(\w+)\s*[^)]*\)\s*while\s+\1\s+do(.*?)end',
+                self.source, re.DOTALL
+            )
+            if vm_match:
+                self.pos_var = vm_match.group(1)
+                body = vm_match.group(2)
+            else:
+                return None
+        else:
+            self.pos_var = vm_match.group(1)
+            body = vm_match.group(2)
+            self.start_pos = int(vm_match.group(3))
+
+        block_pattern = re.compile(
+            rf'if\s+{re.escape(self.pos_var)}\s*==\s*(\d+)\s+then\s*(.*?)(?=elseif\s+{re.escape(self.pos_var)}\s*==|end\s*$)',
+            re.DOTALL
+        )
+        for m in block_pattern.finditer(body):
+            block_id = int(m.group(1))
+            block_code = m.group(2).strip()
+            block_code = re.sub(rf'{re.escape(self.pos_var)}\s*=\s*\d+\s*;?\s*', '', block_code)
+            block_code = re.sub(r'break\s*;?\s*', '', block_code)
+            self.blocks[block_id] = block_code
+
+        if not self.blocks:
             return None
 
-        self._extract_handlers()
-        if not self.handlers:
-            return None
+        sorted_ids = sorted(self.blocks.keys())
+        entry_id = self.start_pos if self.start_pos and self.start_pos in self.blocks else sorted_ids[0]
 
-        self._trace_execution()
-        if self.output_lines:
-            result = '\n'.join(self.output_lines)
-            if self._looks_like_real_code(result):
-                return result
+        ordered_blocks = self._order_by_execution_flow(entry_id, sorted_ids)
+        if not ordered_blocks:
+            ordered_blocks = sorted_ids
 
-        return self._try_getter_substitution()
+        result_lines = []
+        for bid in ordered_blocks:
+            code = self.blocks[bid]
+            if code and not self._is_dead_block(code):
+                result_lines.append(code)
 
-    def _detect_vm(self):
-        m = re.search(r'while\s+(\w+)\s+do', self.source)
-        if m:
-            self.vm_var = m.group(1)
+        if result_lines:
+            return '\n'.join(result_lines)
+        return None
 
-        folded = fold_constants(self.source)
-        patterns = [
-            r'local\s+function\s+(\w+)\s*\(\s*\w+\s*\)\s*return\s+R\s*\[\s*\w+\s*\+\s*\(?(-?\d+)\)?\s*\]',
-            r'local\s+function\s+(\w+)\s*\(\s*\w+\s*\)\s*return\s+EncStr\s*\[\s*\w+\s*\+\s*\(?(-?\d+)\)?\s*\]',
+    def _order_by_execution_flow(self, entry_id: int, all_ids: List[int]) -> List[int]:
+        ordered = []
+        visited = set()
+        current = entry_id
+        while current is not None and current not in visited and len(ordered) < len(all_ids):
+            visited.add(current)
+            ordered.append(current)
+            if current in self.blocks:
+                block = self.blocks[current]
+                next_match = re.search(rf'{re.escape(self.pos_var)}\s*=\s*(\d+)', block)
+                if next_match:
+                    next_id = int(next_match.group(1))
+                    if next_id in all_ids and next_id not in visited:
+                        current = next_id
+                        continue
+            remaining = [bid for bid in all_ids if bid not in visited]
+            current = remaining[0] if remaining else None
+        return ordered
+
+    def _is_dead_block(self, code: str) -> bool:
+        dead_patterns = [
+            r'while\s+true\s+do\s+end',
+            r'while\s+true\s+do\s+\w+\s*=\s*\w+\s*;?\s*\w+\s*=\s*\w+\s*;?\s*\w+\(\)\s*;?\s*end',
+            r'error\s*\(\s*"[^"]*[Tt]amper[^"]*"\s*\)',
         ]
-        for p in patterns:
-            m = re.search(p, folded)
-            if m:
-                self.getter_name = m.group(1)
-                if not self.offset:
-                    self.offset = int(m.group(2))
-                return
+        return any(re.search(p, code) for p in dead_patterns)
 
-    def _extract_handlers(self):
+    def _try_trace_execution(self) -> Optional[str]:
+        dispatcher_match = re.search(
+            r'while\s+(\w+)\s+do\s+if\s+\1\s*<\s*(-?\d+)\s+then',
+            self.source
+        )
+        if not dispatcher_match:
+            return None
+
+        var = dispatcher_match.group(1)
+        boundary = int(dispatcher_match.group(2))
+
+        handlers = {}
         handler_pattern = re.compile(
-            r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;}]',
+            rf'if\s+{re.escape(var)}\s*<\s*(\d+)\s+then\s*(.*?)(?=elseif\s+{re.escape(var)}\s*<|else\b|end\b)',
             re.DOTALL
         )
         for m in handler_pattern.finditer(self.source):
-            idx = int(m.group(1))
+            limit = int(m.group(1))
             body = m.group(2)
-            self.handlers[idx] = body
+            state_assign = re.findall(rf'{re.escape(var)}\s*=\s*(-?\d+)', body)
+            next_state = int(state_assign[-1]) if state_assign else None
+            handlers[limit] = {'body': body, 'next': next_state}
 
-        if not self.handlers:
-            self._extract_inline_handlers()
-
-    def _extract_inline_handlers(self):
-        folded = fold_constants(self.source)
-        if self.vm_var:
-            pattern = re.compile(
-                rf'if\s+{re.escape(self.vm_var)}\s*<\s*(-?\d+)\s+then\s*(.*?)(?=elseif|else|end)',
-                re.DOTALL
-            )
-            idx = 0
-            for m in pattern.finditer(folded):
-                body = m.group(2)
-                self.handlers[idx] = body
-                idx += 1
-
-    def _trace_execution(self):
-        resolved = self._resolve_getter_calls(self.source)
-
-        prints = re.findall(r'"print"\s*,\s*"([^"]*)"', resolved)
-        if prints:
-            for p in prints:
-                self.output_lines.append(p)
-
-        print_calls = re.findall(r'print\s*\(\s*"([^"]*)"\s*\)', resolved)
-        if print_calls:
-            for p in print_calls:
-                self.output_lines.append(p)
-
-        payloads = re.findall(r'\[Payload:\s*(\d+)\s*bytes\]', resolved)
-        if payloads:
-            for size in payloads:
-                self.output_lines.append(f'[Payload captured: {size} bytes]')
-
-        loads = re.findall(r'"loadstring"\s*,\s*"([^"]*)"', resolved)
-        if loads:
-            for ld in loads:
-                if len(ld) > 10:
-                    self.output_lines.append(ld)
-
-        string_chars = self._extract_string_char_blocks(resolved)
-        if string_chars:
-            self.output_lines.append(string_chars)
-
-    def _extract_string_char_blocks(self, source: str) -> Optional[str]:
-        blocks = re.findall(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', source)
-        if not blocks:
+        if not handlers:
             return None
-        all_bytes = []
-        for block in blocks:
-            nums = [int(n.strip()) for n in block.split(',') if n.strip().isdigit()]
-            all_bytes.extend(nums)
-        if all_bytes:
-            return ''.join(chr(b % 256) for b in all_bytes)
+
+        sorted_limits = sorted(handlers.keys())
+        entry = sorted_limits[0]
+
+        trace_lines = []
+        visited = set()
+        current = entry
+        max_iter = 200
+        iterations = 0
+
+        while current is not None and current not in visited and iterations < max_iter:
+            visited.add(current)
+            iterations += 1
+            info = handlers.get(current)
+            if info and info['body']:
+                trace_lines.append(info['body'])
+            current = info['next'] if info else None
+
+        if trace_lines:
+            return '\n'.join(trace_lines)
         return None
 
-    def _resolve_getter_calls(self, source: str) -> str:
-        if not self.getter_name:
-            return source
-        getter = re.escape(self.getter_name)
-        pattern = re.compile(rf'\b{getter}\s*\(\s*([0-9+\-*/%\s()]+?)\s*\)')
-        strings = self.strings
-        offset = self.offset
-
-        def repl(m):
-            idx = safe_eval_int(m.group(1).strip())
-            if idx is None:
-                return m.group(0)
-            py_index = idx + offset - 1
-            if 0 <= py_index < len(strings):
-                s = strings[py_index]
-                if s:
-                    return json.dumps(s)
-            return m.group(0)
-
-        return pattern.sub(repl, source)
-
-    def _try_getter_substitution(self) -> Optional[str]:
-        if not self.getter_name:
-            return None
-        result = self._resolve_getter_calls(self.source)
-        if result == self.source:
-            return None
-        result = self._strip_vm_boilerplate(result)
-        if self._looks_like_real_code(result):
-            return result
-        return None
-
-    def _strip_vm_boilerplate(self, source: str) -> str:
-        source = re.sub(
-            r'local\s+\w+\s*=\s*\{(?:"[^"]*",?\s*)+\}\s*',
-            '', source, count=1
-        )
-        source = re.sub(
-            r'local\s+\w+\s*=\s*\{(?:\s*(?:\w+|\["."\])\s*=\s*\d+\s*,?\s*)+\}\s*',
-            '', source, count=1
-        )
-        source = re.sub(
-            r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{[^}]+\}\s*\)'
-            r'\s*do.*?end\s*',
-            '', source, count=1, flags=re.DOTALL
-        )
-        if self.getter_name:
-            g = re.escape(self.getter_name)
-            source = re.sub(
-                rf'local\s+function\s+{g}\s*\([^)]*\).*?end\s*',
-                '', source, count=1, flags=re.DOTALL
-            )
-        if self.vm_var:
-            v = re.escape(self.vm_var)
-            source = re.sub(
-                rf'while\s+{v}\s+do.*',
-                '',
-                source, flags=re.DOTALL
-            )
-        source = re.sub(r'^\s*\n+', '', source)
-        source = re.sub(r'\n{3,}', '\n\n', source)
-        return source.strip()
-
-    def _looks_like_real_code(self, code: str) -> bool:
-        if not code or len(code) < 10:
-            return False
-        vm_indicators = [
-            'while vmState do', 'while l do if l<', 'instrTbl',
-            'allocSlot', 'funcWrap', 'vmStack', 'callEnvA', 'callEnvB',
-            'packArgs', 'cleanRef', 'return(function('
+    def _extract_visible_payload(self) -> Optional[str]:
+        patterns = [
+            r'print\s*\(\s*"([^"]*)"\s*\)',
+            r'print\s*\(\s*\'([^\']*)\'\s*\)',
+            r'print\s*\(\s*\[\[(.*?)\]\]\s*\)',
         ]
-        hits = sum(1 for m in vm_indicators if m in code)
-        if hits >= 1:
-            return False
-        keywords = ['print', 'function', 'local', 'return', 'if', 'then', 'else', 'for', 'while', 'do']
-        found = sum(1 for kw in keywords if kw in code)
-        return found >= 1 and ('=' in code or '(' in code)
+        for pat in patterns:
+            m = re.search(pat, self.source)
+            if m:
+                return m.group(0)
+
+        call_matches = re.findall(r'(loadstring|load)\s*\(\s*"([^"]*)"\s*\)', self.source)
+        if call_matches:
+            for _, payload in call_matches:
+                if len(payload) > 10:
+                    return payload
+
+        return None
