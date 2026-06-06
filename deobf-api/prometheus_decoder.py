@@ -144,8 +144,7 @@ class PrometheusDecoder:
             idx = safe_eval_int(m.group(1).strip())
             if idx is None:
                 return m.group(0)
-            lua_index = idx + offset
-            py_index = lua_index - 1
+            py_index = idx + offset - 1
             if 0 <= py_index < len(strings):
                 s = strings[py_index]
                 if s:
