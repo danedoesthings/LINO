@@ -1,12 +1,273 @@
 import re
 import json
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Set
 from math_fold import safe_eval_int, fold_constants
-from string_decoder import StringTableDecoder
+
+
+class VirtualRegister:
+    def __init__(self, name, value=None):
+        self.name = name
+        self.value = value
+
+    def __repr__(self):
+        if self.value is not None:
+            return str(self.value)
+        return self.name
+
+
+class StringBuilderTracer:
+    def __init__(self, source, decoded_strings, offset=0, getter_name=None):
+        self.source = source
+        self.strings = decoded_strings
+        self.offset = offset
+        self.getter_name = getter_name
+        self.registers = {}
+        self.tables = {}
+        self.output = []
+        self.max_steps = 5000
+        self.step_count = 0
+        self.vm_state_var = None
+        self.state_handlers = {}
+        self.handler_cache = {}
+
+    def trace_loadstring_payload(self):
+        self._detect_vm_structure()
+        self._detect_getter()
+
+        if not self.state_handlers:
+            handler_bodies = self._extract_all_handler_bodies()
+            for idx, body in enumerate(handler_bodies):
+                self._analyze_handler_body(body, idx)
+
+        loadstring_handlers = self._find_loadstring_handlers()
+        if not loadstring_handlers:
+            return None
+
+        for handler in loadstring_handlers:
+            payload = self._trace_handler(handler)
+            if payload and len(payload) > 5:
+                return payload
+
+        return self._try_build_from_concat_chain()
+
+    def _detect_vm_structure(self):
+        m = re.search(r'while\s+(\w+)\s+do', self.source)
+        if not m:
+            return
+        self.vm_state_var = m.group(1)
+
+        handler_pattern = re.compile(
+            r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;}]',
+            re.DOTALL
+        )
+        for m in handler_pattern.finditer(self.source):
+            idx = int(m.group(1))
+            body = m.group(2)
+            self.state_handlers[idx] = body
+
+    def _detect_getter(self):
+        if self.getter_name and self.offset:
+            return
+        folded = fold_constants(self.source)
+        patterns = [
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*\(?(-?\d+)\)?\s*\]',
+            r'local\s+function\s+(\w+)\s*\(\s*\1\s*\)\s*return\s+R\s*\[\s*\1\s*\+\s*(-?\d+)\s*\]',
+        ]
+        for p in patterns:
+            m = re.search(p, folded)
+            if m:
+                self.getter_name = m.group(1)
+                self.offset = int(m.group(2))
+                return
+
+    def _resolve_getter(self, expr):
+        if not self.getter_name:
+            return None
+        n = safe_eval_int(expr)
+        if n is None:
+            return None
+        idx = n + self.offset
+        if 1 <= idx <= len(self.strings):
+            return self.strings[idx - 1]
+        return None
+
+    def _resolve_r_access(self, index_str):
+        idx = safe_eval_int(index_str)
+        if idx is None:
+            return None
+        if 1 <= idx <= len(self.strings):
+            return self.strings[idx - 1]
+        return None
+
+    def _extract_all_handler_bodies(self):
+        bodies = []
+        for m in re.finditer(r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;}]', self.source, re.DOTALL):
+            bodies.append(m.group(2))
+        return bodies
+
+    def _analyze_handler_body(self, body, handler_id):
+        pass
+
+    def _find_loadstring_handlers(self):
+        handlers = []
+        for idx, body in self.state_handlers.items():
+            if 'loadstring' in body or 'load' in body:
+                handlers.append(body)
+        if not handlers:
+            all_bodies = self._extract_all_handler_bodies()
+            for body in all_bodies:
+                if 'loadstring' in body or 'load' in body:
+                    handlers.append(body)
+        return handlers
+
+    def _trace_handler(self, body):
+        resolved = self._resolve_indices_in_body(body)
+        concat_exprs = re.findall(r'(?:local\s+\w+\s*=\s*)?(.+?(?:\s*\.\.\s*.+?)+)', resolved)
+        for expr in concat_exprs:
+            parts = [p.strip() for p in re.split(r'\s*\.\.\s*', expr)]
+            result = []
+            for part in parts:
+                val = self._evaluate_part(part)
+                if val is not None:
+                    result.append(val)
+                else:
+                    break
+            else:
+                return ''.join(result)
+
+        char_expr = self._extract_string_char_assembly(resolved)
+        if char_expr:
+            return char_expr
+
+        table_concat = self._extract_table_concat_in_body(resolved, body)
+        if table_concat:
+            return table_concat
+
+        return self._try_simple_loadstring_arg(resolved)
+
+    def _resolve_indices_in_body(self, body):
+        def replace_getter(m):
+            val = self._resolve_getter(m.group(1))
+            if val:
+                return json.dumps(val)
+            return m.group(0)
+        if self.getter_name:
+            body = re.sub(rf'{re.escape(self.getter_name)}\s*\(\s*([^)]+)\s*\)', replace_getter, body)
+
+        def replace_r(m):
+            val = self._resolve_r_access(m.group(1))
+            if val:
+                return json.dumps(val)
+            return m.group(0)
+        body = re.sub(r'R\s*\[\s*(\d+)\s*\]', replace_r, body)
+        return body
+
+    def _evaluate_part(self, part):
+        part = part.strip()
+        if part.startswith('"') and part.endswith('"'):
+            return part[1:-1]
+        if part.startswith("'") and part.endswith("'"):
+            return part[1:-1]
+
+        r_idx = re.match(r'R\s*\[\s*(\d+)\s*\]', part)
+        if r_idx:
+            return self._resolve_r_access(r_idx.group(1))
+
+        if self.getter_name:
+            getter = re.match(rf'{re.escape(self.getter_name)}\s*\(\s*([^)]+)\s*\)', part)
+            if getter:
+                return self._resolve_getter(getter.group(1))
+
+        str_char = re.match(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', part)
+        if str_char:
+            nums = [int(n.strip()) for n in str_char.group(1).split(',') if n.strip().isdigit()]
+            return ''.join(chr(n % 256) for n in nums)
+
+        return None
+
+    def _extract_string_char_assembly(self, body):
+        chars = re.findall(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', body)
+        if not chars:
+            return None
+        all_bytes = []
+        for call in chars:
+            nums = [int(n.strip()) for n in call.split(',') if n.strip().isdigit()]
+            all_bytes.extend(nums)
+        if all_bytes:
+            return ''.join(chr(n % 256) for n in all_bytes)
+        return None
+
+    def _extract_table_concat_in_body(self, resolved_body, original_body):
+        concat_call = re.search(r'table\.concat\s*\(\s*(\w+)\s*\)', resolved_body)
+        if not concat_call:
+            return None
+        table_var = concat_call.group(1)
+        entries = self._collect_table_entries(resolved_body, original_body, table_var)
+        if entries:
+            return ''.join(entries)
+        return None
+
+    def _collect_table_entries(self, resolved_body, original_body, table_var):
+        entries = {}
+        pattern = re.compile(rf'{table_var}\s*\[(\d+)\]\s*=\s*(.+)')
+        for m in pattern.finditer(resolved_body):
+            val = self._evaluate_part(m.group(2).strip())
+            if val is not None:
+                entries[int(m.group(1))] = val
+
+        insert_pattern = re.compile(rf'table\.insert\s*\(\s*{table_var}\s*,\s*(.+?)\s*\)')
+        next_idx = 1
+        for m in insert_pattern.finditer(resolved_body):
+            val = self._evaluate_part(m.group(1).strip())
+            if val is not None:
+                entries[next_idx] = val
+                next_idx += 1
+
+        if not entries:
+            return None
+
+        sorted_keys = sorted(entries.keys())
+        return [entries[k] for k in sorted_keys]
+
+    def _try_simple_loadstring_arg(self, resolved_body):
+        call_match = re.search(r'loadstring\s*\(\s*(.+?)\s*\)', resolved_body)
+        if call_match:
+            arg = call_match.group(1).strip()
+            val = self._evaluate_part(arg)
+            if val:
+                return val
+        return None
+
+    def _try_build_from_concat_chain(self):
+        resolved = self._resolve_indices_in_body(self.source)
+        for var in re.findall(r'local\s+(\w+)\s*=\s*', resolved):
+            pattern = re.compile(rf'{var}\s*=\s*{var}\s*\.\.\s*(.+)')
+            if pattern.search(resolved):
+                return self._reconstruct_concat_chain(var, resolved)
+        return None
+
+    def _reconstruct_concat_chain(self, var, code):
+        base_match = re.search(rf'local\s+{var}\s*=\s*(.+)', code)
+        if not base_match:
+            return None
+        base_val = self._evaluate_part(base_match.group(1).strip())
+        if base_val is None:
+            return None
+
+        parts = [base_val]
+        append_pattern = re.compile(rf'{var}\s*=\s*{var}\s*\.\.\s*(.+)')
+        for m in append_pattern.finditer(code):
+            part = self._evaluate_part(m.group(1).strip())
+            if part is not None:
+                parts.append(part)
+            else:
+                return None
+
+        return ''.join(parts)
 
 
 class LoadstringPayloadExtractor:
-    def __init__(self, source: str, decoder: StringTableDecoder):
+    def __init__(self, source, decoder):
         self.source = source
         self.decoder = decoder
         self.strings = decoder.strings
@@ -27,37 +288,24 @@ class LoadstringPayloadExtractor:
                 self.offset = int(m.group(2))
                 return
 
-    def _resolve_getter(self, expr: str) -> Optional[str]:
-        if not self.getter_name:
-            return None
-        n = safe_eval_int(expr)
-        if n is None:
-            return None
-        idx = n + self.offset
-        if 1 <= idx <= len(self.strings):
-            s = self.strings[idx - 1]
-            if s:
-                return s
-        return None
+    def extract(self):
+        tracer = StringBuilderTracer(
+            self.source, self.strings, self.offset, self.getter_name
+        )
+        payload = tracer.trace_loadstring_payload()
+        if payload:
+            return payload
 
-    def _resolve_r_access(self, index_str: str) -> Optional[str]:
-        idx = safe_eval_int(index_str)
-        if idx is None:
-            return None
-        if 1 <= idx <= len(self.strings):
-            s = self.strings[idx - 1]
-            if s:
-                return s
-        return None
+        return self._extract_via_handler_bodies()
 
-    def extract(self) -> Optional[str]:
+    def _extract_via_handler_bodies(self):
         handler_bodies = self._extract_handler_bodies()
         loadstring_handlers = self._find_loadstring_handlers(handler_bodies)
         if not loadstring_handlers:
             return None
 
-        for handler_body in loadstring_handlers:
-            payload = self._extract_from_handler(handler_body)
+        for body in loadstring_handlers:
+            payload = self._extract_from_handler(body)
             if payload:
                 return payload
 
@@ -65,84 +313,38 @@ class LoadstringPayloadExtractor:
         if payload:
             return payload
 
-        payload = self._try_table_concat_pattern()
-        return payload
+        return self._try_table_concat_pattern()
 
-    def _extract_handler_bodies(self) -> List[str]:
+    def _extract_handler_bodies(self):
         bodies = []
         for m in re.finditer(r'\[(\d+)\]\s*=\s*function\s*\([^)]*\)(.*?)end\s*[,;}]', self.source, re.DOTALL):
             bodies.append(m.group(2))
         return bodies
 
-    def _find_loadstring_handlers(self, bodies: List[str]) -> List[str]:
-        loadstring_bodies = []
-        for body in bodies:
-            if 'loadstring' in body or 'load' in body:
-                loadstring_bodies.append(body)
-        return loadstring_bodies
+    def _find_loadstring_handlers(self, bodies):
+        return [b for b in bodies if 'loadstring' in b or 'load' in b]
 
-    def _extract_from_handler(self, body: str) -> Optional[str]:
-        payload = self._extract_concat_from_body(body)
-        if payload:
-            return payload
-        payload = self._extract_string_char_assembly(body)
-        if payload:
-            return payload
-        payload = self._extract_table_concat_in_body(body)
-        return payload
+    def _extract_from_handler(self, body):
+        resolved = self._resolve_indices_in_body(body)
+        concat_parts = re.split(r'\s*\.\.\s*', resolved)
+        if len(concat_parts) > 1:
+            result = []
+            for part in concat_parts:
+                val = self._evaluate_part(part.strip())
+                if val is not None:
+                    result.append(val)
+                else:
+                    break
+            else:
+                return ''.join(result)
 
-    def _extract_concat_from_body(self, body: str) -> Optional[str]:
-        resolved_body = self._resolve_indices_in_body(body)
-        concat_patterns = [
-            r'local\s+(\w+)\s*=\s*(.+)',
-            r'(\w+)\s*=\s*(.+)',
-        ]
-        for pat in concat_patterns:
-            for m in re.finditer(pat, resolved_body):
-                expr = m.group(2)
-                if '..' in expr:
-                    parts = [p.strip() for p in expr.split('..')]
-                    resolved_parts = []
-                    for part in parts:
-                        val = self._evaluate_part(part)
-                        if val is not None:
-                            resolved_parts.append(val)
-                        else:
-                            break
-                    else:
-                        return ''.join(resolved_parts)
+        char_assembly = self._extract_string_char_assembly(resolved)
+        if char_assembly:
+            return char_assembly
 
-        direct_call = re.search(r'loadstring\s*\(\s*(.+?)\s*\)', resolved_body)
-        if direct_call:
-            arg = direct_call.group(1).strip()
-            val = self._evaluate_part(arg)
-            if val:
-                return val
-        return None
+        return self._try_simple_loadstring_arg(resolved)
 
-    def _evaluate_part(self, part: str) -> Optional[str]:
-        part = part.strip()
-        if part.startswith('"') and part.endswith('"'):
-            return part[1:-1]
-        if part.startswith("'") and part.endswith("'"):
-            return part[1:-1]
-
-        r_index = re.match(r'R\s*\[\s*(\d+)\s*\]', part)
-        if r_index:
-            return self._resolve_r_access(r_index.group(1))
-
-        getter_call = re.match(rf'{re.escape(self.getter_name)}\s*\(\s*([^)]+)\s*\)', part) if self.getter_name else None
-        if getter_call:
-            return self._resolve_getter(getter_call.group(1))
-
-        string_char = re.match(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', part)
-        if string_char:
-            nums = [int(n.strip()) for n in string_char.group(1).split(',') if n.strip().isdigit()]
-            return ''.join(chr(n % 256) for n in nums)
-
-        return None
-
-    def _resolve_indices_in_body(self, body: str) -> str:
+    def _resolve_indices_in_body(self, body):
         def replace_getter(m):
             val = self._resolve_getter(m.group(1))
             if val:
@@ -159,45 +361,70 @@ class LoadstringPayloadExtractor:
         body = re.sub(r'R\s*\[\s*(\d+)\s*\]', replace_r, body)
         return body
 
-    def _extract_string_char_assembly(self, body: str) -> Optional[str]:
-        char_calls = re.findall(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', body)
-        if not char_calls:
+    def _resolve_getter(self, expr):
+        if not self.getter_name:
             return None
-        all_chars = []
-        for call in char_calls:
+        n = safe_eval_int(expr)
+        if n is None:
+            return None
+        idx = n + self.offset
+        if 1 <= idx <= len(self.strings):
+            return self.strings[idx - 1]
+        return None
+
+    def _resolve_r_access(self, index_str):
+        idx = safe_eval_int(index_str)
+        if idx is None:
+            return None
+        if 1 <= idx <= len(self.strings):
+            return self.strings[idx - 1]
+        return None
+
+    def _evaluate_part(self, part):
+        part = part.strip()
+        if part.startswith('"') and part.endswith('"'):
+            return part[1:-1]
+        if part.startswith("'") and part.endswith("'"):
+            return part[1:-1]
+
+        r_idx = re.match(r'R\s*\[\s*(\d+)\s*\]', part)
+        if r_idx:
+            return self._resolve_r_access(r_idx.group(1))
+
+        if self.getter_name:
+            getter = re.match(rf'{re.escape(self.getter_name)}\s*\(\s*([^)]+)\s*\)', part)
+            if getter:
+                return self._resolve_getter(getter.group(1))
+
+        str_char = re.match(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', part)
+        if str_char:
+            nums = [int(n.strip()) for n in str_char.group(1).split(',') if n.strip().isdigit()]
+            return ''.join(chr(n % 256) for n in nums)
+
+        return None
+
+    def _extract_string_char_assembly(self, body):
+        chars = re.findall(r'string\.char\s*\(\s*([\d,\s]+)\s*\)', body)
+        if not chars:
+            return None
+        all_bytes = []
+        for call in chars:
             nums = [int(n.strip()) for n in call.split(',') if n.strip().isdigit()]
-            all_chars.extend(nums)
-        if all_chars:
-            return ''.join(chr(n % 256) for n in all_chars)
+            all_bytes.extend(nums)
+        if all_bytes:
+            return ''.join(chr(n % 256) for n in all_bytes)
         return None
 
-    def _extract_table_concat_in_body(self, body: str) -> Optional[str]:
-        concat_call = re.search(r'table\.concat\s*\(\s*(\w+)\s*\)', body)
-        if not concat_call:
-            return None
-        table_var = concat_call.group(1)
-        table_entries = self._collect_table_entries(body, table_var)
-        if table_entries:
-            return ''.join(table_entries)
+    def _try_simple_loadstring_arg(self, resolved_body):
+        call_match = re.search(r'loadstring\s*\(\s*(.+?)\s*\)', resolved_body)
+        if call_match:
+            arg = call_match.group(1).strip()
+            val = self._evaluate_part(arg)
+            if val:
+                return val
         return None
 
-    def _collect_table_entries(self, body: str, table_var: str) -> List[str]:
-        entries = []
-        pattern = re.compile(rf'{table_var}\s*\[(\d+)\]\s*=\s*(.+)')
-        for m in pattern.finditer(body):
-            val = self._evaluate_part(m.group(2))
-            if val is not None:
-                entries.append((int(m.group(1)), val))
-        if not entries:
-            insertion_pattern = re.compile(rf'table\.insert\s*\(\s*{table_var}\s*,\s*(.+?)\s*\)')
-            for m in insertion_pattern.finditer(body):
-                val = self._evaluate_part(m.group(1))
-                if val is not None:
-                    entries.append((len(entries) + 1, val))
-        entries.sort(key=lambda x: x[0])
-        return [e[1] for e in entries]
-
-    def _try_concat_chain_global(self) -> Optional[str]:
+    def _try_concat_chain_global(self):
         load_pos = self.source.find('loadstring(')
         if load_pos == -1:
             load_pos = self.source.find('loadstring (')
@@ -216,22 +443,28 @@ class LoadstringPayloadExtractor:
 
         expr = concat_expr.group(1)
         parts = re.split(r'\s*\.\.\s*', expr)
-        resolved_parts = []
+        result = []
         for part in parts:
-            part = part.strip()
-            val = self._evaluate_part(part)
+            val = self._evaluate_part(part.strip())
             if val is not None:
-                resolved_parts.append(val)
+                result.append(val)
             else:
                 return None
-        return ''.join(resolved_parts)
+        return ''.join(result)
 
-    def _try_table_concat_pattern(self) -> Optional[str]:
+    def _try_table_concat_pattern(self):
         concat_match = re.search(r'table\.concat\s*\(\s*(\w+)\s*\)', self.source)
         if not concat_match:
             return None
         table_var = concat_match.group(1)
-        entries = self._collect_table_entries(self.source, table_var)
-        if entries:
-            return ''.join(entries)
-        return None
+        resolved = self._resolve_indices_in_body(self.source)
+        entries = {}
+        pattern = re.compile(rf'{table_var}\s*\[(\d+)\]\s*=\s*(.+)')
+        for m in pattern.finditer(resolved):
+            val = self._evaluate_part(m.group(2).strip())
+            if val is not None:
+                entries[int(m.group(1))] = val
+
+        if not entries:
+            return None
+        return ''.join(entries[k] for k in sorted(entries.keys()))
