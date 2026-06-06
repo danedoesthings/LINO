@@ -60,7 +60,7 @@ class Unveiler:
         if not decoder.ok:
             log('decode', False, decoder.diagnostics.get('error', 'decode failed'))
             return '', 'unable', 'String decode failed', trace
-        log('decode', True, f'decoded {len(decoder.strings)} strings')
+        log('decode', True, f'decoded {len(decoder.strings)} strings (alphabet: {bool(decoder.alphabet)})')
 
         try:
             prom_decoder = PrometheusDecoder(source, decoder)
@@ -76,7 +76,7 @@ class Unveiler:
                         lifted = beautify(lifted)
                         log('vm_devirtualize', True, f'VM devirtualized, {len(lifted)} chars')
                         return lifted, 'vm_devirtualized', 'VM successfully devirtualized', trace
-                    log('vm_devirtualize', False, 'devirtualization failed')
+                    log('vm_devirtualize', False, 'devirtualization produced no clean output')
                 else:
                     renamer = VarRenamer()
                     result = renamer.rename(result)
@@ -94,7 +94,9 @@ class Unveiler:
             lines.append('')
             lines.append(f'-- Detected getter offset: {decoder.offset}')
             if decoder.alphabet:
-                lines.append(f'-- Custom base64 alphabet: {decoder.alphabet[:16]}...')
+                lines.append(f'-- Custom base64 alphabet ({len(decoder.alphabet)} chars): {decoder.alphabet}')
+            else:
+                lines.append(f'-- Alphabet diagnostics: {json.dumps(decoder.diagnostics.get("alphabet_warning", "unknown"))}')
             lines.append('-- Could not fully reconstruct original source')
             lines.append('-- The script contains a VM layer that requires runtime execution to fully recover')
             return '\n'.join(lines), 'string_table', 'Decoded string table (VM detected, best effort)', trace
