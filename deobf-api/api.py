@@ -9,15 +9,19 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(me
 log = logging.getLogger('deobf-api')
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=['http://localhost:3000', 'http://localhost:5000', 'https://discord.com', 'https://*.discord.com'])
+
 engine = DeobfEngine()
 
 @app.route('/health')
 def health():
     return jsonify({'ok': True, 'version': '1.0.0'})
 
-@app.route('/deobf/direct', methods=['POST'])
+@app.route('/deobf/direct', methods=['POST', 'OPTIONS'])
 def deobf_direct():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
