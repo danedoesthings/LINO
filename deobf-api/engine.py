@@ -29,6 +29,7 @@ job_store = {}
 job_lock = threading.Lock()
 
 def submit_job(source):
+    import uuid
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
