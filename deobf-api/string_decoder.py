@@ -67,6 +67,42 @@ def _decode_octal_string(s: str) -> str:
 _STANDARD_B64 = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/')
 
 
+def _try_build_alphabet(entries: dict) -> Optional[str]:
+    rev: dict[int, str] = {}
+    for k, v in entries.items():
+        if len(k) == 1:
+            rev[v] = k
+    if len(rev) < 50:
+        return None
+    alphabet_chars = []
+    for i in range(64):
+        if i in rev:
+            alphabet_chars.append(rev[i])
+        else:
+            alphabet_chars.append('')
+    if len(alphabet_chars) != 64:
+        return None
+    missing_indices = [i for i, c in enumerate(alphabet_chars) if c == '']
+    used_chars = set(c for c in alphabet_chars if c != '')
+    if len(missing_indices) == 1:
+        remaining = _STANDARD_B64 - used_chars
+        if remaining:
+            missing_char = remaining.pop()
+            alphabet_chars[missing_indices[0]] = missing_char
+    elif len(missing_indices) == 0:
+        pass
+    else:
+        for idx in missing_indices:
+            remaining = _STANDARD_B64 - used_chars
+            if remaining:
+                alphabet_chars[idx] = remaining.pop()
+                used_chars.add(alphabet_chars[idx])
+    alphabet = ''.join(alphabet_chars)
+    if len(alphabet) == 64 and len(set(alphabet)) >= 60:
+        return alphabet
+    return None
+
+
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
     folded = fold_constants(source)
     for m in re.finditer(r'local\s+\w+\s*=\s*\{', folded):
@@ -100,32 +136,40 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
                     entries[key] = val
             except Exception:
                 pass
-        if len(entries) < 50:
+        if len(entries) >= 50:
+            alpha = _try_build_alphabet(entries)
+            if alpha:
+                return alpha
+
+    unfolded = source
+    for m in re.finditer(r'local\s+\w+\s*=\s*\{', unfolded):
+        start = m.end() - 1
+        body = _extract_balanced_braces(unfolded, start)
+        if not body:
             continue
-        rev: dict[int, str] = {}
-        for k, v in entries.items():
-            if len(k) == 1:
-                rev[v] = k
-        if len(rev) < 50:
-            continue
-        alphabet_chars = []
-        for i in range(64):
-            if i in rev:
-                alphabet_chars.append(rev[i])
-            else:
-                alphabet_chars.append('')
-        if len(alphabet_chars) != 64:
-            continue
-        missing_indices = [i for i, c in enumerate(alphabet_chars) if c == '']
-        used_chars = set(c for c in alphabet_chars if c != '')
-        if len(missing_indices) == 1:
-            remaining = _STANDARD_B64 - used_chars
-            if remaining:
-                missing_char = remaining.pop()
-                alphabet_chars[missing_indices[0]] = missing_char
-        alphabet = ''.join(alphabet_chars)
-        if len(alphabet) == 64 and len(set(alphabet)) >= 63:
-            return alphabet
+        entries: dict[str, int] = {}
+        for m2 in re.finditer(r'\b([A-Za-z_])\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
+            key = m2.group(1)
+            try:
+                val = safe_eval_int(m2.group(2))
+                if val is not None and 0 <= val <= 63 and len(key) == 1:
+                    entries[key] = val
+            except Exception:
+                pass
+        for m2 in re.finditer(r'\["([^"]*)"\]\s*=\s*(-?\d+(?:\s*[+\-*/]\s*\d+)*)', body):
+            raw_key = m2.group(1)
+            key = _decode_octal_string(raw_key) if '\\' in raw_key else raw_key
+            try:
+                val = safe_eval_int(m2.group(2))
+                if val is not None and 0 <= val <= 63 and len(key) == 1:
+                    entries[key] = val
+            except Exception:
+                pass
+        if len(entries) >= 50:
+            alpha = _try_build_alphabet(entries)
+            if alpha:
+                return alpha
+
     return None
 
 
@@ -233,7 +277,9 @@ class StringTableDecoder:
         alpha = _extract_alphabet_from_numeric_table(self.source)
         if alpha:
             self.alphabet = alpha
-            self.diagnostics['alphabet'] = alpha[:10] + '...'
+            self.diagnostics['alphabet'] = alpha[:16] + '...'
+        else:
+            self.diagnostics['alphabet_warning'] = 'no alphabet found'
 
         decoded = []
         for s in shuffled:
