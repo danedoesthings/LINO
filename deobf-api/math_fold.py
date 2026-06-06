@@ -65,10 +65,18 @@ def fold_constants(code: str, passes: int = 12) -> str:
             break
     return code
 
+# Extended: catch ALL Prometheus getter patterns regardless of var names
 _E_OFFSET_PATS = [
+    # Original: local function E(E) return R[E + (offset)]
     re.compile(r'local\s+function\s+E\s*\(E\)\s*return\s+R\[E\s*\+\s*\(?([-\d+\-*\s]+)\)?\]'),
-    re.compile(r'\breturn\s+R\s*\[\s*E\s*\+\s*\(?([-\d+\-*\s]+)\)?\]'),
-    re.compile(r'\breturn\s+EncStr\s*\[\s*GetStr\s*\+\s*\(?([-\d+\-*\s]+)\)?\]'),
+    # Generic: local function <name>(<param>) return R[<param> + offset]
+    re.compile(r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
+    # Any return R[var + offset]
+    re.compile(r'\breturn\s+R\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
+    # EncStr variant
+    re.compile(r'\breturn\s+EncStr\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
+    # Generic table name, any var
+    re.compile(r'\breturn\s+\w+\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
 ]
 
 def get_string_table_offset(source: str) -> int:
@@ -76,7 +84,25 @@ def get_string_table_offset(source: str) -> int:
     for pat in _E_OFFSET_PATS:
         m = pat.search(folded)
         if m:
-            val = safe_eval_int(m.group(1))
+            # Last group always has the offset expression
+            expr = m.group(m.lastindex)
+            val = safe_eval_int(expr)
             if val is not None:
                 return val
     return 0
+
+def get_getter_name_and_offset(source: str):
+    """Return (getter_name, table_name, offset) or (None, None, 0)."""
+    folded = fold_constants(source)
+    # local function <G>(<P>) return <T>[<P> + offset]
+    pat = re.compile(
+        r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*'
+        r'return\s+(\w+)\s*\[\s*\2\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'
+    )
+    m = pat.search(folded)
+    if m:
+        getter = m.group(1)
+        table  = m.group(3)
+        offset = safe_eval_int(m.group(4))
+        return getter, table, (offset if offset is not None else 0)
+    return None, None, 0
