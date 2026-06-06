@@ -2,56 +2,68 @@ import re
 from typing import Optional
 from math_fold import safe_eval_int, fold_constants, get_string_table_offset
 
+def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
+    if start >= len(text) or text[start] != '{':
+        return None
+    depth = 0
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+        elif c == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                if text[i] == '\\':
+                    i += 1
+                i += 1
+        elif c == "'":
+            i += 1
+            while i < len(text) and text[i] != "'":
+                if text[i] == '\\':
+                    i += 1
+                i += 1
+        i += 1
+    return None
+
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
     folded = fold_constants(source)
-    for tbl_m in re.finditer(r'local\s+\w+\s*=\s*\{([^}]+)\}', folded):
-        body = tbl_m.group(1)
+    for m in re.finditer(r'local\s+(\w+)\s*=\s*\{', folded):
+        start = m.end() - 1
+        body = _extract_balanced_braces(folded, start)
+        if not body:
+            continue
         entries: dict[str, int] = {}
-        for m in re.finditer(r'\b([A-Za-z_])\s*=\s*(\d+)', body):
-            key = m.group(1)
+        for m2 in re.finditer(r'([A-Za-z_])\s*=\s*(\d+)', body):
+            key = m2.group(1)
             try:
-                val = int(m.group(2))
+                val = int(m2.group(2))
                 if 0 <= val <= 63:
                     entries[key] = val
             except Exception:
                 pass
-        for m in re.finditer(r'\["(\\.)"\]\s*=\s*(\d+)', body):
-            key = m.group(1)
+        for m2 in re.finditer(r'\["(\d+)"\]\s*=\s*(\d+)', body):
+            key = m2.group(1)
             try:
-                val = int(m.group(2))
+                val = int(m2.group(2))
                 if 0 <= val <= 63:
                     entries[key] = val
             except Exception:
                 pass
-        for m in re.finditer(r'\["(\d)"\]\s*=\s*(\d+)', body):
-            key = m.group(1)
-            try:
-                val = int(m.group(2))
-                if 0 <= val <= 63:
-                    entries[key] = val
-            except Exception:
-                pass
-        for m in re.finditer(r'\[(\d+)\]\s*=\s*(\d+)', body):
-            key = m.group(1)
-            try:
-                val = int(m.group(2))
-                if 0 <= val <= 63:
-                    entries[str(val)] = val
-            except Exception:
-                pass
-        if len(entries) < 40:
+        if len(entries) < 50:
             continue
         rev: dict[int, str] = {}
         for k, v in entries.items():
             if v not in rev:
                 rev[v] = k
-        if len(rev) < 40:
+        if len(rev) < 50:
             continue
         alphabet = ''.join(rev.get(i, '') for i in range(64))
         if len(alphabet) == 64 and len(set(alphabet)) == 64:
-            return alphabet
-        if len(alphabet) >= 60:
-            alphabet = alphabet.ljust(64, 'A')
             return alphabet
     for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', source):
         cand = m.group(1)
@@ -89,7 +101,7 @@ def _apply_shuffle(strings: list, ops: list) -> list:
     return result
 
 def _custom_b64_decode(s: str, alphabet: str) -> Optional[bytes]:
-    if len(set(alphabet)) < 40:
+    if len(set(alphabet)) < 50:
         return None
     rev = {c: i for i, c in enumerate(alphabet)}
     bits = 0
@@ -156,30 +168,6 @@ def _extract_raw_octal_strings(source: str) -> Optional[list]:
     raw = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
     if raw and len(raw) >= 4:
         return raw
-    return None
-
-def _try_xor_decrypt(encoded: str, key: int) -> Optional[str]:
-    try:
-        result = []
-        for c in encoded:
-            result.append(chr(ord(c) ^ key))
-        decoded = ''.join(result)
-        if _is_readable_string(decoded):
-            return decoded
-    except:
-        pass
-    return None
-
-def _try_arithmetic_decrypt(encoded: str, offset: int) -> Optional[str]:
-    try:
-        result = []
-        for c in encoded:
-            result.append(chr((ord(c) - offset) % 256))
-        decoded = ''.join(result)
-        if _is_readable_string(decoded):
-            return decoded
-    except:
-        pass
     return None
 
 class StringTableDecoder:
