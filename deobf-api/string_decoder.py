@@ -1,6 +1,5 @@
 import re
 from typing import Optional
-from constants import is_readable_identifier, is_probably_text, decode_numeric_escapes
 from math_fold import safe_eval_int, fold_constants, get_string_table_offset
 
 def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
@@ -37,8 +36,8 @@ def _extract_alphabet_from_numeric_table(source: str) -> Optional[str]:
             return cand
     return None
 
-def _extract_shuffle_ops(source: str) -> list[tuple[int, int]]:
-    ops: list[tuple[int, int]] = []
+def _extract_shuffle_ops(source: str) -> list:
+    ops = []
     m = re.search(r'ipairs\s*\(\s*\{(.*?)\}\s*\)', source, re.DOTALL)
     if not m:
         return ops
@@ -55,7 +54,7 @@ def _extract_shuffle_ops(source: str) -> list[tuple[int, int]]:
                 pass
     return ops
 
-def _apply_shuffle(strings: list[str], ops: list[tuple[int, int]]) -> list[str]:
+def _apply_shuffle(strings: list, ops: list) -> list:
     result = list(strings)
     for a, b in ops:
         lo, hi = a - 1, b - 1
@@ -73,7 +72,7 @@ def _custom_b64_decode(s: str, alphabet: str) -> Optional[bytes]:
     out = bytearray()
     for c in s.rstrip('='):
         if c not in rev:
-            continue
+            return None
         bits = (bits << 6) | rev[c]
         bit_count += 6
         if bit_count >= 8:
@@ -81,25 +80,60 @@ def _custom_b64_decode(s: str, alphabet: str) -> Optional[bytes]:
             out.append((bits >> bit_count) & 0xFF)
     return bytes(out)
 
+def _decode_octal_string(s: str) -> str:
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
+            j = i + 1
+            while j < len(s) and s[j].isdigit() and j - i <= 4:
+                j += 1
+            try:
+                code = int(s[i+1:j])
+                result.append(chr(code % 256))
+                i = j
+                continue
+            except ValueError:
+                pass
+        result.append(s[i])
+        i += 1
+    return ''.join(result)
+
+def _decode_numeric_escapes(s: str) -> str:
+    return re.sub(r'\\(\d{1,3})', lambda m: chr(int(m.group(1)) % 256), s)
+
+def _is_readable_string(s: str) -> bool:
+    if not s:
+        return False
+    printable = sum(1 for c in s if 32 <= ord(c) <= 126 or ord(c) in (9, 10, 13))
+    return printable / len(s) >= 0.80
+
+def _extract_raw_octal_strings(source: str) -> Optional[list]:
+    r_match = re.search(r'local\s+R\s*=\s*\{([^}]+)\}', source, re.DOTALL)
+    if not r_match:
+        r_match = re.search(r'\}=\{([^}]+)\}', source, re.DOTALL)
+    if not r_match:
+        return None
+    body = r_match.group(1)
+    raw = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+    if raw and len(raw) >= 4:
+        return raw
+    return None
+
 _R_TABLE_PATTERNS = [
     re.compile(r'local\s+R\s*=\s*\{(.*?)\}(?=local\s+function|for\s+E)', re.DOTALL),
     re.compile(r'\{((?:\s*"[^"]*"\s*[;,]?\s*){10,})\}', re.DOTALL),
 ]
 
-def _extract_raw_strings(source: str) -> Optional[list[str]]:
+def _extract_raw_strings(source: str) -> Optional[list]:
     for pat in _R_TABLE_PATTERNS:
         m = pat.search(source)
         if m:
             body = m.group(1)
             raw = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
             if raw:
-                return [decode_numeric_escapes(s) for s in raw]
+                return [_decode_numeric_escapes(s) for s in raw]
     return None
-
-_KEYED_TABLE_PATTERN = re.compile(
-    r'local\s+\w+\s*=\s*\{((?:\s*\[\d+\]\s*=\s*"[^"]*"\s*[,;]?\s*){4,})\}',
-    re.DOTALL,
-)
 
 class StringTableDecoder:
     def __init__(self, source: str) -> None:
@@ -112,79 +146,56 @@ class StringTableDecoder:
         self._decode()
 
     def _decode(self) -> None:
-        alpha = _extract_alphabet_from_numeric_table(self.source)
-        if not alpha:
-            raw = _extract_raw_strings(self.source)
-            if raw is None:
-                raw = self._extract_keyed_strings(self.source)
-            if raw:
-                self.strings = [decode_numeric_escapes(s) for s in raw]
-                self.ok = True
-                self.diagnostics['raw_count'] = len(raw)
-                self.diagnostics['decoded_count'] = len(self.strings)
-                self.diagnostics['note'] = 'alphabet not found, used raw strings'
-                self.offset = get_string_table_offset(self.source)
-                self.diagnostics['offset'] = self.offset
-                return
-            self.diagnostics['error'] = 'alphabet not found and no raw strings'
+        raw_octal = _extract_raw_octal_strings(self.source)
+        if not raw_octal:
+            self.diagnostics['error'] = 'R table not found in source'
             return
-        self.alphabet = alpha
-        self.diagnostics['alphabet'] = alpha[:10] + '...'
-        raw = _extract_raw_strings(self.source)
-        if raw is None:
-            raw = self._extract_keyed_strings(self.source)
-        if raw is None:
-            self.diagnostics['error'] = 'R table not found'
-            return
-        self.diagnostics['raw_count'] = len(raw)
+
+        self.diagnostics['raw_count'] = len(raw_octal)
         ops = _extract_shuffle_ops(self.source)
         self.diagnostics['shuffle_ops'] = len(ops)
-        shuffled = _apply_shuffle(raw, ops)
-        decoded: list[str] = []
-        for s in shuffled:
-            decoded.append(self._decode_entry(s))
-        self.strings = decoded
+
+        alpha = _extract_alphabet_from_numeric_table(self.source)
+        if alpha:
+            self.alphabet = alpha
+            self.diagnostics['alphabet'] = alpha[:10] + '...'
+            shuffled = _apply_shuffle(raw_octal, ops)
+            decoded = []
+            for s in shuffled:
+                decoded.append(self._decode_entry(s))
+            self.strings = decoded
+        else:
+            self.diagnostics['note'] = 'no custom alphabet, using octal decode'
+            shuffled = _apply_shuffle(raw_octal, ops)
+            decoded = []
+            for s in shuffled:
+                decoded.append(_decode_octal_string(s))
+            self.strings = decoded
+
         self.ok = True
-        self.diagnostics['decoded_count'] = len(decoded)
+        self.diagnostics['decoded_count'] = len(self.strings)
         self.offset = get_string_table_offset(self.source)
         self.diagnostics['offset'] = self.offset
-
-    @staticmethod
-    def _extract_keyed_strings(source: str) -> Optional[list[str]]:
-        m = _KEYED_TABLE_PATTERN.search(source)
-        if not m:
-            return None
-        body = m.group(1)
-        entries: dict[int, str] = {}
-        for km in re.finditer(r'\[(\d+)\]\s*=\s*"((?:[^"\\]|\\.)*)"', body):
-            entries[int(km.group(1))] = km.group(2)
-        if not entries:
-            return None
-        max_key = max(entries.keys())
-        return [entries.get(i, '') for i in range(1, max_key + 1)]
 
     def _decode_entry(self, s: str) -> str:
         if not s:
             return ''
-        if is_readable_identifier(s):
+        if _is_readable_string(s):
             return s
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s):
+            return s
+        if re.match(r'^(\\\d{1,3})+$', s):
+            return _decode_octal_string(s)
         raw_bytes = _custom_b64_decode(s, self.alphabet)
-        if raw_bytes:
+        if raw_bytes is not None:
             for enc in ('utf-8', 'latin-1'):
                 try:
                     text = raw_bytes.decode(enc, errors='strict')
-                    if is_probably_text(text):
+                    if _is_readable_string(text):
                         return text
                 except Exception:
                     pass
-            try:
-                return raw_bytes.decode('latin-1', errors='replace')
-            except Exception:
-                pass
+        fallback = _decode_octal_string(s)
+        if _is_readable_string(fallback):
+            return fallback
         return s
-
-    def resolve(self, lua_index: int) -> Optional[str]:
-        py_index = lua_index + self.offset - 1
-        if 0 <= py_index < len(self.strings):
-            return self.strings[py_index]
-        return None
