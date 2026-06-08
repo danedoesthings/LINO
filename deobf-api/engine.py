@@ -17,7 +17,10 @@ class DeobfEngine:
         if decoder.ok:
             result = decoder.get_source()
             if result and len(result) > 10:
-                result = beautify(result)
+                try:
+                    result = beautify(result)
+                except Exception as e:
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscation via string table', trace
         
@@ -25,7 +28,10 @@ class DeobfEngine:
         try:
             result = run_vm_deobfuscator(source, timeout=60)
             if result and len(result) > 10:
-                result = beautify(result)
+                try:
+                    result = beautify(result)
+                except Exception as e:
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with VM deobfuscator', trace
             else:
@@ -37,7 +43,10 @@ class DeobfEngine:
         try:
             result = run_prometheus_deobfuscator(source, timeout=120)
             if result and len(result) > 10:
-                result = beautify(result)
+                try:
+                    result = beautify(result)
+                except Exception as e:
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Prometheus deobfuscator', trace
             else:
@@ -49,7 +58,10 @@ class DeobfEngine:
         try:
             result = run_unveilr(source, timeout=120)
             if result and len(result) > 10:
-                result = beautify(result)
+                try:
+                    result = beautify(result)
+                except Exception as e:
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Unveilr', trace
             else:
