@@ -6,7 +6,6 @@ import logging
 import httpx
 import base64
 import datetime
-import asyncio
 from discord.ext import commands
 from discord import app_commands
 
@@ -61,25 +60,19 @@ async def run_deobf(raw_bytes, filename):
     except Exception as e:
         log.error(f"API call failed: {e}")
         return {'embed': discord.Embed(title='API Error', description=_truncate(str(e), 1800), color=0xe74c3c), 'files': []}
-
-    # Handle non-JSON or malformed responses
     if not isinstance(data, dict):
         return {'embed': discord.Embed(title='API Error', description='API returned malformed response', color=0xe74c3c), 'files': []}
-    
     if data.get('status') != 'complete':
         error_msg = data.get('error', 'Unknown error') if isinstance(data, dict) else 'Invalid API response'
         return {'embed': discord.Embed(title='Deobfuscation Failed', description=error_msg[:1500], color=0xe74c3c), 'files': []}
-    
     result = data.get('result', '')
     detected = data.get('detected', 'unknown')
     diagnostic = data.get('diagnostic', '')
     trace = data.get('trace', [])
-    
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
     else:
         title, color = 'Partial Result — String Table Dump', 0xf1c40f
-    
     em = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
     em.add_field(name='Input', value=filename, inline=True)
@@ -90,7 +83,6 @@ async def run_deobf(raw_bytes, filename):
         stages = [t.get('stage', '?') for t in trace[:10]]
         em.add_field(name='Pipeline', value=_truncate(' -> '.join(stages), 1000), inline=False)
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
-    
     files = []
     if result:
         files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'deobfuscated_{filename}'))
@@ -147,15 +139,12 @@ async def deobf_error(ctx, error):
 @app_commands.describe(file='The .lua, .luau, or .txt file to deobfuscate')
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.response.defer(thinking=True)
-    
     if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
         await interaction.followup.send(f'Please upload a {", ".join(ALLOWED_EXTENSIONS)} file')
         return
-    
     if file.size > MAX_BYTES:
         await interaction.followup.send(f'File too large ({file.size} bytes, max {MAX_BYTES})')
         return
-    
     raw = await file.read()
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
     res = await run_deobf(raw, file.filename)
