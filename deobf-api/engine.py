@@ -20,7 +20,7 @@ class DeobfEngine:
                 try:
                     result = beautify(result)
                 except Exception as e:
-                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}'})
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscation via string table', trace
         
@@ -31,7 +31,7 @@ class DeobfEngine:
                 try:
                     result = beautify(result)
                 except Exception as e:
-                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}'})
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with VM deobfuscator', trace
             else:
@@ -46,7 +46,7 @@ class DeobfEngine:
                 try:
                     result = beautify(result)
                 except Exception as e:
-                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}'})
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Prometheus deobfuscator', trace
             else:
@@ -61,7 +61,7 @@ class DeobfEngine:
                 try:
                     result = beautify(result)
                 except Exception as e:
-                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}')
+                    trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}'})
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Unveilr', trace
             else:
