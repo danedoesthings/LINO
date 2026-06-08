@@ -1,4 +1,13 @@
 FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y curl unzip && \
+    curl -fsSL https://github.com/lune-org/lune/releases/download/v0.8.4/lune-ubuntu-x86_64.zip -o lune.zip && \
+    unzip lune.zip && \
+    mv lune /usr/local/bin/lune && \
+    chmod +x /usr/local/bin/lune && \
+    rm lune.zip && \
+    apt-get remove -y curl unzip && apt-get autoremove -y
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
