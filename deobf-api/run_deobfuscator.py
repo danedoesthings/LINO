@@ -20,21 +20,12 @@ def run_vm_deobfuscator(source_code: str, timeout: int = 60) -> str:
     
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if proc.returncode != 0:
-            if os.path.exists(output_path):
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    result = f.read()
-                    if result and len(result) > 10:
-                        return result
-            raise RuntimeError(f"VM deobfuscator failed: {proc.stderr}")
-        
-        if not os.path.exists(output_path):
-            raise RuntimeError("VM deobfuscator did not produce output file")
-        
-        with open(output_path, 'r', encoding='utf-8') as f:
-            result = f.read()
-        
-        return result
+        if os.path.exists(output_path):
+            with open(output_path, 'r', encoding='utf-8') as f:
+                result = f.read()
+                if result and len(result) > 0:
+                    return result
+        return ""
     finally:
         os.unlink(input_path)
         if os.path.exists(output_path):
@@ -57,21 +48,12 @@ def run_prometheus_deobfuscator(source_code: str, timeout: int = 120) -> str:
     
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if proc.returncode != 0:
-            if os.path.exists(output_path):
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    result = f.read()
-                    if result and len(result) > 10:
-                        return result
-            raise RuntimeError(f"Prometheus deobfuscator failed: {proc.stderr}")
-        
-        if not os.path.exists(output_path):
-            raise RuntimeError("Prometheus deobfuscator did not produce output file")
-        
-        with open(output_path, 'r', encoding='utf-8') as f:
-            result = f.read()
-        
-        return result
+        if os.path.exists(output_path):
+            with open(output_path, 'r', encoding='utf-8') as f:
+                result = f.read()
+                if result and len(result) > 0:
+                    return result
+        return ""
     finally:
         os.unlink(input_path)
         if os.path.exists(output_path):
@@ -96,21 +78,12 @@ def run_unveilr(source_code: str, timeout: int = 60) -> str:
     
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if proc.returncode != 0:
-            if os.path.exists(output_path):
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    result = f.read()
-                    if result and len(result) > 10:
-                        return result
-            raise RuntimeError(f"Unveilr failed: {proc.stderr}")
-        
-        if not os.path.exists(output_path):
-            raise RuntimeError("Unveilr did not produce output file")
-        
-        with open(output_path, 'r', encoding='utf-8') as f:
-            result = f.read()
-        
-        return result
+        if os.path.exists(output_path):
+            with open(output_path, 'r', encoding='utf-8') as f:
+                result = f.read()
+                if result and len(result) > 0:
+                    return result
+        return ""
     finally:
         os.unlink(input_path)
         if os.path.exists(output_path):
