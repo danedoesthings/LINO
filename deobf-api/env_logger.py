@@ -1,9 +1,17 @@
-import time, json, sys
+"""
+Structured job logging for deobfuscation pipeline.
+"""
+
+import time
+import json
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+
 @dataclass
 class TraceEntry:
+    """A single pipeline stage trace entry."""
     stage: str
     success: bool
     message: str
@@ -19,7 +27,10 @@ class TraceEntry:
             'elapsed_ms': round((time.time() - self.ts) * 1000, 1),
         }
 
+
 class JobLogger:
+    """Logger for deobfuscation job tracing."""
+
     def __init__(self, verbose: bool = False, job_id: str = '') -> None:
         self.verbose = verbose
         self.job_id = job_id
