@@ -1,14 +1,15 @@
 import re
 import base64
 
-def decode_unicode_escapes(s):
-    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
-
-def decode_octal_escapes(s):
+def decode_octal_escapes(s: str) -> str:
     result = []
     i = 0
     while i < len(s):
         if s[i] == '\\' and i + 1 < len(s):
+            if s[i+1] == '\\':
+                result.append('\\')
+                i += 2
+                continue
             octal = ''
             j = i + 1
             while j < len(s) and len(octal) < 3 and s[j] in '01234567':
@@ -22,24 +23,21 @@ def decode_octal_escapes(s):
         i += 1
     return ''.join(result)
 
-def decode_mixed_escapes(s):
-    s = decode_unicode_escapes(s)
-    s = decode_octal_escapes(s)
-    return s
+def decode_unicode_escapes(s: str) -> str:
+    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
 
-def eval_expr(expr):
+def eval_arithmetic(expr: str):
     expr = re.sub(r'\s+', '', expr)
     try:
         return eval(expr, {"__builtins__": {}}, {})
     except:
         return None
 
-def extract_alphabet(source):
+def extract_alphabet_from_n_table(source: str):
     patterns = [
         r'local\s+N\s*=\s*\{([^}]+)\}',
         r'local\s+alphaMap\s*=\s*\{([^}]+)\}',
         r'N\s*=\s*\{([^}]+)\}',
-        r'alphaMap\s*=\s*\{([^}]+)\}',
     ]
     for pattern in patterns:
         m = re.search(pattern, source, re.DOTALL)
@@ -49,12 +47,12 @@ def extract_alphabet(source):
             for match in re.finditer(r'\["([^"]+)"\]\s*=\s*(\d+)(?:[+\-]\d+)*', body):
                 c = match.group(1)
                 if len(c) == 1:
-                    idx = eval_expr(match.group(2))
+                    idx = eval_arithmetic(match.group(2))
                     if idx is not None and 0 <= idx < 64:
                         chars[idx] = c
             for match in re.finditer(r'([A-Za-z0-9+/])\s*=\s*(\d+)(?:[+\-]\d+)*', body):
                 c = match.group(1)
-                idx = eval_expr(match.group(2))
+                idx = eval_arithmetic(match.group(2))
                 if idx is not None and 0 <= idx < 64:
                     chars[idx] = c
             if any(chars):
@@ -68,11 +66,10 @@ def extract_alphabet(source):
                 return ''.join(chars)
     return None
 
-def extract_strings(source):
+def extract_strings(source: str):
     patterns = [
         r'local\s+EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'local\s+R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-        r'EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
     ]
     for pattern in patterns:
         m = re.search(pattern, source, re.DOTALL)
@@ -83,7 +80,7 @@ def extract_strings(source):
                 return strings
     return []
 
-def extract_shuffle(source):
+def extract_shuffle_ops(source: str):
     ops = []
     m = re.search(r'ipairs\s*\(\s*\{([^}]+)\}\s*\)', source)
     if m:
@@ -122,52 +119,69 @@ def custom_b64_decode(s, alphabet):
 def is_lua_source(s):
     if len(s) < 20:
         return False
-    keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do', 'repeat', 'until']
+    keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do']
     return sum(1 for kw in keywords if kw in s) >= 2
 
+def get_string_table_offset(source: str) -> int:
+    patterns = [
+        r'return\s+(\w+)\s*\[\s*\w+\s*\+\s*(\d+)\s*\]',
+        r'return\s+(\w+)\s*\[\s*\w+\s*-\s*(\d+)\s*\]',
+        r'\+\s*(\d+)\s*\]',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, source)
+        if m:
+            groups = m.groups()
+            if len(groups) >= 2:
+                try:
+                    return int(groups[1])
+                except:
+                    pass
+            elif len(groups) >= 1:
+                try:
+                    return int(groups[0])
+                except:
+                    pass
+    return 0
+
 class StringTableDecoder:
-    def __init__(self, source):
+    def __init__(self, source: str):
         self.source = source
         self.strings = []
         self.alphabet = None
+        self.offset = 0
         self.ok = False
-        
-    def decode(self):
+        self._decode()
+
+    def _decode(self):
         raw = extract_strings(self.source)
         if not raw:
-            return False
-        
-        ops = extract_shuffle(self.source)
+            return
+        ops = extract_shuffle_ops(self.source)
         if ops:
             raw = apply_shuffle(raw, ops)
-        
-        self.alphabet = extract_alphabet(self.source)
-        
+        self.alphabet = extract_alphabet_from_n_table(self.source)
+        decoded = []
         for s in raw:
-            original_s = s
-            s = decode_mixed_escapes(s)
-            
+            s = decode_unicode_escapes(s)
+            s = decode_octal_escapes(s)
             if self.alphabet and len(s) >= 4:
-                decoded_bytes = custom_b64_decode(s, self.alphabet)
-                if decoded_bytes:
+                b = custom_b64_decode(s, self.alphabet)
+                if b:
                     try:
-                        text = decoded_bytes.decode('utf-8', errors='replace')
+                        text = b.decode('utf-8', errors='replace')
                         if is_lua_source(text):
-                            self.strings.append(text)
+                            decoded.append(text)
                             continue
                     except:
                         pass
-            
-            if is_lua_source(s):
-                self.strings.append(s)
-            else:
-                self.strings.append('')
-        
-        self.ok = len(self.strings) > 0
-        return self.ok
-    
+            decoded.append(s)
+        self.strings = decoded
+        self.offset = get_string_table_offset(self.source)
+        self.ok = bool(self.strings)
+
     def get_source(self):
         for s in self.strings:
             if is_lua_source(s):
                 return s
-        return ''
+        return '\n'.join([s for s in self.strings if s])
