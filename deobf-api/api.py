@@ -1,6 +1,7 @@
 import os
 import base64
 import logging
+import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from engine import DeobfEngine, submit_job, get_job
@@ -12,6 +13,8 @@ app = Flask(__name__)
 CORS(app)
 engine = DeobfEngine()
 
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB max request size
+
 @app.route('/health')
 def health():
     return jsonify({'ok': True, 'version': '1.0.0'})
@@ -21,33 +24,37 @@ def deobf_direct():
     if request.method == 'OPTIONS':
         return '', 200
     
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data'}), 400
-    
-    source_b64 = data.get('source_b64', '')
-    if not source_b64:
-        return jsonify({'error': 'No source_b64'}), 400
-    
     try:
-        source = base64.b64decode(source_b64).decode('latin-1')
+        data = request.get_json()
+        if not data:
+            return jsonify({'status': 'error', 'error': 'No JSON data'}), 400
+        
+        source_b64 = data.get('source_b64', '')
+        if not source_b64:
+            return jsonify({'status': 'error', 'error': 'No source_b64'}), 400
+        
+        try:
+            source = base64.b64decode(source_b64).decode('latin-1')
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': f'Invalid base64: {e}'}), 400
+        
+        if len(source) > 10 * 1024 * 1024:
+            return jsonify({'status': 'error', 'error': 'Source too large'}), 413
+        
+        log.info(f"Processing {len(source)} bytes")
+        result, method, diag, trace = engine.process(source)
+        
+        return jsonify({
+            'status': 'complete',
+            'result': result,
+            'detected': method,
+            'diagnostic': diag,
+            'trace': trace,
+            'result_length': len(result)
+        })
     except Exception as e:
-        return jsonify({'error': f'Invalid base64: {e}'}), 400
-    
-    if len(source) > 10 * 1024 * 1024:
-        return jsonify({'error': 'Source too large'}), 413
-    
-    log.info(f"Processing {len(source)} bytes")
-    result, method, diag, trace = engine.process(source)
-    
-    return jsonify({
-        'status': 'complete',
-        'result': result,
-        'detected': method,
-        'diagnostic': diag,
-        'trace': trace,
-        'result_length': len(result)
-    })
+        log.error(f"Unhandled exception: {traceback.format_exc()}")
+        return jsonify({'status': 'error', 'error': f'Internal error: {str(e)}'}), 500
 
 @app.route('/deobf', methods=['POST'])
 def deobf_async():
