@@ -18,19 +18,18 @@ def beautify(code: str) -> str:
         if stripped in ('else', 'elseif', 'end', 'until'):
             indent_level = max(0, indent_level - 1)
         result.append(' ' * (indent_level * indent_size) + stripped)
-        if stripped.endswith('then') or stripped.endswith('do') or stripped == 'repeat' or stripped.startswith('function'):
+        if (stripped.endswith('then') or stripped.endswith('do') or 
+            stripped == 'repeat' or stripped.startswith('function') or 
+            stripped.startswith('for ') or stripped.startswith('while ') or
+            stripped.startswith('if ') or stripped.startswith('elseif ')):
             indent_level += 1
     code = '\n'.join(result)
-    code = re.sub(r'(\S)\s*=\s*(\S)', r'\1 = \2', code)
-    code = re.sub(r'(\S)\s*==\s*(\S)', r'\1 == \2', code)
-    code = re.sub(r'(\S)\s*~=\s*(\S)', r'\1 ~= \2', code)
-    code = re.sub(r'(\S)\s*<=\s*(\S)', r'\1 <= \2', code)
-    code = re.sub(r'(\S)\s*>=\s*(\S)', r'\1 >= \2', code)
-    code = re.sub(r'(\S)\s*\.\.\s*(\S)', r'\1 .. \2', code)
-    code = re.sub(r'(\S)\s*,\s*(\S)', r'\1, \2', code)
+    # Safe spacing: only add spaces around single =, never corrupt ==, ~=, <=, >=
+    code = re.sub(r'(?<<![=<>~])\s*=\s*(?![=])', ' = ', code)
+    code = re.sub(r',\s*', ', ', code)
     code = re.sub(r'\(\s+', '(', code)
     code = re.sub(r'\s+\)', ')', code)
     code = re.sub(r'\{\s+', '{', code)
     code = re.sub(r'\s+\}', '}', code)
     code = re.sub(r'\n{3,}', '\n\n', code)
-    return code.strip()
+    return code
