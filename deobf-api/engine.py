@@ -1,11 +1,10 @@
-import re
 import time
 import uuid
 import threading
 from string_decoder import StringTableDecoder
 from anti_tamper import remove_anti_tamper
 from beautifier import beautify
-from run_unveilr import run_unveilr
+from run_deobfuscator import run_prometheus_deobfuscator, run_unveilr
 
 class DeobfEngine:
     def process(self, source):
@@ -22,6 +21,18 @@ class DeobfEngine:
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscation via string table', trace
         
+        trace.append({'stage': 'prometheus_deobfuscator', 'success': True, 'message': 'Attempting Prometheus deobfuscator'})
+        try:
+            result = run_prometheus_deobfuscator(source, timeout=120)
+            if result and len(result) > 10:
+                result = beautify(result)
+                trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
+                return result, 'success', 'Deobfuscated with Prometheus deobfuscator', trace
+            else:
+                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Deobfuscator returned empty result'})
+        except Exception as e:
+            trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
+        
         trace.append({'stage': 'unveilr', 'success': True, 'message': 'Attempting Unveilr deobfuscator'})
         try:
             result = run_unveilr(source, timeout=120)
@@ -32,7 +43,7 @@ class DeobfEngine:
             else:
                 trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty result'})
         except Exception as e:
-            trace.append({'stage': 'unveilr', 'success': False, 'message': f'Unveilr error: {str(e)[:200]}'})
+            trace.append({'stage': 'unveilr', 'success': False, 'message': f'Error: {str(e)[:200]}'})
         
         trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
         return '', 'failed', 'Unable to deobfuscate', trace
