@@ -6,7 +6,7 @@ import shutil
 def run_vm_deobfuscator(source_code: str, timeout: int = 60) -> str:
     lua_path = shutil.which('lua5.1') or shutil.which('lua')
     if not lua_path:
-        raise RuntimeError("Lua 5.1 or LuaJIT not found")
+        return ""
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as inf:
         inf.write(source_code)
@@ -26,15 +26,23 @@ def run_vm_deobfuscator(source_code: str, timeout: int = 60) -> str:
                 if result and len(result) > 0:
                     return result
         return ""
+    except Exception:
+        return ""
     finally:
-        os.unlink(input_path)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
+        try:
+            os.unlink(input_path)
+        except:
+            pass
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except:
+            pass
 
 def run_prometheus_deobfuscator(source_code: str, timeout: int = 120) -> str:
     lua_path = shutil.which('lua5.1') or shutil.which('lua')
     if not lua_path:
-        raise RuntimeError("Lua 5.1 or LuaJIT not found")
+        return ""
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as inf:
         inf.write(source_code)
@@ -54,17 +62,25 @@ def run_prometheus_deobfuscator(source_code: str, timeout: int = 120) -> str:
                 if result and len(result) > 0:
                     return result
         return ""
+    except Exception:
+        return ""
     finally:
-        os.unlink(input_path)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
+        try:
+            os.unlink(input_path)
+        except:
+            pass
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except:
+            pass
 
 def run_unveilr(source_code: str, timeout: int = 60) -> str:
     lune_path = shutil.which("lune")
     if not lune_path:
         lune_path = shutil.which("luau")
         if not lune_path:
-            raise RuntimeError("Neither lune nor luau found")
+            return ""
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as inf:
         inf.write(source_code)
@@ -84,7 +100,15 @@ def run_unveilr(source_code: str, timeout: int = 60) -> str:
                 if result and len(result) > 0:
                     return result
         return ""
+    except Exception:
+        return ""
     finally:
-        os.unlink(input_path)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
+        try:
+            os.unlink(input_path)
+        except:
+            pass
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except:
+            pass
