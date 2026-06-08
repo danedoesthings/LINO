@@ -4,7 +4,7 @@ import threading
 from string_decoder import StringTableDecoder
 from anti_tamper import remove_anti_tamper
 from beautifier import beautify
-from run_deobfuscator import run_prometheus_deobfuscator, run_unveilr
+from run_deobfuscator import run_vm_deobfuscator, run_prometheus_deobfuscator, run_unveilr
 
 class DeobfEngine:
     def process(self, source):
@@ -21,6 +21,18 @@ class DeobfEngine:
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscation via string table', trace
         
+        trace.append({'stage': 'vm_deobfuscator', 'success': True, 'message': 'Attempting VM deobfuscator'})
+        try:
+            result = run_vm_deobfuscator(source, timeout=60)
+            if result and len(result) > 10:
+                result = beautify(result)
+                trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
+                return result, 'success', 'Deobfuscated with VM deobfuscator', trace
+            else:
+                trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': 'VM deobfuscator returned empty result'})
+        except Exception as e:
+            trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
+        
         trace.append({'stage': 'prometheus_deobfuscator', 'success': True, 'message': 'Attempting Prometheus deobfuscator'})
         try:
             result = run_prometheus_deobfuscator(source, timeout=120)
@@ -29,7 +41,7 @@ class DeobfEngine:
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Prometheus deobfuscator', trace
             else:
-                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Deobfuscator returned empty result'})
+                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Prometheus deobfuscator returned empty result'})
         except Exception as e:
             trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
         
