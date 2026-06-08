@@ -13,7 +13,7 @@ app = Flask(__name__)
 CORS(app)
 engine = DeobfEngine()
 
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB max request size
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 
 @app.route('/health')
 def health():
@@ -23,27 +23,21 @@ def health():
 def deobf_direct():
     if request.method == 'OPTIONS':
         return '', 200
-    
     try:
         data = request.get_json()
         if not data:
             return jsonify({'status': 'error', 'error': 'No JSON data'}), 400
-        
         source_b64 = data.get('source_b64', '')
         if not source_b64:
             return jsonify({'status': 'error', 'error': 'No source_b64'}), 400
-        
         try:
             source = base64.b64decode(source_b64).decode('latin-1')
         except Exception as e:
             return jsonify({'status': 'error', 'error': f'Invalid base64: {e}'}), 400
-        
         if len(source) > 10 * 1024 * 1024:
             return jsonify({'status': 'error', 'error': 'Source too large'}), 413
-        
         log.info(f"Processing {len(source)} bytes")
         result, method, diag, trace = engine.process(source)
-        
         return jsonify({
             'status': 'complete',
             'result': result,
@@ -61,16 +55,13 @@ def deobf_async():
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
-    
     source_b64 = data.get('source_b64', '')
     if not source_b64:
         return jsonify({'error': 'No source_b64'}), 400
-    
     try:
         source = base64.b64decode(source_b64).decode('latin-1')
     except Exception as e:
         return jsonify({'error': f'Invalid base64: {e}'}), 400
-    
     job_id = submit_job(source)
     return jsonify({'job_id': job_id, 'status': 'processing'})
 
@@ -79,10 +70,8 @@ def deobf_status(job_id):
     job = get_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
-    
     if job['status'] == 'processing':
         return jsonify({'status': 'processing'})
-    
     return jsonify({
         'status': 'complete',
         'result': job.get('result', ''),
