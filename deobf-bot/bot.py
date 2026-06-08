@@ -130,6 +130,28 @@ async def deobf_error(ctx, error):
         log.error(f"Command error: {error}")
         await ctx.send(f'An error occurred: {str(error)[:500]}')
 
+@tree.command(name='deobf', description='Deobfuscate a Prometheus/WeAreDevs Lua script')
+@app_commands.describe(file='The .lua, .luau, or .txt file to deobfuscate')
+async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
+    await interaction.response.defer(thinking=True)
+    
+    if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
+        await interaction.followup.send(f'Please upload a {", ".join(ALLOWED_EXTENSIONS)} file')
+        return
+    
+    if file.size > MAX_BYTES:
+        await interaction.followup.send(f'File too large ({file.size} bytes, max {MAX_BYTES})')
+        return
+    
+    raw = await file.read()
+    log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
+    res = await run_deobf(raw, file.filename)
+    await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
+
+@tree.command(name='ping', description='Check if the bot is alive')
+async def slash_ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f'Pong! Latency: {round(bot.latency * 1000)}ms')
+
 @bot.event
 async def on_ready():
     try:
