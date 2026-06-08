@@ -1,15 +1,24 @@
 FROM python:3.10-slim
 
-RUN apt-get update && apt-get install -y curl unzip lua5.1 && \
-    curl -fsSL https://github.com/lune-org/lune/releases/download/v0.10.4/lune-0.10.4-linux-x86_64.zip -o lune.zip && \
-    unzip lune.zip && \
-    mv lune /usr/local/bin/lune && \
-    chmod +x /usr/local/bin/lune && \
-    rm lune.zip && \
-    apt-get remove -y curl unzip && apt-get autoremove -y
+# Install Lua and Lune runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    unzip \
+    lua5.1 \
+    && curl -fsSL https://github.com/lune-org/lune/releases/download/v0.10.4/lune-0.10.4-linux-x86_64.zip -o lune.zip \
+    && unzip lune.zip \
+    && mv lune /usr/local/bin/lune \
+    && chmod +x /usr/local/bin/lune \
+    && rm lune.zip \
+    && apt-get remove -y curl unzip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
+
 CMD ["gunicorn", "-w", "1", "--threads", "4", "-b", "0.0.0.0:5000", "--timeout", "300", "api:app"]
