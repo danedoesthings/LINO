@@ -26,7 +26,11 @@ end
 
 local function decode_unicode(s)
     return (s:gsub('\\u([0-9a-fA-F]{4})', function(hex)
-        return string.char(tonumber(hex, 16))
+        local code = tonumber(hex, 16)
+        if code and code <= 0x10FFFF then
+            return string.char(code)
+        end
+        return '\\u' .. hex
     end))
 end
 
@@ -35,6 +39,7 @@ local function extract_strings(source)
         'local%s+EncStr%s*=%s*{([^}]+)}',
         'local%s+R%s*=%s*{([^}]+)}',
         'EncStr%s*=%s*{([^}]+)}',
+        'R%s*=%s*{([^}]+)}',
     }
     for _, pattern in ipairs(patterns) do
         local start_pos, end_pos = source:find(pattern)
@@ -57,65 +62,186 @@ local function extract_alphabet(source)
         'local%s+N%s*=%s*{([^}]+)}',
         'local%s+alphaMap%s*=%s*{([^}]+)}',
         'N%s*=%s*{([^}]+)}',
+        'alphaMap%s*=%s*{([^}]+)}',
     }
     for _, pattern in ipairs(patterns) do
         local start_pos, end_pos = source:find(pattern)
         if start_pos then
             local body = source:sub(start_pos, end_pos)
-            local alphabet = {}
-            for match in body:gmatch('"([A-Za-z0-9+/])"%s*=%s*(%d+)') do
-                local char = match:match('"([^"]+)"')
-                local idx = tonumber(match:match('=(%d+)'))
-                if char and idx and #char == 1 and idx >= 0 and idx <= 63 then
-                    alphabet[idx + 1] = char
+            local chars = {}
+            -- Pattern: "char" = index
+            for char, idx in body:gmatch('"([A-Za-z0-9+/?])"%s*=%s*(%d+)') do
+                local v = tonumber(idx)
+                if v and v >= 0 and v <= 63 then
+                    chars[v + 1] = char
                 end
             end
-            for match in body:gmatch('([A-Za-z0-9+/])%s*=%s*(%d+)') do
-                local char = match:match('([A-Za-z0-9+/])%s*=%s*(%d+)')
-                local idx = tonumber(match:match('=(%d+)'))
-                if char and idx and #char == 1 and idx >= 0 and idx <= 63 then
-                    alphabet[idx + 1] = char
+            -- Pattern: char = index (unquoted)
+            for char, idx in body:gmatch('([A-Za-z0-9+/?])%s*=%s*(%d+)') do
+                local v = tonumber(idx)
+                if v and v >= 0 and v <= 63 and not chars[v + 1] then
+                    chars[v + 1] = char
                 end
             end
-            if #alphabet == 64 then
-                return table.concat(alphabet)
+            -- Pattern: [index] = "char"
+            for idx, char in body:gmatch('\[(%d+)%]%s*=%s*"([A-Za-z0-9+/?])"') do
+                local v = tonumber(idx)
+                if v and v >= 0 and v <= 63 then
+                    chars[v + 1] = char
+                end
+            end
+            if #chars > 0 then
+                -- Fill in missing positions
+                local std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                local used = {}
+                for _, c in ipairs(chars) do
+                    if c then used[c] = true end
+                end
+                for i = 1, 64 do
+                    if not chars[i] then
+                        for j = 1, #std do
+                            local c = std:sub(j, j)
+                            if not used[c] then
+                                chars[i] = c
+                                used[c] = true
+                                break
+                            end
+                        end
+                    end
+                end
+                return table.concat(chars)
             end
         end
     end
     return nil
 end
 
+-- Custom base64 decode: translate from custom alphabet to standard, then decode
 local function custom_b64_decode(s, alphabet)
     if not alphabet or #alphabet ~= 64 then
         return nil
     end
+
     local rev = {}
     for i = 1, #alphabet do
         rev[alphabet:sub(i, i)] = i - 1
     end
+
+    -- Validate all characters
     for i = 1, #s do
-        if not rev[s:sub(i, i)] and s:sub(i, i) ~= '=' then
+        local c = s:sub(i, i)
+        if c ~= '=' and not rev[c] then
             return nil
         end
     end
+
+    -- Translate to standard alphabet positions and decode manually
     local std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    local translated = {}
+    local bits = {}
+
     for i = 1, #s do
         local c = s:sub(i, i)
         if c ~= '=' then
-            translated[#translated + 1] = std:sub(rev[c] + 1, rev[c] + 1)
+            local val = rev[c]
+            if val then
+                -- Convert to 6-bit binary string
+                local bit_str = ''
+                for j = 5, 0, -1 do
+                    bit_str = bit_str .. (bit.band(bit.rshift(val, j), 1) == 1 and '1' or '0')
+                end
+                bits[#bits + 1] = bit_str
+            end
+        else
+            bits[#bits + 1] = '000000'
+        end
+    end
+
+    local all_bits = table.concat(bits)
+    local result = {}
+
+    for i = 1, #all_bits, 8 do
+        if i + 7 <= #all_bits then
+            local byte_str = all_bits:sub(i, i + 7)
+            -- Skip padding bytes (all zeros at the end)
+            if i + 7 < #all_bits or byte_str ~= '00000000' then
+                local byte_val = tonumber(byte_str, 2)
+                if byte_val and byte_val > 0 then
+                    result[#result + 1] = string.char(byte_val)
+                end
+            end
+        end
+    end
+
+    return table.concat(result)
+end
+
+-- Alternative base64 decode using string.char method (no bit library needed)
+local function custom_b64_decode_fallback(s, alphabet)
+    if not alphabet or #alphabet ~= 64 then
+        return nil
+    end
+
+    local rev = {}
+    for i = 1, #alphabet do
+        rev[alphabet:sub(i, i)] = i - 1
+    end
+
+    -- Translate to standard base64
+    local std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local translated = {}
+
+    for i = 1, #s do
+        local c = s:sub(i, i)
+        if c ~= '=' then
+            local pos = rev[c]
+            if pos then
+                translated[#translated + 1] = std:sub(pos + 1, pos + 1)
+            else
+                return nil
+            end
         else
             translated[#translated + 1] = '='
         end
     end
+
     local b64 = table.concat(translated)
-    local padding = (4 - (#b64 % 4)) % 4
-    if padding > 0 then
-        b64 = b64 .. string.rep('=', padding)
+
+    -- Manual base64 decode
+    local rev_std = {}
+    for i = 1, #std do
+        rev_std[std:sub(i, i)] = i - 1
     end
-    return (b64:gsub('.', function(c)
-        return string.char(tonumber(c, 16) or 0)
-    end))
+
+    local result = {}
+    for i = 1, #b64, 4 do
+        if i + 3 <= #b64 then
+            local c1 = b64:sub(i, i)
+            local c2 = b64:sub(i + 1, i + 1)
+            local c3 = b64:sub(i + 2, i + 2)
+            local c4 = b64:sub(i + 3, i + 3)
+
+            local v1 = c1 ~= '=' and rev_std[c1] or 0
+            local v2 = c2 ~= '=' and rev_std[c2] or 0
+            local v3 = c3 ~= '=' and rev_std[c3] or 0
+            local v4 = c4 ~= '=' and rev_std[c4] or 0
+
+            local combined = v1 * 262144 + v2 * 4096 + v3 * 64 + v4
+
+            local b1 = math.floor(combined / 65536) % 256
+            local b2 = math.floor(combined / 256) % 256
+            local b3 = combined % 256
+
+            result[#result + 1] = string.char(b1)
+            if c3 ~= '=' then
+                result[#result + 1] = string.char(b2)
+            end
+            if c4 ~= '=' then
+                result[#result + 1] = string.char(b3)
+            end
+        end
+    end
+
+    return table.concat(result)
 end
 
 local function is_lua_source(s)
@@ -133,17 +259,29 @@ local function is_lua_source(s)
 end
 
 local function deobfuscate(source)
+    -- Extract the string table
     local strings = extract_strings(source)
     if not strings then
         return nil, "No string table found"
     end
+
+    -- Extract the custom alphabet
     local alphabet = extract_alphabet(source)
+
+    -- Decode each string
     local decoded_strings = {}
     for _, s in ipairs(strings) do
+        -- Decode escape sequences
         s = decode_unicode(s)
         s = decode_octal(s)
+
         if alphabet and #s >= 4 then
+            -- Try both decode methods
             local decoded = custom_b64_decode(s, alphabet)
+            if not decoded then
+                decoded = custom_b64_decode_fallback(s, alphabet)
+            end
+
             if decoded and is_lua_source(decoded) then
                 decoded_strings[#decoded_strings + 1] = decoded
             else
@@ -153,43 +291,67 @@ local function deobfuscate(source)
             decoded_strings[#decoded_strings + 1] = s
         end
     end
+
+    -- Find the first valid Lua source
     for _, s in ipairs(decoded_strings) do
         if is_lua_source(s) then
             return s, "success"
         end
     end
+
+    -- Return the longest decoded string as fallback
+    local best = nil
+    local best_len = 0
+    for _, s in ipairs(decoded_strings) do
+        if #s > best_len then
+            best = s
+            best_len = #s
+        end
+    end
+
+    if best and is_lua_source(best) then
+        return best, "success"
+    end
+
     return nil, "No valid Lua source found in decoded strings"
 end
 
+-- Main entry point
 local args = {...}
 local input_file = args[1]
 local output_file = nil
+
 for i = 1, #args do
     if args[i] == '-o' and i + 1 <= #args then
         output_file = args[i + 1]
         break
     end
 end
+
 if not input_file then
     io.stderr:write("Usage: lua deobfuscator.lua input.lua [-o output.lua]\n")
     os.exit(1)
 end
+
 local file = io.open(input_file, "r")
 if not file then
     io.stderr:write("Cannot open input file: " .. input_file .. "\n")
     os.exit(1)
 end
+
 local source = file:read("*a")
 file:close()
+
 local result, msg = deobfuscate(source)
 if not result then
     io.stderr:write("Deobfuscation failed: " .. msg .. "\n")
     os.exit(1)
 end
+
 if output_file then
     local out = io.open(output_file, "w")
     if out then
-        out:write(result)
+        out:write("-- Deobfuscated with Prometheus Deobfuscator\n\n" .. result)
         out:close()
     else
         io.stderr:write("Cannot write to output file: " .. output_file .. "\n")
@@ -198,4 +360,5 @@ if output_file then
 else
     print(result)
 end
+
 os.exit(0)
