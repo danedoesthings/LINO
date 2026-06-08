@@ -1,7 +1,8 @@
 FROM python:3.10-slim
 
+# Update the URL with a valid one from the latest release page
 RUN apt-get update && apt-get install -y curl unzip && \
-    curl -fsSL https://github.com/lune-org/lune/releases/download/v0.8.4/lune-ubuntu-x86_64.zip -o lune.zip && \
+    curl -fsSL https://github.com/lune-org/lune/releases/download/v0.8.6/lune-ubuntu-x86_64.zip -o lune.zip && \
     unzip lune.zip && \
     mv lune /usr/local/bin/lune && \
     chmod +x /usr/local/bin/lune && \
