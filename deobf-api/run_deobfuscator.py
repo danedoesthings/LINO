@@ -8,8 +8,8 @@ def run_vm_deobfuscator(source_code: str, timeout: int = 60) -> str:
     if not lua_path:
         return ""
     
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as inf:
-        inf.write(source_code)
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.lua', delete=False) as inf:
+        inf.write(source_code.encode('latin-1'))
         input_path = inf.name
     
     output_path = tempfile.NamedTemporaryFile(suffix='.lua', delete=False).name
@@ -19,14 +19,16 @@ def run_vm_deobfuscator(source_code: str, timeout: int = 60) -> str:
     cmd = [lua_path, deobf_path, input_path, '-o', output_path]
     
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
         if os.path.exists(output_path):
-            with open(output_path, 'r', encoding='utf-8') as f:
-                result = f.read()
-                if result and len(result) > 0:
-                    return result
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
+                try:
+                    return result_bytes.decode('utf-8', errors='replace')
+                except:
+                    return result_bytes.decode('latin-1', errors='replace')
         return ""
-    except Exception:
+    except Exception as e:
         return ""
     finally:
         try:
@@ -44,8 +46,8 @@ def run_prometheus_deobfuscator(source_code: str, timeout: int = 120) -> str:
     if not lua_path:
         return ""
     
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as inf:
-        inf.write(source_code)
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.lua', delete=False) as inf:
+        inf.write(source_code.encode('latin-1'))
         input_path = inf.name
     
     output_path = tempfile.NamedTemporaryFile(suffix='.lua', delete=False).name
@@ -55,14 +57,16 @@ def run_prometheus_deobfuscator(source_code: str, timeout: int = 120) -> str:
     cmd = [lua_path, deobf_path, input_path, '-o', output_path]
     
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
         if os.path.exists(output_path):
-            with open(output_path, 'r', encoding='utf-8') as f:
-                result = f.read()
-                if result and len(result) > 0:
-                    return result
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
+                try:
+                    return result_bytes.decode('utf-8', errors='replace')
+                except:
+                    return result_bytes.decode('latin-1', errors='replace')
         return ""
-    except Exception:
+    except Exception as e:
         return ""
     finally:
         try:
@@ -82,8 +86,8 @@ def run_unveilr(source_code: str, timeout: int = 60) -> str:
         if not lune_path:
             return ""
     
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False, encoding='utf-8') as inf:
-        inf.write(source_code)
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.lua', delete=False) as inf:
+        inf.write(source_code.encode('latin-1'))
         input_path = inf.name
     
     output_path = tempfile.NamedTemporaryFile(suffix='.lua', delete=False).name
@@ -93,14 +97,16 @@ def run_unveilr(source_code: str, timeout: int = 60) -> str:
     cmd = [lune_path, 'run', unveilr_main, input_path, output_path]
     
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
         if os.path.exists(output_path):
-            with open(output_path, 'r', encoding='utf-8') as f:
-                result = f.read()
-                if result and len(result) > 0:
-                    return result
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
+                try:
+                    return result_bytes.decode('utf-8', errors='replace')
+                except:
+                    return result_bytes.decode('latin-1', errors='replace')
         return ""
-    except Exception:
+    except Exception as e:
         return ""
     finally:
         try:
