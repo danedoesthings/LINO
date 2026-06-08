@@ -11,7 +11,6 @@ class DeobfEngine:
         trace = []
         source = remove_anti_tamper(source)
         trace.append({'stage': 'anti_tamper', 'success': True, 'message': 'Anti-tamper removed'})
-        
         decoder = StringTableDecoder(source)
         if decoder.ok:
             result = decoder.get_source()
@@ -22,7 +21,6 @@ class DeobfEngine:
                     trace.append({'stage': 'beautify', 'success': False, 'message': f'Beautify failed: {str(e)[:100]}'})
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscation via string table', trace
-        
         trace.append({'stage': 'vm_deobfuscator', 'success': True, 'message': 'Attempting VM deobfuscator'})
         try:
             result = run_vm_deobfuscator(source, timeout=60)
@@ -37,7 +35,6 @@ class DeobfEngine:
                 trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': 'VM deobfuscator returned empty'})
         except Exception as e:
             trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
-        
         trace.append({'stage': 'prometheus_deobfuscator', 'success': True, 'message': 'Attempting Prometheus deobfuscator'})
         try:
             result = run_prometheus_deobfuscator(source, timeout=120)
@@ -52,7 +49,6 @@ class DeobfEngine:
                 trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Prometheus deobfuscator returned empty'})
         except Exception as e:
             trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
-        
         trace.append({'stage': 'unveilr', 'success': True, 'message': 'Attempting Unveilr deobfuscator'})
         try:
             result = run_unveilr(source, timeout=120)
@@ -67,7 +63,6 @@ class DeobfEngine:
                 trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty'})
         except Exception as e:
             trace.append({'stage': 'unveilr', 'success': False, 'message': f'Error: {str(e)[:200]}'})
-        
         if decoder.strings:
             offset = getattr(decoder, 'offset', 0)
             alphabet = decoder.alphabet or 'not found'
@@ -78,7 +73,6 @@ class DeobfEngine:
             result = '\n'.join(result_lines)
             trace.append({'stage': 'string_dump', 'success': True, 'message': f'Dumped {len(decoder.strings)} raw strings'})
             return result, 'string_dump', 'Raw string table dump', trace
-        
         trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
         return '', 'failed', 'Unable to deobfuscate', trace
 
