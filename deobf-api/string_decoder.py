@@ -16,20 +16,34 @@ def decode_octal_escapes(s: str) -> str:
                 octal += s[j]
                 j += 1
             if octal:
-                result.append(chr(int(octal, 8)))
-                i = j
-                continue
+                try:
+                    result.append(chr(int(octal, 8)))
+                    i = j
+                    continue
+                except:
+                    pass
         result.append(s[i])
         i += 1
     return ''.join(result)
 
 def decode_unicode_escapes(s: str) -> str:
-    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
+    def replace_hex(match):
+        try:
+            return chr(int(match.group(1), 16))
+        except:
+            return match.group(0)
+    return re.sub(r'\\u([0-9a-fA-F]{4})', replace_hex, s)
 
 def eval_arithmetic(expr: str):
-    expr = re.sub(r'\s+', '', expr)
+    expr = re.sub(r'\s+', '', str(expr))
+    expr = re.sub(r'--[^\n]*', '', expr)
+    if not expr:
+        return None
+    if expr.isdigit() or (expr[0] == '-' and expr[1:].isdigit()):
+        return int(expr)
     try:
-        return eval(expr, {"__builtins__": {}}, {})
+        allowed_names = {"abs": abs, "min": min, "max": max}
+        return eval(expr, {"__builtins__": {}}, allowed_names)
     except:
         return None
 
@@ -38,30 +52,39 @@ def extract_alphabet_from_n_table(source: str):
         r'local\s+N\s*=\s*\{([^}]+)\}',
         r'local\s+alphaMap\s*=\s*\{([^}]+)\}',
         r'N\s*=\s*\{([^}]+)\}',
+        r'alphaMap\s*=\s*\{([^}]+)\}',
     ]
     for pattern in patterns:
-        m = re.search(pattern, source, re.DOTALL)
-        if m:
-            body = m.group(1)
+        match = re.search(pattern, source, re.DOTALL)
+        if match:
+            body = match.group(1)
             chars = [''] * 64
-            for match in re.finditer(r'\["([^"]+)"\]\s*=\s*(\d+)(?:[+\-]\d+)*', body):
-                c = match.group(1)
-                if len(c) == 1:
-                    idx = eval_arithmetic(match.group(2))
-                    if idx is not None and 0 <= idx < 64:
-                        chars[idx] = c
-            for match in re.finditer(r'([A-Za-z0-9+/])\s*=\s*(\d+)(?:[+\-]\d+)*', body):
-                c = match.group(1)
-                idx = eval_arithmetic(match.group(2))
-                if idx is not None and 0 <= idx < 64:
-                    chars[idx] = c
+            for m in re.finditer(r'\[\s*["\']([^"\']+)["\']\s*\]\s*=\s*([^,;\n}]+)', body):
+                key_char = m.group(1)
+                expr = m.group(2)
+                val = eval_arithmetic(expr)
+                if val is not None and 0 <= val <= 63 and len(key_char) == 1:
+                    chars[val] = key_char
+            for m in re.finditer(r'([A-Za-z0-9+/])\s*=\s*([^,;\n}]+)', body):
+                key_char = m.group(1)
+                expr = m.group(2)
+                val = eval_arithmetic(expr)
+                if val is not None and 0 <= val <= 63 and len(key_char) == 1:
+                    chars[val] = key_char
+            for m in re.finditer(r'\[\s*(\d+)\s*\]\s*=\s*["\']([^"\']+)["\']', body):
+                idx = int(m.group(1))
+                char = m.group(2)
+                if 0 <= idx <= 63 and len(char) == 1:
+                    chars[idx] = char
             if any(chars):
                 std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                used = set(chars)
                 for i in range(64):
                     if not chars[i]:
-                        for x in std:
-                            if x not in chars:
-                                chars[i] = x
+                        for c in std:
+                            if c not in used:
+                                chars[i] = c
+                                used.add(c)
                                 break
                 return ''.join(chars)
     return None
@@ -70,22 +93,36 @@ def extract_strings(source: str):
     patterns = [
         r'local\s+EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'local\s+R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
     ]
     for pattern in patterns:
-        m = re.search(pattern, source, re.DOTALL)
-        if m:
-            body = m.group(1)
+        match = re.search(pattern, source, re.DOTALL)
+        if match:
+            body = match.group(1)
             strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
-            if strings:
+            if strings and len(strings) >= 2:
                 return strings
     return []
 
 def extract_shuffle_ops(source: str):
     ops = []
-    m = re.search(r'ipairs\s*\(\s*\{([^}]+)\}\s*\)', source)
-    if m:
-        for pair in re.finditer(r'\{(\d+)\s*,\s*(\d+)\}', m.group(1)):
-            ops.append((int(pair.group(1)), int(pair.group(2))))
+    patterns = [
+        r'ipairs\s*\(\s*\{([^}]+)\}\s*\)',
+        r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}\s*\)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source)
+        if match:
+            for pair in re.finditer(r'\{(\d+)\s*,\s*(\d+)\}', match.group(1)):
+                try:
+                    a = int(pair.group(1))
+                    b = int(pair.group(2))
+                    ops.append((a, b))
+                except:
+                    pass
+            if ops:
+                break
     return ops
 
 def apply_shuffle(strings, ops):
@@ -93,26 +130,35 @@ def apply_shuffle(strings, ops):
     for a, b in ops:
         lo, hi = a - 1, b - 1
         if 0 <= lo < hi < len(result):
-            while lo < hi:
-                result[lo], result[hi] = result[hi], result[lo]
-                lo += 1
-                hi -= 1
+            temp = result[lo]
+            result[lo] = result[hi]
+            result[hi] = temp
+            lo += 1
+            hi -= 1
     return result
 
 def custom_b64_decode(s, alphabet):
     if not alphabet or len(alphabet) != 64:
         return None
-    rev = {c: i for i, c in enumerate(alphabet)}
+    rev = {}
+    for i, c in enumerate(alphabet):
+        rev[c] = i
     for c in s.rstrip('='):
         if c not in rev:
             return None
     std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    translated = ''.join(std[rev[c]] for c in s)
-    padding = (4 - len(translated) % 4) % 4
+    translated = []
+    for c in s:
+        if c != '=':
+            translated.append(std[rev[c]])
+        else:
+            translated.append('=')
+    translated_str = ''.join(translated)
+    padding = (4 - len(translated_str) % 4) % 4
     if padding:
-        translated += '=' * padding
+        translated_str += '=' * padding
     try:
-        return base64.b64decode(translated)
+        return base64.b64decode(translated_str)
     except:
         return None
 
@@ -120,7 +166,11 @@ def is_lua_source(s):
     if len(s) < 20:
         return False
     keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do']
-    return sum(1 for kw in keywords if kw in s) >= 2
+    count = 0
+    for kw in keywords:
+        if kw in s:
+            count += 1
+    return count >= 2
 
 def get_string_table_offset(source: str) -> int:
     patterns = [
@@ -129,19 +179,12 @@ def get_string_table_offset(source: str) -> int:
         r'\+\s*(\d+)\s*\]',
     ]
     for pattern in patterns:
-        m = re.search(pattern, source)
-        if m:
-            groups = m.groups()
-            if len(groups) >= 2:
-                try:
-                    return int(groups[1])
-                except:
-                    pass
-            elif len(groups) >= 1:
-                try:
-                    return int(groups[0])
-                except:
-                    pass
+        match = re.search(pattern, source)
+        if match:
+            groups = match.groups()
+            for g in groups:
+                if g and g.isdigit():
+                    return int(g)
     return 0
 
 class StringTableDecoder:
@@ -163,22 +206,28 @@ class StringTableDecoder:
         self.alphabet = extract_alphabet_from_n_table(self.source)
         decoded = []
         for s in raw:
+            if not s:
+                decoded.append('')
+                continue
             s = decode_unicode_escapes(s)
             s = decode_octal_escapes(s)
             if self.alphabet and len(s) >= 4:
-                b = custom_b64_decode(s, self.alphabet)
-                if b:
-                    try:
-                        text = b.decode('utf-8', errors='replace')
-                        if is_lua_source(text):
-                            decoded.append(text)
-                            continue
-                    except:
-                        pass
+                try:
+                    b = custom_b64_decode(s, self.alphabet)
+                    if b:
+                        try:
+                            text = b.decode('utf-8', errors='replace')
+                            if is_lua_source(text):
+                                decoded.append(text)
+                                continue
+                        except:
+                            pass
+                except:
+                    pass
             decoded.append(s)
         self.strings = decoded
         self.offset = get_string_table_offset(self.source)
-        self.ok = bool(self.strings)
+        self.ok = len(self.strings) > 0
 
     def get_source(self):
         for s in self.strings:
