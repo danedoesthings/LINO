@@ -29,7 +29,7 @@ class DeobfEngine:
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with VM deobfuscator', trace
             else:
-                trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': 'VM deobfuscator returned empty result'})
+                trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': 'VM deobfuscator returned empty'})
         except Exception as e:
             trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
         
@@ -41,7 +41,7 @@ class DeobfEngine:
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Prometheus deobfuscator', trace
             else:
-                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Prometheus deobfuscator returned empty result'})
+                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Prometheus deobfuscator returned empty'})
         except Exception as e:
             trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
         
@@ -53,9 +53,16 @@ class DeobfEngine:
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
                 return result, 'success', 'Deobfuscated with Unveilr', trace
             else:
-                trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty result'})
+                trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty'})
         except Exception as e:
             trace.append({'stage': 'unveilr', 'success': False, 'message': f'Error: {str(e)[:200]}'})
+        
+        raw_strings = decoder.strings if decoder.strings else []
+        if raw_strings:
+            result = '\n'.join([f'-- [{i+1}] "{s}"' for i, s in enumerate(raw_strings) if s])
+            result = f"-- Detected getter offset: {decoder.offset}\n-- Alphabet: {decoder.alphabet or 'not found'}\n\n{result}"
+            trace.append({'stage': 'string_dump', 'success': True, 'message': f'Dumped {len(raw_strings)} raw strings'})
+            return result, 'string_dump', 'Raw string table dump', trace
         
         trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
         return '', 'failed', 'Unable to deobfuscate', trace
