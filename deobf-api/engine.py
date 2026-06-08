@@ -14,7 +14,7 @@ class DeobfEngine:
         trace.append({'stage': 'anti_tamper', 'success': True, 'message': 'Anti-tamper removed'})
         
         decoder = StringTableDecoder(source)
-        if decoder.decode():
+        if decoder.ok:
             result = decoder.get_source()
             if result and len(result) > 10:
                 result = beautify(result)
@@ -57,11 +57,15 @@ class DeobfEngine:
         except Exception as e:
             trace.append({'stage': 'unveilr', 'success': False, 'message': f'Error: {str(e)[:200]}'})
         
-        raw_strings = decoder.strings if decoder.strings else []
-        if raw_strings:
-            result = '\n'.join([f'-- [{i+1}] "{s}"' for i, s in enumerate(raw_strings) if s])
-            result = f"-- Detected getter offset: {decoder.offset}\n-- Alphabet: {decoder.alphabet or 'not found'}\n\n{result}"
-            trace.append({'stage': 'string_dump', 'success': True, 'message': f'Dumped {len(raw_strings)} raw strings'})
+        if decoder.strings:
+            offset = getattr(decoder, 'offset', 0)
+            alphabet = decoder.alphabet or 'not found'
+            result_lines = [f'-- Detected getter offset: {offset}', f'-- Alphabet: {alphabet}', '']
+            for i, s in enumerate(decoder.strings):
+                if s:
+                    result_lines.append(f'-- [{i+1}] "{s}"')
+            result = '\n'.join(result_lines)
+            trace.append({'stage': 'string_dump', 'success': True, 'message': f'Dumped {len(decoder.strings)} raw strings'})
             return result, 'string_dump', 'Raw string table dump', trace
         
         trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
