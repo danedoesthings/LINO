@@ -1,16 +1,27 @@
+"""
+Constant folding for arithmetic expressions in Lua code.
+Evaluates simple math expressions at decode time.
+"""
+
 import re
 from typing import Optional
 
+
 def _clean_signs(expr: str) -> str:
+    """Clean up double signs like --, +-, etc."""
     old = ''
     while old != expr:
         old = expr
         expr = expr.replace('--', '+').replace('+-', '-').replace('-+', '-').replace('++', '+')
     return expr
 
+
 def safe_eval_int(expr: str) -> Optional[int]:
+    """Safely evaluate an arithmetic expression to an integer."""
     expr = re.sub(r'\s+', '', str(expr))
     expr = _clean_signs(expr)
+
+    # Handle parentheses recursively
     while '(' in expr:
         m = re.search(r'\(([^()]+)\)', expr)
         if not m:
@@ -19,7 +30,9 @@ def safe_eval_int(expr: str) -> Optional[int]:
         if inner is None:
             return None
         expr = expr[:m.start()] + str(inner) + expr[m.end():]
-    expr = _clean_signs(expr)
+        expr = _clean_signs(expr)
+
+    # Handle multiplication, division, modulo
     while True:
         m = re.search(r'(-?\d+)\s*([*/%])\s*(-?\d+)', expr)
         if not m:
@@ -34,29 +47,42 @@ def safe_eval_int(expr: str) -> Optional[int]:
         else:
             return None
         expr = _clean_signs(expr[:m.start()] + str(res) + expr[m.end():])
+
+    # Handle addition and subtraction
     tokens = re.findall(r'[+-]?\d+', expr)
     if tokens:
         try:
             return sum(int(t) for t in tokens)
         except ValueError:
             pass
+
     try:
         return int(expr)
     except ValueError:
         return None
 
+
+# Precompiled patterns for performance
 _PAREN_EXPR = re.compile(r'(?<![a-zA-Z0-9_])\(([^()a-zA-Z_\'"]+)\)')
 _BINOP_EXPR = re.compile(r'\b(-?\d+)\s*([+\-*/%])\s*(-?\d+)\b')
 
+
 def _fold_once(code: str) -> str:
+    """Perform one pass of constant folding."""
     def _try(m: re.Match) -> str:
         val = safe_eval_int(m.group(1) if m.lastindex == 1 else m.group(0))
         return str(val) if val is not None else m.group(0)
+
     code = _PAREN_EXPR.sub(lambda m: _try(m), code)
     code = _BINOP_EXPR.sub(lambda m: _try(m), code)
     return code
 
+
 def fold_constants(code: str, passes: int = 12) -> str:
+    """
+    Fold constant arithmetic expressions in Lua code.
+    Performs multiple passes until no more changes.
+    """
     for _ in range(passes):
         prev = code
         code = _fold_once(code)
@@ -64,13 +90,17 @@ def fold_constants(code: str, passes: int = 12) -> str:
             break
     return code
 
+
+# Offset detection patterns for string table getters
 _E_OFFSET_PATS = [
     re.compile(r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
     re.compile(r'\breturn\s+R\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
     re.compile(r'\breturn\s+EncStr\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
 ]
 
+
 def get_string_table_offset(source: str) -> int:
+    """Detect the string table offset used in getter functions."""
     folded = fold_constants(source)
     for pat in _E_OFFSET_PATS:
         m = pat.search(folded)
@@ -81,7 +111,9 @@ def get_string_table_offset(source: str) -> int:
                 return val
     return 0
 
+
 def get_getter_name_and_offset(source: str):
+    """Extract getter function name, table name, and offset."""
     folded = fold_constants(source)
     pat = re.compile(r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+(\w+)\s*\[\s*\2\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]')
     m = pat.search(folded)
