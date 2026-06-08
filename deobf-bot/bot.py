@@ -55,19 +55,31 @@ async def run_deobf(raw_bytes, filename):
         return {'embed': discord.Embed(title='API Timeout', description='API did not respond within 180 seconds', color=0xe74c3c), 'files': []}
     except httpx.ConnectError:
         return {'embed': discord.Embed(title='API Unreachable', description=f'Cannot connect to {API_URL}', color=0xe74c3c), 'files': []}
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.text[:1500] if e.response.text else str(e)
+        return {'embed': discord.Embed(title=f'API Error {e.response.status_code}', description=error_body, color=0xe74c3c), 'files': []}
     except Exception as e:
         log.error(f"API call failed: {e}")
         return {'embed': discord.Embed(title='API Error', description=_truncate(str(e), 1800), color=0xe74c3c), 'files': []}
-    if 'error' in data:
-        return {'embed': discord.Embed(title='Deobfuscation Failed', description=data['error'][:1500], color=0xe74c3c), 'files': []}
+
+    # Handle non-JSON or malformed responses
+    if not isinstance(data, dict):
+        return {'embed': discord.Embed(title='API Error', description='API returned malformed response', color=0xe74c3c), 'files': []}
+    
+    if data.get('status') != 'complete':
+        error_msg = data.get('error', 'Unknown error') if isinstance(data, dict) else 'Invalid API response'
+        return {'embed': discord.Embed(title='Deobfuscation Failed', description=error_msg[:1500], color=0xe74c3c), 'files': []}
+    
     result = data.get('result', '')
     detected = data.get('detected', 'unknown')
     diagnostic = data.get('diagnostic', '')
     trace = data.get('trace', [])
+    
     if detected in SUCCESS_METHODS:
         title, color = 'Deobfuscation Complete', 0x2ecc71
     else:
         title, color = 'Partial Result — String Table Dump', 0xf1c40f
+    
     em = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
     em.add_field(name='Method', value=f'`{detected}`', inline=True)
     em.add_field(name='Input', value=filename, inline=True)
@@ -78,6 +90,7 @@ async def run_deobf(raw_bytes, filename):
         stages = [t.get('stage', '?') for t in trace[:10]]
         em.add_field(name='Pipeline', value=_truncate(' -> '.join(stages), 1000), inline=False)
     em.set_footer(text=f'{API_URL} | {datetime.datetime.utcnow().strftime("%H:%M:%S")} UTC')
+    
     files = []
     if result:
         files.append(discord.File(fp=io.BytesIO(result.encode('utf-8', errors='replace')), filename=f'deobfuscated_{filename}'))
@@ -147,10 +160,6 @@ async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
     res = await run_deobf(raw, file.filename)
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
-
-@tree.command(name='ping', description='Check if the bot is alive')
-async def slash_ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f'Pong! Latency: {round(bot.latency * 1000)}ms')
 
 @bot.event
 async def on_ready():
