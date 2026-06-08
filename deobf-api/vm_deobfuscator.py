@@ -1,209 +1,194 @@
-local function extract_vm_blocks(source)
-    local blocks = {}
-    local pos_var = nil
-    local pos_match = source:match('while%s+(%w+)%s+do')
-    if pos_match then
-        pos_var = pos_match
-    else
-        pos_match = source:match('return%s*%(%s*function%s*%((%w+)')
-        if pos_match then
-            pos_var = pos_match
+local function decode_octal(s)
+    local result = {}
+    local i = 1
+    while i <= #s do
+        if s:sub(i, i) == '\\' and i + 1 <= #s then
+            local octal = ''
+            local j = i + 1
+            while j <= #s and #octal < 3 and s:sub(j, j):match('[0-7]') do
+                octal = octal .. s:sub(j, j)
+                j = j + 1
+            end
+            if #octal > 0 then
+                result[#result + 1] = string.char(tonumber(octal, 8))
+                i = j
+            else
+                result[#result + 1] = s:sub(i, i)
+                i = i + 1
+            end
+        else
+            result[#result + 1] = s:sub(i, i)
+            i = i + 1
         end
     end
-    if not pos_var then
-        return nil
-    end
-    local pattern = 'if%s+' .. pos_var .. '%s*==%s*(%d+)%s+then%s*(.-)%s*elseif'
-    local start_pos = 1
-    while true do
-        local block_id, block_code, next_pos = source:find(pattern, start_pos)
-        if not block_id then
-            break
-        end
-        blocks[tonumber(block_id)] = block_code
-        start_pos = next_pos
-    end
-    local final_pattern = 'if%s+' .. pos_var .. '%s*==%s*(%d+)%s+then%s*(.-)%s*end'
-    local block_id, block_code = source:match(final_pattern)
-    if block_id then
-        blocks[tonumber(block_id)] = block_code
-    end
-    return blocks, pos_var
+    return table.concat(result)
 end
 
-local function extract_start_pos(source)
-    local start_match = source:match('end%)%s*%(%s*(%d+)%s*%)')
-    if start_match then
-        return tonumber(start_match)
-    end
-    start_match = source:match('return%s*%(%s*function%s*%([^)]+%)%s*(%d+)%s*%)')
-    if start_match then
-        return tonumber(start_match)
+local function decode_string(s)
+    s = s:gsub('\\u([0-9a-fA-F]{4})', function(hex)
+        return string.char(tonumber(hex, 16))
+    end)
+    s = decode_octal(s)
+    return s
+end
+
+local function extract_alphabet(source)
+    local patterns = {
+        'local%s+N%s*=%s*{([^}]+)}',
+        'local%s+alphaMap%s*=%s*{([^}]+)}',
+    }
+    for _, pattern in ipairs(patterns) do
+        local start_pos, end_pos = source:find(pattern)
+        if start_pos then
+            local body = source:sub(start_pos, end_pos)
+            local chars = {}
+            for match in body:gmatch('"([A-Za-z0-9+/])"%s*=%s*(%d+)') do
+                local char = match:match('"([^"]+)"')
+                local idx = tonumber(match:match('=(%d+)'))
+                if char and idx and #char == 1 and idx >= 0 and idx <= 63 then
+                    chars[idx + 1] = char
+                end
+            end
+            if #chars == 64 then
+                return table.concat(chars)
+            end
+        end
     end
     return nil
 end
 
-local function linearize_blocks(blocks, start_pos)
-    if not blocks or not start_pos then
+local function custom_b64_decode(s, alphabet)
+    if not alphabet or #alphabet ~= 64 then
         return nil
     end
-    local order = {}
-    local visited = {}
-    local current = start_pos
-    while current and not visited[current] do
-        visited[current] = true
-        order[#order + 1] = current
-        local block = blocks[current]
-        if block then
-            local next_match = block:match(pos_var .. '%s*=%s*(%d+)')
-            if next_match then
-                current = tonumber(next_match)
-            else
-                break
-            end
+    local rev = {}
+    for i = 1, #alphabet do
+        rev[alphabet:sub(i, i)] = i - 1
+    end
+    for i = 1, #s do
+        if not rev[s:sub(i, i)] and s:sub(i, i) ~= '=' then
+            return nil
+        end
+    end
+    local std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local translated = {}
+    for i = 1, #s do
+        local c = s:sub(i, i)
+        if c ~= '=' then
+            translated[#translated + 1] = std:sub(rev[c] + 1, rev[c] + 1)
         else
-            break
+            translated[#translated + 1] = '='
         end
     end
-    local result = {}
-    for _, id in ipairs(order) do
-        if blocks[id] then
-            local code = blocks[id]
-            code = code:gsub(pos_var .. '%s*=%s*%d+', '')
-            code = code:gsub('break', '')
-            result[#result + 1] = code
-        end
+    local b64 = table.concat(translated)
+    local padding = (4 - (#b64 % 4)) % 4
+    if padding > 0 then
+        b64 = b64 .. string.rep('=', padding)
     end
-    return table.concat(result, '\n')
+    return (b64:gsub('.', function(c)
+        return string.char(tonumber(c, 16) or 0)
+    end))
 end
 
-local function extract_strings_direct(source)
-    local strings = {}
-    for match in source:gmatch('"(([^"\\]|\\.)*)"') do
-        strings[#strings + 1] = match
-    end
-    return strings
-end
-
-local function is_printable(s)
-    if #s < 5 then
+local function is_lua_source(s)
+    if #s < 20 then
         return false
     end
-    local printable = 0
-    for i = 1, #s do
-        local b = s:byte(i)
-        if (b >= 32 and b <= 126) or b == 10 or b == 13 or b == 9 then
-            printable = printable + 1
+    local keywords = {'function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do'}
+    local count = 0
+    for _, kw in ipairs(keywords) do
+        if s:find(kw, 1, true) then
+            count = count + 1
         end
     end
-    return printable / #s > 0.7
+    return count >= 2
 end
 
-local function decode_string(s)
-    local result = s
-    if s:find('\\u') then
-        result = result:gsub('\\u([0-9a-fA-F]{4})', function(hex)
-            return string.char(tonumber(hex, 16))
-        end)
-    end
-    if result:find('\\') then
-        local octal_result = {}
-        local i = 1
-        while i <= #result do
-            if result:sub(i, i) == '\\' and i + 1 <= #result then
-                local octal = ''
-                local j = i + 1
-                while j <= #result and #octal < 3 and result:sub(j, j):match('[0-7]') do
-                    octal = octal .. result:sub(j, j)
-                    j = j + 1
-                end
-                if #octal > 0 then
-                    octal_result[#octal_result + 1] = string.char(tonumber(octal, 8))
-                    i = j
-                else
-                    octal_result[#octal_result + 1] = result:sub(i, i)
-                    i = i + 1
-                end
-            else
-                octal_result[#octal_result + 1] = result:sub(i, i)
-                i = i + 1
+local function extract_strings(source)
+    local patterns = {
+        'local%s+EncStr%s*=%s*{([^}]+)}',
+        'local%s+R%s*=%s*{([^}]+)}',
+    }
+    for _, pattern in ipairs(patterns) do
+        local start_pos, end_pos = source:find(pattern)
+        if start_pos then
+            local body = source:sub(start_pos, end_pos)
+            local strings = {}
+            for match in body:gmatch('"(([^"\\]|\\.)*)"') do
+                strings[#strings + 1] = match
+            end
+            if #strings > 0 then
+                return strings
             end
         end
-        result = table.concat(octal_result)
+    end
+    return nil
+end
+
+local function extract_shuffle_ops(source)
+    local ops = {}
+    local pattern = 'ipairs%s*%(%s*{([^}]+)}%s*%)'
+    local start_pos, end_pos = source:find(pattern)
+    if start_pos then
+        local body = source:sub(start_pos, end_pos)
+        for pair in body:gmatch('{(%d+),%s*(%d+)}') do
+            local a = tonumber(pair:match('(%d+)'))
+            local b = tonumber(pair:match('(%d+)'))
+            if a and b then
+                ops[#ops + 1] = {a, b}
+            end
+        end
+    end
+    return ops
+end
+
+local function apply_shuffle(strings, ops)
+    local result = {}
+    for i, v in ipairs(strings) do
+        result[i] = v
+    end
+    for _, op in ipairs(ops) do
+        local a, b = op[1], op[2]
+        local lo, hi = a - 1, b - 1
+        while lo < hi do
+            result[lo], result[hi] = result[hi], result[lo]
+            lo = lo + 1
+            hi = hi - 1
+        end
     end
     return result
 end
 
-local function find_payload_in_strings(strings)
-    for _, s in ipairs(strings) do
-        local decoded = decode_string(s)
-        if decoded:find('function') and decoded:find('local') and decoded:find('end') then
-            return decoded
-        end
-        if decoded:find('print') and decoded:find('"') then
-            return decoded
-        end
-    end
-    return nil
-end
-
-local function extract_constant_table(source)
-    local const_match = source:match('local%s+(%w+)%s*=%s*{([^}]+)}')
-    if not const_match then
-        return nil
-    end
-    local const_table = {}
-    local const_name = const_match
-    local body = const_match
-    for value in body:gmatch('"([^"]+)"') do
-        const_table[#const_table + 1] = value
-    end
-    return const_table, const_name
-end
-
 local function deobfuscate(source)
-    local blocks, pos_var = extract_vm_blocks(source)
-    if blocks and pos_var then
-        local start_pos = extract_start_pos(source)
-        if start_pos then
-            local linear = linearize_blocks(blocks, start_pos)
-            if linear and #linear > 50 then
-                return linear, 'vm_linearized'
+    local strings = extract_strings(source)
+    if not strings then
+        return nil, "No string table found"
+    end
+    local ops = extract_shuffle_ops(source)
+    if #ops > 0 then
+        strings = apply_shuffle(strings, ops)
+    end
+    local alphabet = extract_alphabet(source)
+    local decoded_strings = {}
+    for _, s in ipairs(strings) do
+        s = decode_string(s)
+        if alphabet and #s >= 4 then
+            local decoded = custom_b64_decode(s, alphabet)
+            if decoded and is_lua_source(decoded) then
+                decoded_strings[#decoded_strings + 1] = decoded
+            else
+                decoded_strings[#decoded_strings + 1] = s
             end
+        else
+            decoded_strings[#decoded_strings + 1] = s
         end
     end
-    local strings = extract_strings_direct(source)
-    if strings and #strings > 0 then
-        local payload = find_payload_in_strings(strings)
-        if payload then
-            return payload, 'string_extract'
+    for _, s in ipairs(decoded_strings) do
+        if is_lua_source(s) then
+            return s, "success"
         end
     end
-    local const_table, const_name = extract_constant_table(source)
-    if const_table and const_name then
-        local getter_pattern = const_name .. '%s*%[%s*%w+%s*%+%s*(%d+)%s*%]'
-        local offset = source:match(getter_pattern)
-        if offset then
-            offset = tonumber(offset)
-            if offset and const_table[offset] then
-                local decoded = decode_string(const_table[offset])
-                if decoded:find('function') or decoded:find('print') then
-                    return decoded, 'constant_extract'
-                end
-            end
-        end
-        for i, s in ipairs(const_table) do
-            local decoded = decode_string(s)
-            if decoded:find('function') and decoded:find('end') then
-                return decoded, 'constant_scan'
-            end
-        end
-    end
-    local simple_payload = source:match('print%(["\']([^"\']+)["\']%)')
-    if simple_payload then
-        return 'print("' .. simple_payload .. '")', 'simple_print'
-    end
-    return nil, 'no_method'
+    return nil, "No valid Lua source found"
 end
 
 local args = {...}
@@ -226,15 +211,15 @@ if not file then
 end
 local source = file:read("*a")
 file:close()
-local result, method = deobfuscate(source)
+local result, msg = deobfuscate(source)
 if not result then
-    io.stderr:write("Deobfuscation failed: " .. method .. "\n")
+    io.stderr:write("Deobfuscation failed: " .. msg .. "\n")
     os.exit(1)
 end
 if output_file then
     local out = io.open(output_file, "w")
     if out then
-        out:write("-- Deobfuscated using method: " .. method .. "\n\n" .. result)
+        out:write("-- Deobfuscated with Prometheus Deobfuscator\n\n" .. result)
         out:close()
     else
         io.stderr:write("Cannot write to output file: " .. output_file .. "\n")
