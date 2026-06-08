@@ -1,0 +1,12 @@
+local fenv = getfenv();
+getgenv().Watermark = "namnnni2 right here https://discord.gg/5QuSfb2nmT";
+local r0 = not hookfunction;
+local r1 = task.spawn(to_explore_yhawfxfbczifyhynvxnwmbclxipdpjrj);
+local r2 = spawn(function() end);
+local r3 = task.wait(1);
+local r4 = newcclosure(to_explore_zcvqmccmcwvmjtrykxspgwdaehexumty);
+local r5 = debug.getinfo(r4);
+local r6 = r5.what;
+local r7 = ((r6 ~= "C"));
+local r8 = hookfunction(to_explore_baaorpepkvqvlbhgjsoobiwevwkkodec, to_explore_fksskfmybaksernpjqszuwlczjovwecv);
+local r9 = task.spawn(to_explore_xnvkbpkitqgtrbczekisgcghjmqueexe);
