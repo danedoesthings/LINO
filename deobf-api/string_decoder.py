@@ -1,236 +1,120 @@
-import re
-import base64
+import subprocess
+import tempfile
+import os
+import shutil
 
-def decode_octal_escapes(s: str) -> str:
-    result = []
-    i = 0
-    while i < len(s):
-        if s[i] == '\\' and i + 1 < len(s):
-            if s[i+1] == '\\':
-                result.append('\\')
-                i += 2
-                continue
-            octal = ''
-            j = i + 1
-            while j < len(s) and len(octal) < 3 and s[j] in '01234567':
-                octal += s[j]
-                j += 1
-            if octal:
+def run_vm_deobfuscator(source_code: str, timeout: int = 60) -> str:
+    lua_path = shutil.which('lua5.1') or shutil.which('lua')
+    if not lua_path:
+        return ""
+    
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.lua', delete=False) as inf:
+        inf.write(source_code.encode('latin-1'))
+        input_path = inf.name
+    
+    output_path = tempfile.NamedTemporaryFile(suffix='.lua', delete=False).name
+    
+    deobf_path = os.path.join(os.path.dirname(__file__), 'vm_deobfuscator.lua')
+    
+    cmd = [lua_path, deobf_path, input_path, '-o', output_path]
+    
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
+        if os.path.exists(output_path):
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
                 try:
-                    result.append(chr(int(octal, 8)))
-                    i = j
-                    continue
+                    return result_bytes.decode('utf-8', errors='replace')
                 except:
-                    pass
-        result.append(s[i])
-        i += 1
-    return ''.join(result)
-
-def decode_unicode_escapes(s: str) -> str:
-    def replace_hex(match):
+                    return result_bytes.decode('latin-1', errors='replace')
+        return ""
+    except Exception as e:
+        return ""
+    finally:
         try:
-            return chr(int(match.group(1), 16))
+            os.unlink(input_path)
         except:
-            return match.group(0)
-    return re.sub(r'\\u([0-9a-fA-F]{4})', replace_hex, s)
+            pass
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except:
+            pass
 
-def eval_arithmetic(expr: str):
-    expr = re.sub(r'\s+', '', str(expr))
-    expr = re.sub(r'--[^\n]*', '', expr)
-    if not expr:
-        return None
-    if expr.isdigit() or (expr[0] == '-' and expr[1:].isdigit()):
-        return int(expr)
+def run_prometheus_deobfuscator(source_code: str, timeout: int = 120) -> str:
+    lua_path = shutil.which('lua5.1') or shutil.which('lua')
+    if not lua_path:
+        return ""
+    
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.lua', delete=False) as inf:
+        inf.write(source_code.encode('latin-1'))
+        input_path = inf.name
+    
+    output_path = tempfile.NamedTemporaryFile(suffix='.lua', delete=False).name
+    
+    deobf_path = os.path.join(os.path.dirname(__file__), 'deobfuscator.lua')
+    
+    cmd = [lua_path, deobf_path, input_path, '-o', output_path]
+    
     try:
-        allowed_names = {"abs": abs, "min": min, "max": max}
-        return eval(expr, {"__builtins__": {}}, allowed_names)
-    except:
-        return None
-
-def extract_alphabet_from_n_table(source: str):
-    patterns = [
-        r'local\s+N\s*=\s*\{([^}]+)\}',
-        r'local\s+alphaMap\s*=\s*\{([^}]+)\}',
-        r'N\s*=\s*\{([^}]+)\}',
-        r'alphaMap\s*=\s*\{([^}]+)\}',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, source, re.DOTALL)
-        if match:
-            body = match.group(1)
-            chars = [''] * 64
-            for m in re.finditer(r'\[\s*["\']([^"\']+)["\']\s*\]\s*=\s*([^,;\n}]+)', body):
-                key_char = m.group(1)
-                expr = m.group(2)
-                val = eval_arithmetic(expr)
-                if val is not None and 0 <= val <= 63 and len(key_char) == 1:
-                    chars[val] = key_char
-            for m in re.finditer(r'([A-Za-z0-9+/])\s*=\s*([^,;\n}]+)', body):
-                key_char = m.group(1)
-                expr = m.group(2)
-                val = eval_arithmetic(expr)
-                if val is not None and 0 <= val <= 63 and len(key_char) == 1:
-                    chars[val] = key_char
-            for m in re.finditer(r'\[\s*(\d+)\s*\]\s*=\s*["\']([^"\']+)["\']', body):
-                idx = int(m.group(1))
-                char = m.group(2)
-                if 0 <= idx <= 63 and len(char) == 1:
-                    chars[idx] = char
-            if any(chars):
-                std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-                used = set(chars)
-                for i in range(64):
-                    if not chars[i]:
-                        for c in std:
-                            if c not in used:
-                                chars[i] = c
-                                used.add(c)
-                                break
-                return ''.join(chars)
-    return None
-
-def extract_strings(source: str):
-    patterns = [
-        r'local\s+EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-        r'local\s+R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-        r'EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-        r'R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, source, re.DOTALL)
-        if match:
-            body = match.group(1)
-            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
-            if strings and len(strings) >= 2:
-                return strings
-    return []
-
-def extract_shuffle_ops(source: str):
-    ops = []
-    patterns = [
-        r'ipairs\s*\(\s*\{([^}]+)\}\s*\)',
-        r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}\s*\)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, source)
-        if match:
-            for pair in re.finditer(r'\{(\d+)\s*,\s*(\d+)\}', match.group(1)):
+        proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
+        if os.path.exists(output_path):
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
                 try:
-                    a = int(pair.group(1))
-                    b = int(pair.group(2))
-                    ops.append((a, b))
+                    return result_bytes.decode('utf-8', errors='replace')
                 except:
-                    pass
-            if ops:
-                break
-    return ops
+                    return result_bytes.decode('latin-1', errors='replace')
+        return ""
+    except Exception as e:
+        return ""
+    finally:
+        try:
+            os.unlink(input_path)
+        except:
+            pass
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except:
+            pass
 
-def apply_shuffle(strings, ops):
-    result = list(strings)
-    for a, b in ops:
-        lo, hi = a - 1, b - 1
-        if 0 <= lo < hi < len(result):
-            temp = result[lo]
-            result[lo] = result[hi]
-            result[hi] = temp
-            lo += 1
-            hi -= 1
-    return result
-
-def custom_b64_decode(s, alphabet):
-    if not alphabet or len(alphabet) != 64:
-        return None
-    rev = {}
-    for i, c in enumerate(alphabet):
-        rev[c] = i
-    for c in s.rstrip('='):
-        if c not in rev:
-            return None
-    std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    translated = []
-    for c in s:
-        if c != '=':
-            translated.append(std[rev[c]])
-        else:
-            translated.append('=')
-    translated_str = ''.join(translated)
-    padding = (4 - len(translated_str) % 4) % 4
-    if padding:
-        translated_str += '=' * padding
+def run_unveilr(source_code: str, timeout: int = 60) -> str:
+    lune_path = shutil.which("lune")
+    if not lune_path:
+        lune_path = shutil.which("luau")
+        if not lune_path:
+            return ""
+    
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.lua', delete=False) as inf:
+        inf.write(source_code.encode('latin-1'))
+        input_path = inf.name
+    
+    output_path = tempfile.NamedTemporaryFile(suffix='.lua', delete=False).name
+    
+    unveilr_main = os.path.join(os.path.dirname(__file__), 'unveilr', 'main.lua')
+    
+    cmd = [lune_path, 'run', unveilr_main, input_path, output_path]
+    
     try:
-        return base64.b64decode(translated_str)
-    except:
-        return None
-
-def is_lua_source(s):
-    if len(s) < 20:
-        return False
-    keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do']
-    count = 0
-    for kw in keywords:
-        if kw in s:
-            count += 1
-    return count >= 2
-
-def get_string_table_offset(source: str) -> int:
-    patterns = [
-        r'return\s+(\w+)\s*\[\s*\w+\s*\+\s*(\d+)\s*\]',
-        r'return\s+(\w+)\s*\[\s*\w+\s*-\s*(\d+)\s*\]',
-        r'\+\s*(\d+)\s*\]',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, source)
-        if match:
-            groups = match.groups()
-            for g in groups:
-                if g and g.isdigit():
-                    return int(g)
-    return 0
-
-class StringTableDecoder:
-    def __init__(self, source: str):
-        self.source = source
-        self.strings = []
-        self.alphabet = None
-        self.offset = 0
-        self.ok = False
-        self._decode()
-
-    def _decode(self):
-        raw = extract_strings(self.source)
-        if not raw:
-            return
-        ops = extract_shuffle_ops(self.source)
-        if ops:
-            raw = apply_shuffle(raw, ops)
-        self.alphabet = extract_alphabet_from_n_table(self.source)
-        decoded = []
-        for s in raw:
-            if not s:
-                decoded.append('')
-                continue
-            s = decode_unicode_escapes(s)
-            s = decode_octal_escapes(s)
-            if self.alphabet and len(s) >= 4:
+        proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
+        if os.path.exists(output_path):
+            with open(output_path, 'rb') as f:
+                result_bytes = f.read()
                 try:
-                    b = custom_b64_decode(s, self.alphabet)
-                    if b:
-                        try:
-                            text = b.decode('utf-8', errors='replace')
-                            if is_lua_source(text):
-                                decoded.append(text)
-                                continue
-                        except:
-                            pass
+                    return result_bytes.decode('utf-8', errors='replace')
                 except:
-                    pass
-            decoded.append(s)
-        self.strings = decoded
-        self.offset = get_string_table_offset(self.source)
-        self.ok = len(self.strings) > 0
-
-    def get_source(self):
-        for s in self.strings:
-            if is_lua_source(s):
-                return s
-        return '\n'.join([s for s in self.strings if s])
+                    return result_bytes.decode('latin-1', errors='replace')
+        return ""
+    except Exception as e:
+        return ""
+    finally:
+        try:
+            os.unlink(input_path)
+        except:
+            pass
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except:
+            pass
