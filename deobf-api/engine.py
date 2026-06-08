@@ -5,6 +5,7 @@ import threading
 from string_decoder import StringTableDecoder
 from anti_tamper import remove_anti_tamper
 from beautifier import beautify
+from run_unveilr import run_unveilr
 
 class DeobfEngine:
     def process(self, source):
@@ -19,9 +20,21 @@ class DeobfEngine:
             if result and len(result) > 10:
                 result = beautify(result)
                 trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
-                return result, 'success', 'Deobfuscation complete', trace
+                return result, 'success', 'Deobfuscation via string table', trace
         
-        trace.append({'stage': 'fallback', 'success': False, 'message': 'Could not extract source'})
+        trace.append({'stage': 'unveilr', 'success': True, 'message': 'Attempting Unveilr deobfuscator'})
+        try:
+            result = run_unveilr(source, timeout=120)
+            if result and len(result) > 10:
+                result = beautify(result)
+                trace.append({'stage': 'beautify', 'success': True, 'message': 'Output beautified'})
+                return result, 'success', 'Deobfuscated with Unveilr', trace
+            else:
+                trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty result'})
+        except Exception as e:
+            trace.append({'stage': 'unveilr', 'success': False, 'message': f'Unveilr error: {str(e)[:200]}'})
+        
+        trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
         return '', 'failed', 'Unable to deobfuscate', trace
 
 
@@ -29,7 +42,6 @@ job_store = {}
 job_lock = threading.Lock()
 
 def submit_job(source):
-    import uuid
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
