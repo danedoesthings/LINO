@@ -1,6 +1,6 @@
 import re
 
-def beautify(code):
+def beautify(code: str) -> str:
     code = re.sub(r'[ \t]+', ' ', code)
     code = code.replace(';', '\n')
     
@@ -16,13 +16,15 @@ def beautify(code):
     code = re.sub(r'\b(end)\b(?!\s*then|\s*else|\s*elseif|\s*until)', r'\1\n', code)
     
     for kw in ['local', 'return', 'if', 'else', 'elseif', 'while', 'for', 'repeat', 'until', 'function']:
-        code = re.sub(rf'(?<!\n)\b{kw}\b', r'\n\1', code)
+        code = re.sub(rf'(?<!\n)\b{kw}\b', rf'\n{kw}', code)
     
     code = re.sub(r'[ \t]{2,}', ' ', code)
     code = re.sub(r'(?<![=~<>!])=(?!=)', ' = ', code)
     code = re.sub(r'\s*,\s*', ', ', code)
     code = re.sub(r'\(\s+', '(', code)
     code = re.sub(r'\s+\)', ')', code)
+    code = re.sub(r'\{\s+', '{', code)
+    code = re.sub(r'\s+\}', '}', code)
     
     lines = [l.strip() for l in code.split('\n')]
     depth = 0
@@ -42,4 +44,5 @@ def beautify(code):
     for i, lit in enumerate(literals):
         code = code.replace(f'__LIT_{i}__', lit)
     
+    code = re.sub(r'\n{3,}', '\n\n', code)
     return code.strip()
