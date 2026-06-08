@@ -1,7 +1,6 @@
 FROM python:3.10-slim
 
-# Download and install lune from the official GitHub releases.
-RUN apt-get update && apt-get install -y curl unzip && \
+RUN apt-get update && apt-get install -y curl unzip lua5.1 && \
     curl -fsSL https://github.com/lune-org/lune/releases/download/v0.10.4/lune-0.10.4-linux-x86_64.zip -o lune.zip && \
     unzip lune.zip && \
     mv lune /usr/local/bin/lune && \
