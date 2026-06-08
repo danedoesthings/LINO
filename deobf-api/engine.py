@@ -9,7 +9,6 @@ from run_deobfuscator import run_vm_deobfuscator, run_prometheus_deobfuscator, r
 class DeobfEngine:
     def process(self, source):
         trace = []
-        
         source = remove_anti_tamper(source)
         trace.append({'stage': 'anti_tamper', 'success': True, 'message': 'Anti-tamper removed'})
         
@@ -74,7 +73,7 @@ class DeobfEngine:
             alphabet = decoder.alphabet or 'not found'
             result_lines = [f'-- Detected getter offset: {offset}', f'-- Alphabet: {alphabet}', '']
             for i, s in enumerate(decoder.strings):
-                if s:
+                if s and is_printable(s):
                     result_lines.append(f'-- [{i+1}] "{s}"')
             result = '\n'.join(result_lines)
             trace.append({'stage': 'string_dump', 'success': True, 'message': f'Dumped {len(decoder.strings)} raw strings'})
@@ -83,7 +82,6 @@ class DeobfEngine:
         trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
         return '', 'failed', 'Unable to deobfuscate', trace
 
-
 job_store = {}
 job_lock = threading.Lock()
 
@@ -91,7 +89,6 @@ def submit_job(source):
     job_id = str(uuid.uuid4())
     with job_lock:
         job_store[job_id] = {'status': 'processing', 'created': time.time()}
-    
     def run():
         engine = DeobfEngine()
         result, method, diag, trace = engine.process(source)
@@ -104,7 +101,6 @@ def submit_job(source):
                 'trace': trace,
                 'result_length': len(result)
             }
-    
     threading.Thread(target=run, daemon=True).start()
     return job_id
 
