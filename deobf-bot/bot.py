@@ -1,8 +1,3 @@
-"""
-LINO Discord Bot - Lua Deobfuscation Interface.
-Provides deobfuscation capabilities via Discord commands.
-"""
-
 import discord
 import io
 import os
@@ -66,17 +61,7 @@ def _truncate(text, max_len):
 
 
 async def run_deobf(raw_bytes, filename):
-    """Run deobfuscation on raw file bytes."""
-    if len(raw_bytes) > MAX_BYTES:
-        return {
-            'files': [],
-            'embed': discord.Embed(
-                title='Error',
-                description=f'Input exceeds 5 MB limit ({len(raw_bytes)} bytes)',
-                color=0xe74c3c
-            )
-        }
-
+    """Run deobfuscation on raw bytes and return embed + files."""
     try:
         source_b64 = base64.b64encode(raw_bytes).decode('ascii')
         data = await call_api_direct(source_b64)
@@ -146,7 +131,7 @@ async def run_deobf(raw_bytes, filename):
     trace = data.get('trace', [])
 
     # Determine success based on detection method
-    success_methods = ('string_decoder', 'vm_deobfuscator', 'prometheus_deobfuscator', 'unveilr')
+    success_methods = ('string_decoder', 'vm_deobfuscator', 'prometheus_deobfuscator', 'unveilr', 'vm_devirtualizer')
     if detected in success_methods:
         title, color = 'Deobfuscation Complete', 0x2ecc71
     elif detected == 'string_dump':
@@ -248,18 +233,14 @@ async def deobf_error(ctx, error):
 async def slash_deobf(interaction: discord.Interaction, file: discord.Attachment):
     """Deobfuscate via slash command."""
     await interaction.response.defer(thinking=True)
-
     if not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
         await interaction.followup.send(f'Please upload a {", ".join(ALLOWED_EXTENSIONS)} file')
         return
-
     if file.size > MAX_BYTES:
         await interaction.followup.send(f'File too large ({file.size} bytes, max {MAX_BYTES})')
         return
-
     raw = await file.read()
     log.info(f"Slash deobf from {interaction.user} ({file.filename}, {len(raw)} bytes)")
-
     res = await run_deobf(raw, file.filename)
     await interaction.followup.send(embed=res['embed'], files=res.get('files', []))
 
