@@ -1,8 +1,3 @@
-"""
-Constant folding for arithmetic expressions in Lua code.
-Evaluates simple math expressions at decode time.
-"""
-
 import re
 from typing import Optional
 
@@ -93,9 +88,9 @@ def fold_constants(code: str, passes: int = 12) -> str:
 
 # Offset detection patterns for string table getters
 _E_OFFSET_PATS = [
-    re.compile(r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
-    re.compile(r'\breturn\s+R\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
-    re.compile(r'\breturn\s+EncStr\s*\[\s*\w+\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]'),
+    re.compile(r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+R\s*\[\s*\2\s*\+\s*\(?([\-\d+\-*\s]+)\)?\s*\]'),
+    re.compile(r'\breturn\s+R\s*\[\s*\w+\s*\+\s*\(?([\-\d+\-*\s]+)\)?\s*\]'),
+    re.compile(r'\breturn\s+EncStr\s*\[\s*\w+\s*\+\s*\(?([\-\d+\-*\s]+)\)?\s*\]'),
 ]
 
 
@@ -115,7 +110,9 @@ def get_string_table_offset(source: str) -> int:
 def get_getter_name_and_offset(source: str):
     """Extract getter function name, table name, and offset."""
     folded = fold_constants(source)
-    pat = re.compile(r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+(\w+)\s*\[\s*\2\s*\+\s*\(?([-\d+\-*\s]+)\)?\s*\]')
+    pat = re.compile(
+        r'local\s+function\s+(\w+)\s*\(\s*(\w+)\s*\)\s*return\s+(\w+)\s*\[\s*\2\s*\+\s*\(?([\-\d+\-*\s]+)\)?\s*\]'
+    )
     m = pat.search(folded)
     if m:
         getter = m.group(1)
