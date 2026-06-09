@@ -1,8 +1,3 @@
-"""
-Variable renamer for deobfuscated Lua code.
-Replaces obfuscated variable names with readable alternatives.
-"""
-
 import re
 from constants import PROTECTED_NAMES, VM_SINGLE_LETTERS, SEMANTIC_RENAMES, LUA_KEYWORDS
 
@@ -124,14 +119,10 @@ class VarRenamer:
         """
         self._counter = 0
         self._renamed = set()
-
         # Apply semantic renames first
         code = self._apply_semantic(code)
-
         # Apply VM single-letter renames
         code = self._apply_vm_letters(code)
-
         # Apply register-style renames
         code = self._apply_register_names(code)
-
         return code
