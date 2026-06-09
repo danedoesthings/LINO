@@ -1,7 +1,3 @@
-"""
-Constants for Lua deobfuscation - keywords, protected names, and semantic mappings.
-"""
-
 import re
 
 LUA_KEYWORDS: set[str] = {
