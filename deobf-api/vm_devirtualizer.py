@@ -167,13 +167,12 @@ class VMDevirtualizer:
         return '\n'.join(trace_lines) if trace_lines else None
 
     def _extract_string_payload(self) -> Optional[str]:
-        """If the VM uses loadstring on decoded strings, return the matching string."""
         if not self.strings:
             return None
         load_patterns = [
             r'loadstring\s*\(\s*\w+\s*\[.*?\]\s*\)',
             r'load\s*\(\s*\w+\s*\[.*?\]\s*\)',
-            r'loadstring\s*\(\s*\w+\s*\(.*?\)\s*\)',
+            r'loadstring\s*\(\s*\w+\s*\(.*?)\s*\)',
         ]
         for pat in load_patterns:
             if re.search(pat, self.source):
@@ -184,7 +183,7 @@ class VMDevirtualizer:
 
     def _extract_visible_payload(self) -> Optional[str]:
         patterns = [
-            r'print\s*\(\s*"([^"]*)"s*\)',
+            r'print\s*\(\s*"([^"]*)"\s*\)',
             r'loadstring\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)',
             r'load\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)',
         ]
@@ -205,3 +204,11 @@ class VMDevirtualizer:
                 except Exception:
                     continue
         return None
+
+
+def is_lua_source(s: str) -> bool:
+    if len(s) < 20:
+        return False
+    keywords = ['function', 'local', 'end', 'return', 'if', 'then', 'else', 'for', 'while', 'do']
+    found = sum(1 for kw in keywords if kw in s)
+    return found >= 1 and ('=' in s or '(' in s)
