@@ -1,7 +1,3 @@
-"""
-Structured job logging for deobfuscation pipeline.
-"""
-
 import time
 import json
 import sys
@@ -51,11 +47,11 @@ class JobLogger:
         entry = TraceEntry(stage=stage, success=success, message=message, detail=dict(detail))
         self._traces.append(entry)
         icon = 'v' if success else 'x'
-        self._emit(f'  {icon} [{stage}] {message}')
+        self._emit(f' {icon} [{stage}] {message}')
 
     def add_error(self, msg: str, exc: Optional[Exception] = None) -> None:
         self._errors.append({'message': msg, 'exception': str(exc) if exc else None})
-        self._emit(f'  !! ERROR: {msg}', error=True)
+        self._emit(f' !! ERROR: {msg}', error=True)
 
     def finish(self, result: Optional[str] = None, method: str = '', diagnostic: str = '') -> None:
         self._result = result
