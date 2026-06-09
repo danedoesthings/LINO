@@ -1,7 +1,3 @@
---[[
-Unveilr — WeAreDevs Deobfuscator
-Handles generic string tables, custom alphabets, and shuffles.
---]]
 local args = {...}
 local input_file = args[1]
 local output_file = args[2]
@@ -22,12 +18,13 @@ file:close()
 -- Generic string table extraction
 local function extract_strings(src)
     local patterns = {
-        'local%s+EncStr%s*=%s*%{([^}]+)%}',
-        'local%s+R%s*=%s*%{([^}]+)%}',
-        'local%s+Y%s*=%s*%{([^}]+)%}',
-        '%bEncStr%s*=%s*%{([^}]+)%}',
-        '%bR%s*=%s*%{([^}]+)%}',
-        '%bY%s*=%s*%{([^}]+)%}',
+        'local%s+EncStr%s*=%s*\{([^}]+)\}',
+        'local%s+R%s*=%s*\{([^}]+)\}',
+        'local%s+Y%s*=%s*\{([^}]+)\}',
+        'local%s+S%s*=%s*\{([^}]+)\}',
+        'EncStr%s*=%s*\{([^}]+)\}',
+        'R%s*=%s*\{([^}]+)\}',
+        'Y%s*=%s*\{([^}]+)\}',
     }
     for _, pat in ipairs(patterns) do
         local start_pos, end_pos = src:find(pat)
@@ -43,7 +40,7 @@ local function extract_strings(src)
         end
     end
     -- Generic fallback: any table with 5+ strings
-    for var, body in src:gmatch('(?:local%s+)?(%w+)%s*=%s*%{((?:[^}]|}%s*,)*)%}') do
+    for var, body in src:gmatch('(local%s+)?(%w+)%s*=%s*\{([^}]+)\}') do
         local strings = {}
         for match in body:gmatch('"(([^"\\]|\\.)*)"') do
             table.insert(strings, match)
@@ -55,20 +52,26 @@ local function extract_strings(src)
     return nil
 end
 
-local function decode_octal(s)
+local function decode_decimal(s)
     local result = {}
     local i = 1
     while i <= #s do
-        if s:sub(i, i) == '\\' and i + 1 <= #s then
-            local octal = ''
+        if s:sub(i, i) == '\\' and i + 1 <= #s and s:sub(i + 1, i + 1):match('[0-9]') then
+            local digits = ''
             local j = i + 1
-            while j <= #s and #octal < 3 and s:sub(j, j):match('[0-7]') do
-                octal = octal .. s:sub(j, j)
+            while j <= #s and #digits < 3 and s:sub(j, j):match('[0-9]') do
+                digits = digits .. s:sub(j, j)
                 j = j + 1
             end
-            if #octal > 0 then
-                table.insert(result, string.char(tonumber(octal, 8)))
-                i = j
+            if #digits > 0 then
+                local code = tonumber(digits)
+                if code and code >= 0 and code <= 255 then
+                    table.insert(result, string.char(code))
+                    i = j
+                else
+                    table.insert(result, s:sub(i, i))
+                    i = i + 1
+                end
             else
                 table.insert(result, s:sub(i, i))
                 i = i + 1
@@ -93,10 +96,12 @@ end
 
 local function extract_alphabet(src)
     local patterns = {
-        'local%s+N%s*=%s*%{([^}]+)%}',
-        'local%s+alphaMap%s*=%s*%{([^}]+)%}',
-        '%bN%s*=%s*%{([^}]+)%}',
-        '%balphaMap%s*=%s*%{([^}]+)%}',
+        'local%s+N%s*=%s*\{([^}]+)\}',
+        'local%s+alphaMap%s*=%s*\{([^}]+)\}',
+        'local%s+aMap%s*=%s*\{([^}]+)\}',
+        'local%s+alphabet%s*=%s*\{([^}]+)\}',
+        'N%s*=%s*\{([^}]+)\}',
+        'alphaMap%s*=%s*\{([^}]+)\}',
     }
     for _, pat in ipairs(patterns) do
         local start_pos, end_pos = src:find(pat)
@@ -109,7 +114,7 @@ local function extract_alphabet(src)
                     chars[v + 1] = char
                 end
             end
-            for idx, char in body:gmatch('%[(%d+)%]%s*=%s*"([A-Za-z0-9+/?])"') do
+            for idx, char in body:gmatch('\[(%d+)%]%s*=%s*"([A-Za-z0-9+/?])"') do
                 local v = tonumber(idx)
                 if v and v >= 0 and v <= 63 then
                     chars[v + 1] = char
@@ -210,11 +215,11 @@ end
 
 local function extract_shuffle_ops(src)
     local ops = {}
-    local pattern = 'ipairs%s*%(%s*%{([^}]+)}%s*%)'
+    local pattern = 'ipairs%s*\(\s*\{([^}]+)}\s*\)'
     local start_pos, end_pos = src:find(pattern)
     if start_pos then
         local body = src:sub(start_pos, end_pos)
-        for a, b in body:gmatch('%{(%d+),%s*(%d+)%}') do
+        for a, b in body:gmatch('\{(%d+),%s*(%d+)\}') do
             local x, y = tonumber(a), tonumber(b)
             if x and y and x < y then
                 table.insert(ops, {x, y})
@@ -244,19 +249,16 @@ end
 -- Main deobfuscation
 local strings = extract_strings(source)
 local result = source
-
 if strings then
     local ops = extract_shuffle_ops(source)
     if #ops > 0 then
         strings = apply_shuffle(strings, ops)
     end
-
     local alphabet = extract_alphabet(source)
     local decoded = {}
-
     for _, s in ipairs(strings) do
         s = decode_unicode(s)
-        s = decode_octal(s)
+        s = decode_decimal(s)
         if alphabet and #s >= 4 then
             local dec = custom_b64_decode(s, alphabet)
             if dec and is_lua_source(dec) then
@@ -264,7 +266,6 @@ if strings then
             end
         end
     end
-
     for _, s in ipairs(decoded) do
         if is_lua_source(s) then
             result = s
