@@ -4,7 +4,9 @@ import logging
 
 log = logging.getLogger(__name__)
 
+
 def decode_octal_escapes(s: str) -> str:
+    """Decode octal escape sequences in a string."""
     result = []
     i = 0
     while i < len(s):
@@ -32,7 +34,9 @@ def decode_octal_escapes(s: str) -> str:
             i += 1
     return ''.join(result)
 
+
 def decode_unicode_escapes(s: str) -> str:
+    r"""Decode \uXXXX escape sequences."""
     def replace_hex(match):
         try:
             code = int(match.group(1), 16)
@@ -43,7 +47,9 @@ def decode_unicode_escapes(s: str) -> str:
             return match.group(0)
     return re.sub(r'\\u([0-9a-fA-F]{4})', replace_hex, s)
 
+
 def decode_hex_escapes(s: str) -> str:
+    r"""Decode \xXX escape sequences."""
     def replace_hex(match):
         try:
             return chr(int(match.group(1), 16))
@@ -51,7 +57,9 @@ def decode_hex_escapes(s: str) -> str:
             return match.group(0)
     return re.sub(r'\\x([0-9a-fA-F]{2})', replace_hex, s)
 
+
 def eval_arithmetic(expr: str):
+    """Safely evaluate a simple arithmetic expression to an integer."""
     expr = re.sub(r'\s+', '', str(expr))
     expr = re.sub(r'--[^\n]*', '', expr)
     if not expr:
@@ -64,30 +72,34 @@ def eval_arithmetic(expr: str):
     except Exception:
         return None
 
+
 def extract_alphabet_enhanced(source: str):
     """Find any 64-char alphabet mapping regardless of variable name."""
     chars = [''] * 64
     found = False
 
-    # Named tables first
+    # Named tables first (common WeAreDevs patterns)
     named = [
-        r'local\s+(?:N|alphaMap)\s*=\s*\{([^}]+)\}',
-        r'\b(?:N|alphaMap)\s*=\s*\{([^}]+)\}',
+        r'local\s+(?:N|alphaMap|aMap|alphabet|charMap)\s*=\s*\{([^}]+)\}',
+        r'\b(?:N|alphaMap|aMap|alphabet|charMap)\s*=\s*\{([^}]+)\}',
     ]
     for pat in named:
         m = re.search(pat, source, re.DOTALL)
         if m:
             body = m.group(1)
+            # Pattern: "char" = index
             for ch, idx in re.findall(r'["\']([A-Za-z0-9+/?])["\']\s*=\s*(\d+)', body):
                 v = int(idx)
                 if 0 <= v < 64:
                     chars[v] = ch
                     found = True
+            # Pattern: [index] = "char"
             for idx, ch in re.findall(r'\[(\d+)\]\s*=\s*["\']([A-Za-z0-9+/?])["\']', body):
                 v = int(idx)
                 if 0 <= v < 64:
                     chars[v] = ch
                     found = True
+            # Pattern: char = index (unquoted, single char only)
             for ch, idx in re.findall(r'([A-Za-z0-9+/?])\s*=\s*(\d+)', body):
                 v = int(idx)
                 if 0 <= v < 64 and len(ch) == 1:
@@ -98,6 +110,7 @@ def extract_alphabet_enhanced(source: str):
 
     # Generic fallback: any table with 10+ char->index mappings
     if not found:
+        # Match table assignments with potential nested content
         gen = r'(?:local\s+)?(\w+)\s*=\s*\{((?:[^}]|\}(?=[,;]))*)\}'
         for m in re.finditer(gen, source, re.DOTALL):
             body = m.group(2)
@@ -107,9 +120,17 @@ def extract_alphabet_enhanced(source: str):
                     v = int(idx)
                     if 0 <= v < 64:
                         chars[v] = ch
-                        found = True
-                if found:
-                    break
+                found = True
+                break
+            # Also try [index] = "char" format
+            mappings2 = re.findall(r'\[(\d+)\]\s*=\s*["\']([A-Za-z0-9+/?])["\']', body)
+            if len(mappings2) >= 10:
+                for idx, ch in mappings2:
+                    v = int(idx)
+                    if 0 <= v < 64:
+                        chars[v] = ch
+                found = True
+                break
 
     if found:
         std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -124,13 +145,16 @@ def extract_alphabet_enhanced(source: str):
         return ''.join(chars)
     return None
 
+
 def extract_strings_enhanced(source: str):
     """Find string tables by known name, then by content (any table with 5+ base64 strings)."""
-    # Priority 1: known WeAreDevs names
+    # Priority 1: known WeAreDevs names (handle nested braces carefully)
     patterns = [
         r'local\s+EncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'local\s+R\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'local\s+Y\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'local\s+S\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+        r'local\s+T\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'\bEncStr\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'\bR\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
         r'\bY\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
@@ -143,22 +167,32 @@ def extract_strings_enhanced(source: str):
             if strings and len(strings) >= 2:
                 return strings, m.group(0)
 
-    # Priority 2: generic detection
+    # Priority 2: generic detection - find any large table with base64-looking strings
     best = None
     best_score = 0
-    gen = r'(?:local\s+)?(\w+)\s*=\s*\{((?:[^}]|\}(?=[,;]))*)\}'
+    best_match = None
+
+    # Use a safer regex for generic tables
+    gen = r'(?:local\s+)?(\w+)\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}'
     for m in re.finditer(gen, source, re.DOTALL):
         body = m.group(2)
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+        if not strings or len(strings) < 5:
+            continue
+        # Score based on base64-like content
         score = sum(1 for s in strings if len(s) >= 4 and re.match(r'^[A-Za-z0-9+/=]+$', s))
         if score >= 5 and score > best_score:
             best_score = score
             best = strings
+            best_match = m.group(0)
+
     if best:
-        return best, None
+        return best, best_match
     return [], None
 
+
 def extract_shuffle_ops(source: str):
+    """Extract shuffle/reversal operations from ipairs patterns."""
     ops = []
     patterns = [
         r'ipairs\s*\(\s*\{([^}]+)\}\s*\)',
@@ -179,7 +213,9 @@ def extract_shuffle_ops(source: str):
                 break
     return ops
 
+
 def apply_shuffle(strings, ops):
+    """Apply shuffle reversal operations to string list."""
     result = list(strings)
     for a, b in ops:
         lo, hi = a - 1, b - 1
@@ -187,7 +223,9 @@ def apply_shuffle(strings, ops):
             result[lo:hi + 1] = reversed(result[lo:hi + 1])
     return result
 
+
 def custom_b64_decode(s, alphabet):
+    """Decode custom-alphabet base64 string."""
     if not alphabet or len(alphabet) != 64:
         return None
     rev = {c: i for i, c in enumerate(alphabet)}
@@ -210,13 +248,17 @@ def custom_b64_decode(s, alphabet):
     except Exception:
         return None
 
+
 def is_printable(s: str) -> bool:
+    """Check if a string is mostly printable ASCII."""
     if not s:
         return False
     printable = sum(1 for c in s if 32 <= ord(c) <= 126 or c in '\n\r\t')
     return printable / len(s) > 0.85
 
+
 def is_lua_source(s: str) -> bool:
+    """Check if decoded content looks like Lua source code."""
     if len(s) < 20 or not is_printable(s):
         return False
     keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else',
@@ -224,10 +266,12 @@ def is_lua_source(s: str) -> bool:
     count = sum(1 for kw in keywords if kw in s)
     return count >= 2
 
+
 def get_string_table_offset(source: str) -> int:
+    """Detect the string table offset used in getter functions."""
     patterns = [
-        r'return\s+(\w+)\s*\[\s*\w+\s*\+\s*(\d+)\s*\]',
-        r'return\s+(\w+)\s*\[\s*\w+\s*-\s*(\d+)\s*\]',
+        r'local\s+function\s+\w+\s*\(\s*\w+\s*\)\s*return\s+\w+\s*\[\s*\w+\s*\+\s*\(?([\-\d+\-*\s]+)\)?\s*\]',
+        r'\breturn\s+\w+\s*\[\s*\w+\s*\+\s*\(?([\-\d+\-*\s]+)\)?\s*\]',
         r'\+\s*(\d+)\s*\]',
         r'\[\s*\w+\s*\+\s*(\d+)\s*\]',
     ]
@@ -235,11 +279,18 @@ def get_string_table_offset(source: str) -> int:
         m = re.search(pat, source)
         if m:
             for g in m.groups():
-                if g and g.isdigit():
-                    return int(g)
+                if g and g.strip().isdigit():
+                    return int(g.strip())
+                # Try evaluating arithmetic expression
+                val = eval_arithmetic(g.strip()) if g else None
+                if val is not None:
+                    return int(val)
     return 0
 
+
 class StringTableDecoder:
+    """Decoder for WeAreDevs-style string table obfuscation."""
+
     def __init__(self, source: str):
         self.source = source
         self.strings = []
@@ -280,6 +331,14 @@ class StringTableDecoder:
                                 decoded_str = text
                         except Exception:
                             pass
+                        # Also try latin-1 if utf-8 fails
+                        if decoded_str is None:
+                            try:
+                                text = b.decode('latin-1', errors='replace')
+                                if is_lua_source(text):
+                                    decoded_str = text
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
@@ -297,11 +356,11 @@ class StringTableDecoder:
         self.ok = len([s for s in self.strings if s]) > 0
 
     def get_source(self) -> str:
+        """Return the best Lua source found in decoded strings."""
         # First pass: full Lua source
         for s in self.strings:
             if is_lua_source(s):
                 return s
-
         # Second pass: code fragments
         code_keywords = {'function', 'local', 'return', 'print', 'if', 'then',
                          'else', 'end', 'while', 'for', 'do', 'repeat', 'until'}
@@ -312,8 +371,6 @@ class StringTableDecoder:
             if is_printable(s) and any(kw in s for kw in code_keywords):
                 if re.search(r'\s', s) or '(' in s or ')' in s or ',' in s or '\n' in s:
                     fragments.append(s)
-
         if fragments:
             return '\n\n'.join(fragments)
-
         return ''
