@@ -169,9 +169,10 @@ class DeobfEngine:
             if decoder and decoder.strings:
                 offset = getattr(decoder, 'offset', 0)
                 alphabet = decoder.alphabet or 'not found'
+                renamed_note = ' (alphabet keys were renamed - used standard base64)' if decoder.alphabet_renamed else ''
                 result_lines = [
                     f'-- Detected getter offset: {offset}',
-                    f'-- Alphabet: {alphabet}',
+                    f'-- Alphabet: {alphabet}{renamed_note}',
                     f'-- Total strings: {len(decoder.strings)}',
                     '',
                 ]
