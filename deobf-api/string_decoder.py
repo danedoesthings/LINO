@@ -6,6 +6,7 @@ log = logging.getLogger(__name__)
 
 STD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
+
 def decode_octal_escapes(s: str) -> str:
     result = []
     i = 0
@@ -34,6 +35,7 @@ def decode_octal_escapes(s: str) -> str:
             i += 1
     return ''.join(result)
 
+
 def decode_unicode_escapes(s: str) -> str:
     def replace_hex(match):
         try:
@@ -45,6 +47,7 @@ def decode_unicode_escapes(s: str) -> str:
             return match.group(0)
     return re.sub(r'\\u([0-9a-fA-F]{4})', replace_hex, s)
 
+
 def decode_hex_escapes(s: str) -> str:
     def replace_hex(match):
         try:
@@ -52,6 +55,7 @@ def decode_hex_escapes(s: str) -> str:
         except (ValueError, OverflowError):
             return match.group(0)
     return re.sub(r'\\x([0-9a-fA-F]{2})', replace_hex, s)
+
 
 def eval_arithmetic(expr: str):
     expr = re.sub(r'\s+', '', str(expr))
@@ -66,6 +70,7 @@ def eval_arithmetic(expr: str):
     except Exception:
         return None
 
+
 def _balance_braces(source: str, start_idx: int) -> int:
     depth = 1
     i = start_idx + 1
@@ -77,6 +82,7 @@ def _balance_braces(source: str, start_idx: int) -> int:
         i += 1
     return i if depth == 0 else -1
 
+
 def extract_alphabet_enhanced(source: str):
     # Strategy 1: 64-char string literal
     for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', source):
@@ -87,13 +93,11 @@ def extract_alphabet_enhanced(source: str):
     # Strategy 2: Named mapping tables
     chars = [''] * 64
     found = False
-
     for m in re.finditer(r'(?:local\s+)?(?:N|alphaMap|aMap|alphabet|charMap|map|\w+)\s*=\s*\{', source):
         end = _balance_braces(source, m.end() - 1)
         if end == -1:
             continue
         body = source[m.end():end - 1]
-
         valid_entries = 0
         temp_chars = [''] * 64
 
@@ -118,6 +122,32 @@ def extract_alphabet_enhanced(source: str):
                 if not temp_chars[v]:
                     temp_chars[v] = ch
                     valid_entries += 1
+
+        # === NEW: Pattern 4 â Handle WeAreDevs ["\ddd"] decimal escape keys ===
+        for escaped, idx in re.findall(r'\["(\\\d+)"\]\s*=\s*([+-]?[\d()+\-*/]+)', body):
+            try:
+                code = int(escaped[1:])  # Remove leading backslash
+                if 0 <= code <= 255:
+                    ch = chr(code)
+                    v = eval_arithmetic(idx)
+                    if v is not None and 0 <= v < 64:
+                        temp_chars[v] = ch
+                        valid_entries += 1
+            except Exception:
+                pass
+
+        # Also handle single-quoted: ['\ddd'] = index
+        for escaped, idx in re.findall(r"\['(\\\d+)'\]\s*=\s*([+-]?[\d()+\-*/]+)", body):
+            try:
+                code = int(escaped[1:])
+                if 0 <= code <= 255:
+                    ch = chr(code)
+                    v = eval_arithmetic(idx)
+                    if v is not None and 0 <= v < 64:
+                        temp_chars[v] = ch
+                        valid_entries += 1
+            except Exception:
+                pass
 
         # Detect renamed alphabet (multi-char keys)
         multi_char_entries = 0
@@ -144,8 +174,8 @@ def extract_alphabet_enhanced(source: str):
                         used.add(c)
                         break
         return ''.join(chars)
-
     return None
+
 
 def extract_strings_enhanced(source: str):
     known_names = ['EncStr', 'R', 'Y', 'S', 'T', 'Str', 'Strings', 'Data', 'Pool', 'E']
@@ -160,12 +190,11 @@ def extract_strings_enhanced(source: str):
                 body = source[start + 1:end - 1]
                 strings = re.findall(r'"((?:[^"\\]|\\.)*)"', body)
                 if strings and len(strings) >= 2:
-                    return strings, source[m.start():end]
+                    return strings, m
 
     best = None
     best_score = 0
     best_match = None
-
     for m in re.finditer(r'(?:local\s+)?(\w+)\s*=\s*(\{)', source):
         start = m.end() - 1
         end = _balance_braces(source, start)
@@ -184,32 +213,40 @@ def extract_strings_enhanced(source: str):
         if score >= 5 and score > best_score:
             best_score = score
             best = strings
-            best_match = source[m.start():end]
+            best_match = m
 
     if best:
         return best, best_match
     return [], None
 
+
 def extract_shuffle_ops(source: str):
     ops = []
-    patterns = [
-        r'ipairs\s*\(\s*\{([^}]+)\}\s*\)',
-        r'for\s+\w+\s*,\s+\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}\s*\)',
-    ]
-    for pat in patterns:
-        m = re.search(pat, source)
-        if m:
-            body = m.group(1)
-            for pair in re.finditer(r'\{([+-]?\d+)\s*,\s*([+-]?\d+)\}', body):
-                try:
-                    a, b = int(pair.group(1)), int(pair.group(2))
-                    if a < b:
-                        ops.append((a, b))
-                except ValueError:
-                    pass
-            if ops:
-                break
+    # === FIXED: Handle nested braces in ipairs shuffle ===
+    ipairs_positions = [m.start() for m in re.finditer(r'ipairs', source)]
+    for pos in ipairs_positions:
+        brace_match = re.search(r'\(\s*\{', source[pos:pos + 200])
+        if not brace_match:
+            continue
+        start = pos + brace_match.end() - 1
+        end = _balance_braces(source, start)
+        if end == -1:
+            continue
+        body = source[start + 1:end - 1]
+        # Extract inner {a,b} or {a;b} pairs
+        for pair_match in re.finditer(r'\{([^}]+)\}', body):
+            pair_str = pair_match.group(1)
+            parts = re.split(r'[;,]', pair_str)
+            resolved = [eval_arithmetic(p.strip()) for p in parts if p.strip()]
+            resolved = [n for n in resolved if n is not None]
+            if len(resolved) == 2:
+                a, b = resolved
+                if a < b:
+                    ops.append((a, b))
+        if ops:
+            break
     return ops
+
 
 def apply_shuffle(strings, ops):
     result = list(strings)
@@ -218,6 +255,7 @@ def apply_shuffle(strings, ops):
         if 0 <= lo < hi < len(result):
             result[lo:hi + 1] = reversed(result[lo:hi + 1])
     return result
+
 
 def custom_b64_decode(s, alphabet):
     if not alphabet or len(alphabet) != 64:
@@ -241,18 +279,21 @@ def custom_b64_decode(s, alphabet):
     except Exception:
         return None
 
+
 def is_printable(s: str) -> bool:
     if not s:
         return False
     printable = sum(1 for c in s if 32 <= ord(c) <= 126 or c in '\n\r\t')
-    return printable / len(s) > 0.85
+    return printable / len(s) > 0.8
+
 
 def is_lua_source(s: str) -> bool:
     if len(s) < 20 or not is_printable(s):
         return False
-    keywords = ['function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do', 'repeat', 'until']
+    keywords = ['function', 'local', 'end', 'return', 'if', 'then', 'else', 'while', 'for', 'do']
     count = sum(1 for kw in keywords if kw in s)
     return count >= 2
+
 
 def get_string_table_offset(source: str) -> int:
     patterns = [
@@ -274,6 +315,7 @@ def get_string_table_offset(source: str) -> int:
                         return int(val)
     return 0
 
+
 class StringTableDecoder:
     def __init__(self, source: str):
         self.source = source
@@ -283,39 +325,30 @@ class StringTableDecoder:
         self.ok = False
         self.raw_match = None
         self.alphabet_renamed = False
-        self._decode()
 
     def _decode(self):
         raw, match = extract_strings_enhanced(self.source)
         if not raw:
             return
         self.raw_match = match
-
         ops = extract_shuffle_ops(self.source)
         if ops:
             raw = apply_shuffle(raw, ops)
-
         self.alphabet = extract_alphabet_enhanced(self.source)
-
         if self.alphabet == "RENAMED":
             self.alphabet_renamed = True
             self.alphabet = None
-
         alphabet_to_try = self.alphabet if self.alphabet else STD_ALPHABET
-
         decoded = []
         for s in raw:
             if not s:
                 decoded.append('')
                 continue
-
             s = decode_unicode_escapes(s)
             s = decode_hex_escapes(s)
             s = decode_octal_escapes(s)
-
             decoded_str = None
-
-            if len(s) >= 4 and re.match(r'^[A-Za-z0-9+/=]+$', s):
+            if len(s) > 4:
                 try:
                     b = custom_b64_decode(s, alphabet_to_try)
                     if b:
@@ -327,22 +360,19 @@ class StringTableDecoder:
                             pass
                         if decoded_str is None:
                             try:
-                                text = b.decode('latin-1', errors='replace')
+                                text = b.decode('latin-1')
                                 if is_lua_source(text):
                                     decoded_str = text
                             except Exception:
                                 pass
                 except Exception:
                     pass
-
             if decoded_str is None:
-                if len(s) >= 5 and is_printable(s) and not s.startswith('local'):
+                if len(s) >= 5 and is_printable(s) and not s.startswith('\\'):
                     decoded_str = s
                 else:
                     decoded_str = ''
-
             decoded.append(decoded_str)
-
         self.strings = decoded
         self.offset = get_string_table_offset(self.source)
         self.ok = len([s for s in self.strings if s]) > 0
@@ -351,8 +381,7 @@ class StringTableDecoder:
         for s in self.strings:
             if is_lua_source(s):
                 return s
-
-        code_keywords = {'function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do', 'repeat', 'until'}
+        code_keywords = {'function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while'}
         fragments = []
         for s in self.strings:
             if not s or len(s) < 5:
@@ -360,10 +389,8 @@ class StringTableDecoder:
             if is_printable(s) and any(kw in s for kw in code_keywords):
                 if re.search(r'\s', s) or '(' in s or ')' in s or ',' in s or '\n' in s or '=' in s:
                     fragments.append(s)
-
         if fragments:
             result = '\n'.join(fragments)
             if len(result) > 50:
                 return result
-
         return ''
