@@ -1,17 +1,23 @@
-local function decode_octal(s)
+local function decode_decimal(s)
     local result = {}
     local i = 1
     while i <= #s do
-        if s:sub(i, i) == '\\' and i + 1 <= #s then
-            local octal = ''
+        if s:sub(i, i) == '\\' and i + 1 <= #s and s:sub(i + 1, i + 1):match('[0-9]') then
+            local digits = ''
             local j = i + 1
-            while j <= #s and #octal < 3 and s:sub(j, j):match('[0-7]') do
-                octal = octal .. s:sub(j, j)
+            while j <= #s and #digits < 3 and s:sub(j, j):match('[0-9]') do
+                digits = digits .. s:sub(j, j)
                 j = j + 1
             end
-            if #octal > 0 then
-                result[#result + 1] = string.char(tonumber(octal, 8))
-                i = j
+            if #digits > 0 then
+                local code = tonumber(digits)
+                if code and code >= 0 and code <= 255 then
+                    result[#result + 1] = string.char(code)
+                    i = j
+                else
+                    result[#result + 1] = s:sub(i, i)
+                    i = i + 1
+                end
             else
                 result[#result + 1] = s:sub(i, i)
                 i = i + 1
@@ -36,10 +42,13 @@ end
 
 local function extract_strings(source)
     local patterns = {
-        'local%s+EncStr%s*=%s*{([^}]+)}',
-        'local%s+R%s*=%s*{([^}]+)}',
-        'EncStr%s*=%s*{([^}]+)}',
-        'R%s*=%s*{([^}]+)}',
+        'local%s+EncStr%s*=%s*\{([^}]+)\}',
+        'local%s+R%s*=%s*\{([^}]+)\}',
+        'local%s+Y%s*=%s*\{([^}]+)\}',
+        'local%s+S%s*=%s*\{([^}]+)\}',
+        'EncStr%s*=%s*\{([^}]+)\}',
+        'R%s*=%s*\{([^}]+)\}',
+        'Y%s*=%s*\{([^}]+)\}',
     }
     for _, pattern in ipairs(patterns) do
         local start_pos, end_pos = source:find(pattern)
@@ -59,10 +68,12 @@ end
 
 local function extract_alphabet(source)
     local patterns = {
-        'local%s+N%s*=%s*{([^}]+)}',
-        'local%s+alphaMap%s*=%s*{([^}]+)}',
-        'N%s*=%s*{([^}]+)}',
-        'alphaMap%s*=%s*{([^}]+)}',
+        'local%s+N%s*=%s*\{([^}]+)\}',
+        'local%s+alphaMap%s*=%s*\{([^}]+)\}',
+        'local%s+aMap%s*=%s*\{([^}]+)\}',
+        'local%s+alphabet%s*=%s*\{([^}]+)\}',
+        'N%s*=%s*\{([^}]+)\}',
+        'alphaMap%s*=%s*\{([^}]+)\}',
     }
     for _, pattern in ipairs(patterns) do
         local start_pos, end_pos = source:find(pattern)
@@ -76,17 +87,17 @@ local function extract_alphabet(source)
                     chars[v + 1] = char
                 end
             end
-            -- Pattern: char = index (unquoted)
-            for char, idx in body:gmatch('([A-Za-z0-9+/?])%s*=%s*(%d+)') do
-                local v = tonumber(idx)
-                if v and v >= 0 and v <= 63 and not chars[v + 1] then
-                    chars[v + 1] = char
-                end
-            end
             -- Pattern: [index] = "char"
             for idx, char in body:gmatch('\[(%d+)%]%s*=%s*"([A-Za-z0-9+/?])"') do
                 local v = tonumber(idx)
                 if v and v >= 0 and v <= 63 then
+                    chars[v + 1] = char
+                end
+            end
+            -- Pattern: char = index (unquoted)
+            for char, idx in body:gmatch('([A-Za-z0-9+/?])%s*=%s*(%d+)') do
+                local v = tonumber(idx)
+                if v and v >= 0 and v <= 63 and not chars[v + 1] then
                     chars[v + 1] = char
                 end
             end
@@ -116,67 +127,8 @@ local function extract_alphabet(source)
     return nil
 end
 
--- Custom base64 decode: translate from custom alphabet to standard, then decode
-local function custom_b64_decode(s, alphabet)
-    if not alphabet or #alphabet ~= 64 then
-        return nil
-    end
-
-    local rev = {}
-    for i = 1, #alphabet do
-        rev[alphabet:sub(i, i)] = i - 1
-    end
-
-    -- Validate all characters
-    for i = 1, #s do
-        local c = s:sub(i, i)
-        if c ~= '=' and not rev[c] then
-            return nil
-        end
-    end
-
-    -- Translate to standard alphabet positions and decode manually
-    local std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    local bits = {}
-
-    for i = 1, #s do
-        local c = s:sub(i, i)
-        if c ~= '=' then
-            local val = rev[c]
-            if val then
-                -- Convert to 6-bit binary string
-                local bit_str = ''
-                for j = 5, 0, -1 do
-                    bit_str = bit_str .. (bit.band(bit.rshift(val, j), 1) == 1 and '1' or '0')
-                end
-                bits[#bits + 1] = bit_str
-            end
-        else
-            bits[#bits + 1] = '000000'
-        end
-    end
-
-    local all_bits = table.concat(bits)
-    local result = {}
-
-    for i = 1, #all_bits, 8 do
-        if i + 7 <= #all_bits then
-            local byte_str = all_bits:sub(i, i + 7)
-            -- Skip padding bytes (all zeros at the end)
-            if i + 7 < #all_bits or byte_str ~= '00000000' then
-                local byte_val = tonumber(byte_str, 2)
-                if byte_val and byte_val > 0 then
-                    result[#result + 1] = string.char(byte_val)
-                end
-            end
-        end
-    end
-
-    return table.concat(result)
-end
-
 -- Alternative base64 decode using string.char method (no bit library needed)
-local function custom_b64_decode_fallback(s, alphabet)
+local function custom_b64_decode(s, alphabet)
     if not alphabet or #alphabet ~= 64 then
         return nil
     end
@@ -273,15 +225,10 @@ local function deobfuscate(source)
     for _, s in ipairs(strings) do
         -- Decode escape sequences
         s = decode_unicode(s)
-        s = decode_octal(s)
+        s = decode_decimal(s)
 
         if alphabet and #s >= 4 then
-            -- Try both decode methods
             local decoded = custom_b64_decode(s, alphabet)
-            if not decoded then
-                decoded = custom_b64_decode_fallback(s, alphabet)
-            end
-
             if decoded and is_lua_source(decoded) then
                 decoded_strings[#decoded_strings + 1] = decoded
             else
@@ -360,5 +307,4 @@ if output_file then
 else
     print(result)
 end
-
 os.exit(0)
