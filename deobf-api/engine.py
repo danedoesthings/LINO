@@ -2,19 +2,81 @@ import time
 import uuid
 import threading
 import logging
+import sys
 
 from anti_tamper import remove_anti_tamper
 from beautifier import beautify
 from var_renamer import VarRenamer
 from string_decoder import StringTableDecoder, is_lua_source
-from vm_deobfuscator import run_vm_deobfuscator
-from prometheus_decoder import PrometheusDecoder
-from unveilr import run_unveilr
-from vm_devirtualizer import VMDevirtualizer
-from wearedevs_decoder import WeAreDevsDecoder
-from prometheus_vm import PrometheusVMDevirtualizer, is_prometheus_vm
 
 log = logging.getLogger(__name__)
+
+# === Graceful imports - provide stubs if modules are missing ===
+
+try:
+    from vm_deobfuscator import run_vm_deobfuscator
+except ImportError as e:
+    log.warning(f"vm_deobfuscator not available: {e}")
+    def run_vm_deobfuscator(source_code, timeout=60):
+        return ""
+
+try:
+    from prometheus_decoder import PrometheusDecoder
+except ImportError as e:
+    log.warning(f"prometheus_decoder not available: {e}")
+    class PrometheusDecoder:
+        def __init__(self, source, decoder):
+            self.source = source
+            self.decoder = decoder
+        def decode(self):
+            return None
+
+try:
+    from unveilr import run_unveilr
+except ImportError as e:
+    log.warning(f"unveilr not available: {e}")
+    def run_unveilr(source_code, timeout=120):
+        return ""
+
+try:
+    from vm_devirtualizer import VMDevirtualizer
+except ImportError as e:
+    log.warning(f"vm_devirtualizer not available: {e}")
+    class VMDevirtualizer:
+        def __init__(self, source, decoder=None):
+            self.source = source
+            self.decoder = decoder
+        def devirtualize(self):
+            return None
+
+try:
+    from wearedevs_decoder import WeAreDevsDecoder
+except ImportError as e:
+    log.warning(f"wearedevs_decoder not available: {e}")
+    class WeAreDevsDecoder:
+        def __init__(self, source):
+            self.source = source
+        def decode(self):
+            return None
+
+try:
+    from prometheus_vm import PrometheusVMDevirtualizer, is_prometheus_vm
+except ImportError as e:
+    log.warning(f"prometheus_vm not available: {e}")
+    def is_prometheus_vm(source):
+        return False
+    class PrometheusVMDevirtualizer:
+        def __init__(self, source):
+            self.source = source
+        def devirtualize(self):
+            return None
+
+# Also handle missing run_prometheus_deobfuscator from vm_deobfuscator
+try:
+    from vm_deobfuscator import run_prometheus_deobfuscator
+except ImportError:
+    def run_prometheus_deobfuscator(source_code, timeout=120):
+        return ""
 
 
 class DeobfEngine:
@@ -187,15 +249,13 @@ class DeobfEngine:
         except Exception as e:
             trace.append({'stage': 'vm_devirtualizer', 'success': False, 'message': f'Error: {str(e)[:200]}'})
 
-        # === NEW Stage 5.75: Prometheus VM Devirtualizer ===
-        # This handles heavy Prometheus/WeAreDevs VM state machines
+        # Stage 5.75: Prometheus VM Devirtualizer
         if is_prometheus_vm(source):
             trace.append({'stage': 'prometheus_vm', 'success': True, 'message': 'Attempting Prometheus VM devirtualizer'})
             try:
                 prom_vm = PrometheusVMDevirtualizer(source)
                 result = prom_vm.devirtualize()
                 if result and len(result) > 10:
-                    # Check if result is valid Lua or at least readable code
                     lua_kws = ['function', 'local', 'end', 'return', 'if', 'then', 'else', 'while', 'for', 'do']
                     score = sum(1 for kw in lua_kws if kw in result)
                     if score >= 2 or len(result) > 500:
