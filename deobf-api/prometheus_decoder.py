@@ -1,8 +1,3 @@
-"""
-Prometheus-specific decoder for advanced obfuscation patterns.
-Handles shuffle operations, getter substitution, and fragment assembly.
-"""
-
 import re
 import json
 from typing import Optional, List
@@ -16,8 +11,8 @@ class PrometheusDecoder:
     def __init__(self, source: str, decoder):
         self.source = source
         self.decoder = decoder
-        self.strings = list(decoder.strings)
-        self.offset = decoder.offset
+        self.strings = list(decoder.strings) if decoder else []
+        self.offset = decoder.offset if decoder else 0
         self.getter_name = None
         self.table_name = None
         self.shuffle_pairs = []
@@ -179,12 +174,10 @@ class PrometheusDecoder:
             return m.group(0)
 
         result = pattern.sub(repl, self.source)
-
         if result != self.source:
             result = self._strip_setup_block(result)
             if self._looks_like_lua_source(result):
                 return result
-
         return None
 
     def _strip_setup_block(self, source: str) -> str:
@@ -192,17 +185,13 @@ class PrometheusDecoder:
         # Remove string table definitions
         source = re.sub(r'local\s+\w+\s*=\s*\{(?:"[^"]*",?\s*)+\}\s*', '', source, count=1)
         source = re.sub(r'local\s+\w+\s*=\s*\{(?:\s*(?:\w+|\["."\])\s*=\s*\d+\s*,?\s*)+\}\s*', '', source, count=1)
-
         # Remove ipairs shuffle loops
         source = re.sub(r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{[^}]+\}\s*\)\s*do.*?end\s*', '', source, count=1, flags=re.DOTALL)
-
         # Remove getter function definition
         if self.getter_name:
             g = re.escape(self.getter_name)
             source = re.sub(rf'local\s+function\s+{g}\s*\([^)]*\).*?end\s*', '', source, count=1, flags=re.DOTALL)
-
         # Clean up
         source = re.sub(r'^\s*\n+', '', source)
         source = re.sub(r'\n{3,}', '\n\n', source)
-
         return source.strip()
