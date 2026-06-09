@@ -1,17 +1,23 @@
-local function decode_octal(s)
+local function decode_decimal(s)
     local result = {}
     local i = 1
     while i <= #s do
-        if s:sub(i, i) == '\\' and i + 1 <= #s then
-            local octal = ''
+        if s:sub(i, i) == '\\' and i + 1 <= #s and s:sub(i + 1, i + 1):match('[0-9]') then
+            local digits = ''
             local j = i + 1
-            while j <= #s and #octal < 3 and s:sub(j, j):match('[0-7]') do
-                octal = octal .. s:sub(j, j)
+            while j <= #s and #digits < 3 and s:sub(j, j):match('[0-9]') do
+                digits = digits .. s:sub(j, j)
                 j = j + 1
             end
-            if #octal > 0 then
-                result[#result + 1] = string.char(tonumber(octal, 8))
-                i = j
+            if #digits > 0 then
+                local code = tonumber(digits)
+                if code and code >= 0 and code <= 255 then
+                    result[#result + 1] = string.char(code)
+                    i = j
+                else
+                    result[#result + 1] = s:sub(i, i)
+                    i = i + 1
+                end
             else
                 result[#result + 1] = s:sub(i, i)
                 i = i + 1
@@ -32,16 +38,18 @@ local function decode_string(s)
         end
         return '\\u' .. hex
     end)
-    s = decode_octal(s)
+    s = decode_decimal(s)
     return s
 end
 
 local function extract_alphabet(source)
     local patterns = {
-        'local%s+N%s*=%s*{([^}]+)}',
-        'local%s+alphaMap%s*=%s*{([^}]+)}',
-        'N%s*=%s*{([^}]+)}',
-        'alphaMap%s*=%s*{([^}]+)}',
+        'local%s+N%s*=%s*\{([^}]+)\}',
+        'local%s+alphaMap%s*=%s*\{([^}]+)\}',
+        'local%s+aMap%s*=%s*\{([^}]+)\}',
+        'local%s+alphabet%s*=%s*\{([^}]+)\}',
+        'N%s*=%s*\{([^}]+)\}',
+        'alphaMap%s*=%s*\{([^}]+)\}',
     }
     for _, pattern in ipairs(patterns) do
         local start_pos, end_pos = source:find(pattern)
@@ -50,6 +58,13 @@ local function extract_alphabet(source)
             local chars = {}
             -- Pattern: "char" = index
             for char, idx in body:gmatch('"([A-Za-z0-9+/?])"%s*=%s*(%d+)') do
+                local v = tonumber(idx)
+                if v and v >= 0 and v <= 63 then
+                    chars[v + 1] = char
+                end
+            end
+            -- Pattern: [index] = "char"
+            for idx, char in body:gmatch('\[(%d+)%]%s*=%s*"([A-Za-z0-9+/?])"') do
                 local v = tonumber(idx)
                 if v and v >= 0 and v <= 63 then
                     chars[v + 1] = char
@@ -173,10 +188,13 @@ end
 
 local function extract_strings(source)
     local patterns = {
-        'local%s+EncStr%s*=%s*{([^}]+)}',
-        'local%s+R%s*=%s*{([^}]+)}',
-        'EncStr%s*=%s*{([^}]+)}',
-        'R%s*=%s*{([^}]+)}',
+        'local%s+EncStr%s*=%s*\{([^}]+)\}',
+        'local%s+R%s*=%s*\{([^}]+)\}',
+        'local%s+Y%s*=%s*\{([^}]+)\}',
+        'local%s+S%s*=%s*\{([^}]+)\}',
+        'EncStr%s*=%s*\{([^}]+)\}',
+        'R%s*=%s*\{([^}]+)\}',
+        'Y%s*=%s*\{([^}]+)\}',
     }
     for _, pattern in ipairs(patterns) do
         local start_pos, end_pos = source:find(pattern)
@@ -196,11 +214,11 @@ end
 
 local function extract_shuffle_ops(source)
     local ops = {}
-    local pattern = 'ipairs%s*\(\s*{([^}]+)}%s*\)'
+    local pattern = 'ipairs%s*\(\s*\{([^}]+)\}\s*\)'
     local start_pos, end_pos = source:find(pattern)
     if start_pos then
         local body = source:sub(start_pos, end_pos)
-        for pair in body:gmatch('{(\d+),%s*(\d+)}') do
+        for pair in body:gmatch('\{(%d+),%s*(%d+)\}') do
             local a = tonumber(pair:match('(%d+)'))
             local b = tonumber(pair:match('(%d+)'))
             if a and b and a < b then
@@ -308,7 +326,6 @@ if not file then
     io.stderr:write("Cannot open input file: " .. input_file .. "\n")
     os.exit(1)
 end
-
 local source = file:read("*a")
 file:close()
 
@@ -330,5 +347,4 @@ if output_file then
 else
     print(result)
 end
-
 os.exit(0)
