@@ -14,7 +14,6 @@ from prometheus_decoder import PrometheusDecoder
 
 log = logging.getLogger(__name__)
 
-
 class DeobfEngine:
     def __init__(self):
         pass
@@ -34,9 +33,9 @@ class DeobfEngine:
 
         if not source or len(source) < 10:
             trace.append({'stage': 'fallback', 'success': False, 'message': 'Source empty after anti-tamper'})
-            return '', 'failed', 'Unable to deobfuscate - source too short or empty after anti-tamper removal', trace
+            return '', 'failed', 'Unable to deobfuscate - source too short or empty after anti-tamper', trace
 
-        # Stage 2: Try string table decoder (enhanced for WeAreDevs)
+        # Stage 2: String table decoder (enhanced for WeAreDevs)
         decoder = None
         try:
             decoder = StringTableDecoder(source)
@@ -70,11 +69,11 @@ class DeobfEngine:
                                     trace.append({'stage': 'rename', 'success': True, 'message': 'Variables renamed'})
                                 except Exception as e:
                                     trace.append({'stage': 'rename', 'success': False, 'message': f'Rename failed: {e}'})
-                                trace.append({'stage': 'string_decoder', 'success': True, 'message': 'String table decoded via Prometheus assembly'})
-                                return payload, 'string_decoder', 'Deobfuscated via string table extraction + assembly', trace
+                                trace.append({'stage': 'string_decoder', 'success': True, 'message': 'Assembled from fragments'})
+                                return payload, 'string_decoder', 'Deobfuscated via string table assembly', trace
                         except Exception as e:
                             trace.append({'stage': 'prometheus_assembly', 'success': False, 'message': f'Assembly failed: {e}'})
-                    trace.append({'stage': 'string_decoder', 'success': False, 'message': 'Decoded strings did not contain valid Lua'})
+                    trace.append({'stage': 'string_decoder', 'success': False, 'message': 'Decoded strings but no valid Lua source'})
             else:
                 trace.append({'stage': 'string_decoder', 'success': False, 'message': 'No string table found'})
         except Exception as e:
@@ -97,7 +96,7 @@ class DeobfEngine:
                 trace.append({'stage': 'vm_deobfuscator', 'success': True, 'message': 'VM deobfuscator succeeded'})
                 return result, 'vm_deobfuscator', 'Deobfuscated with VM deobfuscator', trace
             else:
-                trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': 'VM deobfuscator returned empty or invalid'})
+                trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': 'VM deobfuscator returned empty/invalid'})
         except Exception as e:
             trace.append({'stage': 'vm_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
 
@@ -118,7 +117,7 @@ class DeobfEngine:
                 trace.append({'stage': 'prometheus_deobfuscator', 'success': True, 'message': 'Prometheus deobfuscator succeeded'})
                 return result, 'prometheus_deobfuscator', 'Deobfuscated with Prometheus deobfuscator', trace
             else:
-                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Prometheus returned empty or invalid'})
+                trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': 'Prometheus returned empty/invalid'})
         except Exception as e:
             trace.append({'stage': 'prometheus_deobfuscator', 'success': False, 'message': f'Error: {str(e)[:200]}'})
 
@@ -139,7 +138,7 @@ class DeobfEngine:
                 trace.append({'stage': 'unveilr', 'success': True, 'message': 'Unveilr succeeded'})
                 return result, 'unveilr', 'Deobfuscated with Unveilr', trace
             else:
-                trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty or invalid'})
+                trace.append({'stage': 'unveilr', 'success': False, 'message': 'Unveilr returned empty/invalid'})
         except Exception as e:
             trace.append({'stage': 'unveilr', 'success': False, 'message': f'Error: {str(e)[:200]}'})
 
@@ -161,7 +160,7 @@ class DeobfEngine:
                 trace.append({'stage': 'vm_devirtualizer', 'success': True, 'message': 'VM devirtualizer succeeded'})
                 return result, 'vm_devirtualizer', 'Deobfuscated with VM devirtualizer', trace
             else:
-                trace.append({'stage': 'vm_devirtualizer', 'success': False, 'message': 'VM devirtualizer returned empty or invalid'})
+                trace.append({'stage': 'vm_devirtualizer', 'success': False, 'message': 'VM devirtualizer returned empty/invalid'})
         except Exception as e:
             trace.append({'stage': 'vm_devirtualizer', 'success': False, 'message': f'Error: {str(e)[:200]}'})
 
@@ -190,11 +189,9 @@ class DeobfEngine:
         trace.append({'stage': 'fallback', 'success': False, 'message': 'All deobfuscation methods failed'})
         return '', 'failed', 'Unable to deobfuscate - no recognized pattern found', trace
 
-
 # In-memory job store for async processing
 job_store = {}
 job_lock = threading.Lock()
-
 
 def submit_job(source):
     job_id = str(uuid.uuid4())
@@ -229,7 +226,6 @@ def submit_job(source):
     t = threading.Thread(target=run, daemon=True)
     t.start()
     return job_id
-
 
 def get_job(job_id):
     with job_lock:
