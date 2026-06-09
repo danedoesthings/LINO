@@ -10,6 +10,7 @@ from var_renamer import VarRenamer
 from run_deobfuscator import run_vm_deobfuscator, run_prometheus_deobfuscator
 from run_unveilr import run_unveilr
 from vm_devirtualizer import VMDevirtualizer
+from prometheus_decoder import PrometheusDecoder
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class DeobfEngine:
             return '', 'failed', 'Unable to deobfuscate - source too short or empty after anti-tamper removal', trace
 
         # Stage 2: Try string table decoder (enhanced for WeAreDevs)
+        decoder = None
         try:
             decoder = StringTableDecoder(source)
             if decoder.ok:
@@ -53,25 +55,28 @@ class DeobfEngine:
                     trace.append({'stage': 'string_decoder', 'success': True, 'message': 'String table decoded'})
                     return result, 'string_decoder', 'Deobfuscated via string table extraction', trace
                 else:
-                    # WeAreDevs: try to assemble fragments from all decoded strings
-                    fragments = [s for s in decoder.strings if s and len(s) > 5]
-                    if fragments:
-                        assembled = '\n'.join(fragments)
-                        if is_lua_source(assembled) and len(assembled) > 20:
-                            try:
-                                assembled = beautify(assembled)
-                            except Exception:
-                                pass
-                            try:
-                                assembled = renamer.rename(assembled)
-                                trace.append({'stage': 'rename', 'success': True, 'message': 'Variables renamed'})
-                            except Exception as e:
-                                trace.append({'stage': 'rename', 'success': False, 'message': f'Rename failed: {e}'})
-                            trace.append({'stage': 'string_decoder', 'success': True, 'message': 'Assembled from string fragments'})
-                            return assembled, 'string_decoder', 'Deobfuscated via fragment assembly', trace
-                    trace.append({'stage': 'string_decoder', 'success': False, 'message': 'String table found but no valid Lua source'})
+                    # WeAreDevs: try Prometheus-style assembly even if no single full source
+                    if decoder.strings and len(decoder.strings) >= 4:
+                        try:
+                            prom = PrometheusDecoder(source, decoder)
+                            payload = prom.decode()
+                            if payload and len(payload) > 10 and is_lua_source(payload):
+                                try:
+                                    payload = beautify(payload)
+                                except Exception:
+                                    pass
+                                try:
+                                    payload = renamer.rename(payload)
+                                    trace.append({'stage': 'rename', 'success': True, 'message': 'Variables renamed'})
+                                except Exception as e:
+                                    trace.append({'stage': 'rename', 'success': False, 'message': f'Rename failed: {e}'})
+                                trace.append({'stage': 'string_decoder', 'success': True, 'message': 'String table decoded via Prometheus assembly'})
+                                return payload, 'string_decoder', 'Deobfuscated via string table extraction + assembly', trace
+                        except Exception as e:
+                            trace.append({'stage': 'prometheus_assembly', 'success': False, 'message': f'Assembly failed: {e}'})
+                    trace.append({'stage': 'string_decoder', 'success': False, 'message': 'Decoded strings did not contain valid Lua'})
             else:
-                trace.append({'stage': 'string_decoder', 'success': False, 'message': 'String table not found or empty'})
+                trace.append({'stage': 'string_decoder', 'success': False, 'message': 'No string table found'})
         except Exception as e:
             trace.append({'stage': 'string_decoder', 'success': False, 'message': f'Error: {str(e)[:200]}'})
 
@@ -141,7 +146,7 @@ class DeobfEngine:
         # Stage 5.5: Aggressive VM devirtualizer (WeAreDevs heavy VM)
         trace.append({'stage': 'vm_devirtualizer', 'success': True, 'message': 'Attempting VM devirtualizer'})
         try:
-            dev = VMDevirtualizer(source, decoder=StringTableDecoder(source))
+            dev = VMDevirtualizer(source, decoder=decoder if decoder else None)
             result = dev.devirtualize()
             if result and len(result) > 10 and is_lua_source(result):
                 try:
@@ -162,8 +167,7 @@ class DeobfEngine:
 
         # Stage 6: Try to dump raw strings as fallback
         try:
-            decoder = StringTableDecoder(source)
-            if decoder.strings:
+            if decoder and decoder.strings:
                 offset = getattr(decoder, 'offset', 0)
                 alphabet = decoder.alphabet or 'not found'
                 result_lines = [
