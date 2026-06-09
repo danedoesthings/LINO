@@ -1,7 +1,10 @@
 import re
 from typing import Optional, Dict, List
 
+
 class VMDevirtualizer:
+    """Devirtualizes VM-based obfuscation by extracting and linearizing VM blocks."""
+
     def __init__(self, source: str, decoder=None):
         self.source = source
         self.decoder = decoder
@@ -12,6 +15,7 @@ class VMDevirtualizer:
         self.entry_block = None
 
     def devirtualize(self) -> Optional[str]:
+        """Try multiple strategies to devirtualize VM code."""
         result = self._extract_and_linearize()
         if result and len(result) > 10:
             return result
@@ -21,6 +25,7 @@ class VMDevirtualizer:
         return self._extract_visible_payload()
 
     def _extract_and_linearize(self) -> Optional[str]:
+        """Extract VM blocks and linearize them into executable code."""
         # Pattern 1: return (function(pos_var, ...) ... end)(start_pos)
         vm_match = re.search(
             r'return\s*\(\s*function\s*\(\s*(\w+)\s*(?:,\s*\w+)*\s*\)(.*?)end\s*\)\s*\(\s*(\d+)\s*\)',
@@ -56,7 +61,7 @@ class VMDevirtualizer:
             except (ValueError, IndexError):
                 self.start_pos = 0
 
-        # Extract individual VM blocks
+        # Extract individual VM blocks (if/elseif chains)
         block_pattern = re.compile(
             rf'if\s+{re.escape(self.pos_var)}\s*==\s*(\d+)\s+then\s*(.*?)(?=elseif\s+{re.escape(self.pos_var)}\s*==|else\b|end\s*$)',
             re.DOTALL
@@ -89,6 +94,7 @@ class VMDevirtualizer:
         return '\n'.join(lines) if lines else None
 
     def _order_by_execution_flow(self, entry_id: int, all_ids: List[int]) -> List[int]:
+        """Order blocks by following execution flow through pos_var assignments."""
         ordered = []
         visited = set()
         current = entry_id
@@ -108,6 +114,7 @@ class VMDevirtualizer:
         return ordered
 
     def _is_dead_block(self, code: str) -> bool:
+        """Check if a block is dead code (anti-tamper, infinite loops)."""
         dead = [
             r'while\s+true\s+do\s*end',
             r'while\s+true\s+do\s+\w+\s*=\s*\w+\s*;?\s*\w+\s*=\s*\w+\s*;?\s*\w+\(\)\s*;?\s*end',
@@ -116,6 +123,7 @@ class VMDevirtualizer:
         return any(re.search(p, code) for p in dead)
 
     def _try_trace_execution(self) -> Optional[str]:
+        """Trace execution through a dispatcher-style VM."""
         dispatcher_match = re.search(
             r'while\s+(\w+)\s+do\s+if\s+\1\s*<\s*(-?\d+)\s+then',
             self.source, re.DOTALL
@@ -164,6 +172,7 @@ class VMDevirtualizer:
         return '\n'.join(trace_lines) if trace_lines else None
 
     def _extract_visible_payload(self) -> Optional[str]:
+        """Extract any visible payload from loadstring/load calls."""
         patterns = [
             r'print\s*\(\s*"([^"]*)"s*\)',
             r'loadstring\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)',
