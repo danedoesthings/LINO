@@ -67,7 +67,6 @@ def eval_arithmetic(expr: str):
         return None
 
 def _balance_braces(source: str, start_idx: int) -> int:
-    """Return index of the closing brace that matches the opening brace at start_idx."""
     depth = 1
     i = start_idx + 1
     while i < len(source) and depth > 0:
@@ -79,7 +78,7 @@ def _balance_braces(source: str, start_idx: int) -> int:
     return i if depth == 0 else -1
 
 def extract_alphabet_enhanced(source: str):
-    # Strategy 1: 64-char string literal (standard or custom base64 alphabet)
+    # Strategy 1: 64-char string literal
     for m in re.finditer(r'["\']([A-Za-z0-9+/]{64})["\']', source):
         candidate = m.group(1)
         if len(set(candidate)) == 64:
@@ -88,60 +87,52 @@ def extract_alphabet_enhanced(source: str):
     # Strategy 2: Named mapping tables
     chars = [''] * 64
     found = False
-    named_patterns = [
-        r'local\s+(?:N|alphaMap|aMap|alphabet|charMap|map)\s*=\s*\{',
-        r'\b(?:N|alphaMap|aMap|alphabet|charMap|map)\s*=\s*\{',
-    ]
-    for pat in named_patterns:
-        for m in re.finditer(pat, source):
-            end = _balance_braces(source, m.end() - 1)
-            if end == -1:
-                continue
-            body = source[m.end():end - 1]
-            for ch, idx in re.findall(r'["\']([A-Za-z0-9+/?])["\']\s*=\s*(\d+)', body):
-                v = int(idx)
-                if 0 <= v < 64:
-                    chars[v] = ch
-                    found = True
-            for idx, ch in re.findall(r'\[(\d+)\]\s*=\s*["\']([A-Za-z0-9+/?])["\']', body):
-                v = int(idx)
-                if 0 <= v < 64:
-                    chars[v] = ch
-                    found = True
-            for ch, idx in re.findall(r'([A-Za-z0-9+/?])\s*=\s*(\d+)', body):
-                if len(ch) == 1:
-                    v = int(idx)
-                    if 0 <= v < 64:
-                        chars[v] = ch
-                        found = True
-            if found:
-                break
-        if found:
-            break
 
-    # Strategy 3: Generic table with 10+ mappings
-    if not found:
-        for m in re.finditer(r'(?:local\s+)?\w+\s*=\s*\{', source):
-            end = _balance_braces(source, m.end() - 1)
-            if end == -1:
-                continue
-            body = source[m.end():end - 1]
-            mappings = re.findall(r'["\']([A-Za-z0-9+/?])["\']\s*=\s*(\d+)', body)
-            if len(mappings) >= 10:
-                for ch, idx in mappings:
-                    v = int(idx)
-                    if 0 <= v < 64:
-                        chars[v] = ch
-                        found = True
-                break
-            mappings2 = re.findall(r'\[(\d+)\]\s*=\s*["\']([A-Za-z0-9+/?])["\']', body)
-            if len(mappings2) >= 10:
-                for idx, ch in mappings2:
-                    v = int(idx)
-                    if 0 <= v < 64:
-                        chars[v] = ch
-                        found = True
-                break
+    for m in re.finditer(r'(?:local\s+)?(?:N|alphaMap|aMap|alphabet|charMap|map|\w+)\s*=\s*\{', source):
+        end = _balance_braces(source, m.end() - 1)
+        if end == -1:
+            continue
+        body = source[m.end():end - 1]
+
+        valid_entries = 0
+        temp_chars = [''] * 64
+
+        # Pattern: "char" = index
+        for ch, idx in re.findall(r'["\']([A-Za-z0-9+/?])["\']\s*=\s*([+-]?[\d()+\-*/]+)', body):
+            v = eval_arithmetic(idx)
+            if v is not None and 0 <= v < 64:
+                temp_chars[v] = ch
+                valid_entries += 1
+
+        # Pattern: [index] = "char"
+        for idx, ch in re.findall(r'\[([+-]?[\d()+\-*/]+)\]\s*=\s*["\']([A-Za-z0-9+/?])["\']', body):
+            v = eval_arithmetic(idx)
+            if v is not None and 0 <= v < 64:
+                temp_chars[v] = ch
+                valid_entries += 1
+
+        # Pattern: char = index (unquoted, single char)
+        for ch, idx in re.findall(r'\b([A-Za-z0-9+/?])\s*=\s*([+-]?[\d()+\-*/]+)', body):
+            v = eval_arithmetic(idx)
+            if v is not None and 0 <= v < 64:
+                if not temp_chars[v]:
+                    temp_chars[v] = ch
+                    valid_entries += 1
+
+        # Detect renamed alphabet (multi-char keys)
+        multi_char_entries = 0
+        for key, idx in re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([+-]?[\d()+\-*/]+)', body):
+            if len(key) > 1:
+                v = eval_arithmetic(idx)
+                if v is not None and 0 <= v < 64:
+                    multi_char_entries += 1
+
+        if valid_entries >= 10:
+            chars = temp_chars
+            found = True
+            break
+        elif multi_char_entries >= 10:
+            return "RENAMED"
 
     if found:
         used = set(c for c in chars if c)
@@ -157,8 +148,7 @@ def extract_alphabet_enhanced(source: str):
     return None
 
 def extract_strings_enhanced(source: str):
-    # Priority 1: Known WeAreDevs names with balanced braces
-    known_names = ['EncStr', 'R', 'Y', 'S', 'T', 'Str', 'Strings', 'Data', 'Pool']
+    known_names = ['EncStr', 'R', 'Y', 'S', 'T', 'Str', 'Strings', 'Data', 'Pool', 'E']
     for name in known_names:
         for prefix in [rf'local\s+{re.escape(name)}', rf'\b{re.escape(name)}']:
             pat = re.compile(rf'{prefix}\s*=\s*(\{{)', re.DOTALL)
@@ -172,7 +162,6 @@ def extract_strings_enhanced(source: str):
                 if strings and len(strings) >= 2:
                     return strings, source[m.start():end]
 
-    # Priority 2: Generic large table with string literals
     best = None
     best_score = 0
     best_match = None
@@ -205,13 +194,13 @@ def extract_shuffle_ops(source: str):
     ops = []
     patterns = [
         r'ipairs\s*\(\s*\{([^}]+)\}\s*\)',
-        r'for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}\s*\)',
+        r'for\s+\w+\s*,\s+\w+\s+in\s+ipairs\s*\(\s*\{([^}]+)\}\s*\)',
     ]
     for pat in patterns:
         m = re.search(pat, source)
         if m:
             body = m.group(1)
-            for pair in re.finditer(r'\{(\d+)\s*,\s*(\d+)\}', body):
+            for pair in re.finditer(r'\{([+-]?\d+)\s*,\s*([+-]?\d+)\}', body):
                 try:
                     a, b = int(pair.group(1)), int(pair.group(2))
                     if a < b:
@@ -266,7 +255,6 @@ def is_lua_source(s: str) -> bool:
     return count >= 2
 
 def get_string_table_offset(source: str) -> int:
-    # Only accept small, sane offsets (WeAreDevs offsets are usually 0-100)
     patterns = [
         r'local\s+function\s+\w+\s*\(\s*\w+\s*\)\s*return\s+\w+\s*\[\s*\w+\s*\+\s*(\d+)\s*\]',
         r'\breturn\s+\w+\s*\[\s*\w+\s*\+\s*(\d+)\s*\]',
@@ -294,6 +282,7 @@ class StringTableDecoder:
         self.offset = 0
         self.ok = False
         self.raw_match = None
+        self.alphabet_renamed = False
         self._decode()
 
     def _decode(self):
@@ -307,7 +296,11 @@ class StringTableDecoder:
             raw = apply_shuffle(raw, ops)
 
         self.alphabet = extract_alphabet_enhanced(self.source)
-        # Fallback: if no custom alphabet found, try standard base64
+
+        if self.alphabet == "RENAMED":
+            self.alphabet_renamed = True
+            self.alphabet = None
+
         alphabet_to_try = self.alphabet if self.alphabet else STD_ALPHABET
 
         decoded = []
@@ -322,7 +315,6 @@ class StringTableDecoder:
 
             decoded_str = None
 
-            # Attempt base64 decode on alphanumeric strings
             if len(s) >= 4 and re.match(r'^[A-Za-z0-9+/=]+$', s):
                 try:
                     b = custom_b64_decode(s, alphabet_to_try)
@@ -343,7 +335,6 @@ class StringTableDecoder:
                 except Exception:
                     pass
 
-            # Keep printable non-decoded strings as fragments
             if decoded_str is None:
                 if len(s) >= 5 and is_printable(s) and not s.startswith('local'):
                     decoded_str = s
@@ -357,12 +348,10 @@ class StringTableDecoder:
         self.ok = len([s for s in self.strings if s]) > 0
 
     def get_source(self) -> str:
-        # Full Lua source in one string?
         for s in self.strings:
             if is_lua_source(s):
                 return s
 
-        # Assemble fragments
         code_keywords = {'function', 'local', 'return', 'print', 'if', 'then', 'else', 'end', 'while', 'for', 'do', 'repeat', 'until'}
         fragments = []
         for s in self.strings:
