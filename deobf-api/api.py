@@ -1,8 +1,3 @@
-"""
-Flask API for the LINO Lua Deobfuscator.
-Provides endpoints for direct and async deobfuscation.
-"""
-
 import os
 import base64
 import logging
@@ -25,7 +20,7 @@ app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 @app.route('/health')
 def health():
     """Health check endpoint."""
-    return jsonify({'ok': True, 'version': '2.0.0'})
+    return jsonify({'ok': True, 'version': '2.1.0'})
 
 
 @app.route('/deobf/direct', methods=['POST', 'OPTIONS'])
